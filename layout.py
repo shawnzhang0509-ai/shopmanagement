@@ -1,4 +1,9 @@
-import pygame 
+try:
+    import pygame
+except ModuleNotFoundError:
+    print("未找到 pygame。Python 3.14 请安装: python -m pip install pygame-ce")
+    raise SystemExit(1) from None
+
 import sys
 import math
 import json
@@ -256,7 +261,7 @@ def load_furniture_templates(json_path):
         roi = item.get("roi", 0)
         points = shape_to_points(item)
         if points:
-            templates.append(Furniture(item.get("id", "unnamed"), points, roi))
+            templates.append(Furniture(item.get("id", "unnamed"), roi, points))
     return templates
 
 
@@ -710,7 +715,7 @@ def main():
                             # 添加按钮逻辑
                             if add_furniture_btn_rect and add_furniture_btn_rect.collidepoint(mx, my):
                                 tpl = furniture_templates[selected_template_index]
-                                new_furn = Furniture(tpl.name, tpl.points, tpl.roi)
+                                new_furn = Furniture(tpl.name, tpl.roi, tpl.points)
                                 new_furn.x = offset_x + (SCREEN_WIDTH - LEFT_PANEL_WIDTH) / 2 / scale
                                 new_furn.y = offset_y + SCREEN_HEIGHT / 2 / scale
                                 placed_furnitures.append(new_furn)

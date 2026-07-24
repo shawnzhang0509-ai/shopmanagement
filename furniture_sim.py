@@ -1,4 +1,9 @@
-import pygame
+try:
+    import pygame
+except ModuleNotFoundError:
+    print("未找到 pygame。Python 3.14 请安装: python -m pip install pygame-ce")
+    raise SystemExit(1) from None
+
 import json
 import sys
 import tkinter as tk
