@@ -8,8 +8,13 @@ import json
 import math
 import os
 import sys
+import traceback
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
+
+# 无论从哪启动，都切换到脚本所在目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(SCRIPT_DIR)
 
 pygame.init()
 
@@ -156,7 +161,7 @@ class InputBox:
         pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=8)
         display = self.text if self.text else self.placeholder
         color = C_TEXT if self.text else C_MUTED
-        prefix = "🔍 " if not self.text else ""
+        prefix = "搜索 " if not self.text else ""
         surface.blit(FONT_SMALL.render(prefix + display, True, color), (self.rect.x + 10, self.rect.y + 9))
 
 
@@ -259,6 +264,8 @@ def check_collision(furniture, obstacles):
 
 
 def load_furniture_templates(json_path):
+    if not os.path.isfile(json_path):
+        raise FileNotFoundError(f"找不到 {json_path}，请确认在项目目录下运行")
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     templates = []
@@ -266,10 +273,12 @@ def load_furniture_templates(json_path):
         points = shape_to_points(item)
         if points:
             templates.append(Furniture(item.get("id", "unnamed"), item.get("roi", 0), points))
+    if not templates:
+        raise ValueError(f"{json_path} 中没有有效的家具模板")
     return templates
 
 
-furniture_templates = load_furniture_templates("furniture_templates.json")
+furniture_templates = []
 
 
 # ── 数据持久化 ──────────────────────────────────────────────
@@ -665,6 +674,13 @@ def main():
     global selected_collision, selected_furniture, dragging_furniture, selected_feature
     global placed_furnitures, selected_template_index, dragging_collision, collision_drag_offset
     global renaming_obstacle, input_text, search_text, search_box_active, mouse_pos
+    global furniture_templates
+
+    try:
+        furniture_templates = load_furniture_templates("furniture_templates.json")
+    except Exception as e:
+        messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
+        raise SystemExit(1) from e
 
     offset_x = -((SCREEN_WIDTH - SIDEBAR_WIDTH) / 2) / scale
     offset_y = -SCREEN_HEIGHT / 2 / scale
@@ -810,4 +826,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print("\n程序启动失败:")
+        traceback.print_exc()
+        try:
+            messagebox.showerror("启动失败", f"{exc}\n\n请运行 python check_env.py 检查环境")
+        except Exception:
+            pass
+        if sys.platform == "win32":
+            input("\n按 Enter 退出...")
+        raise SystemExit(1) from exc
