@@ -71,12 +71,16 @@ def main() -> int:
         try:
             import pygame
             pygame.init()
-            from ui_common import init_fonts
-            init_fonts()
-            ok("ui_common 加载成功")
+            import ui_common
+            if not hasattr(ui_common, "init_fonts"):
+                fail("ui_common.py 版本过旧，请 git pull 更新")
+                errors += 1
+            else:
+                ui_common.init_fonts()
+                ok(f"ui_common v{getattr(ui_common, '__version__', '?')} 加载成功")
             pygame.quit()
         except Exception as e:
-            fail(f"ui_common / furniture_sim 依赖异常: {e}")
+            fail(f"ui_common 加载异常: {e}")
             errors += 1
 
     print("\n--- 显示测试 ---")

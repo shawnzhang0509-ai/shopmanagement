@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import pygame
 
+__version__ = "2"
+
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
 SIDEBAR_WIDTH = 300
 
@@ -32,9 +34,15 @@ FONT_MARK = None
 
 
 def init_fonts():
+    """Load fonts after pygame.init(). Safe to call multiple times."""
     global FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_LABEL, FONT_MARK
     if FONT_TITLE is not None:
         return
+
+    if not pygame.get_init():
+        pygame.init()
+    if not pygame.font.get_init():
+        pygame.font.init()
 
     def load_font(size: int, bold: bool = False) -> pygame.font.Font:
         for name in FONT_CANDIDATES:
