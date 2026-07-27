@@ -102,6 +102,8 @@ current_tool = "rect"
 draw_phase = "idle"  # idle | drawing | l_cut
 drag_start = None
 drag_current = None
+l_outer_corners = None  # L形外框 (x0, y0, x1, y1)
+l_cut_preview = None
 polygon_points = []
 preview_point = None
 
@@ -243,8 +245,10 @@ def draw_canvas(surface):
             draw_shape(surface, pts)
             draw_dimension_label(surface, (cx, cy), drag_current, f"R {r/1000:.2f} m")
 
-    if draw_phase == "l_cut" and drag_start and drag_current:
-        pts = polygon_from_l_shape(*drag_start, *drag_current)
+    if draw_phase == "l_cut" and l_outer_corners and l_cut_preview:
+        x0, y0, x1, y1 = l_outer_corners
+        cx, cy = l_cut_preview
+        pts = polygon_from_l_shape(x0, y0, x1, y1, cx, cy)
         draw_shape(surface, pts)
 
     # 十字中心线
@@ -327,9 +331,12 @@ def draw_sidebar(tool_buttons, buttons, list_top):
 
 def reset_draw_state():
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template
+    global l_outer_corners, l_cut_preview
     draw_phase = "idle"
     drag_start = None
     drag_current = None
+    l_outer_corners = None
+    l_cut_preview = None
     polygon_points = []
     preview_point = None
     editing_template = None
@@ -464,6 +471,7 @@ def handle_toolbar(action):
 
 def handle_canvas_mousedown(mx, my, button):
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template, selected_index
+    global l_outer_corners, l_cut_preview
     wx, wy = screen_to_world(mx, my)
 
     if button == 3:
@@ -478,8 +486,12 @@ def handle_canvas_mousedown(mx, my, button):
         return
 
     if draw_phase == "l_cut":
-        drag_current = (wx, wy)
-        pts = polygon_from_l_shape(*drag_start, *drag_current)
+        if not l_outer_corners:
+            toast.show("L 形外框丢失，请重新绘制")
+            draw_phase = "idle"
+            return
+        x0, y0, x1, y1 = l_outer_corners
+        pts = polygon_from_l_shape(x0, y0, x1, y1, wx, wy)
         editing_template = template_to_dict(
             input_name.get_text() or "l_shape",
             input_roi.get_float(0),
@@ -487,6 +499,8 @@ def handle_canvas_mousedown(mx, my, button):
             pts,
         )
         draw_phase = "idle"
+        l_outer_corners = None
+        l_cut_preview = None
         toast.show("L 形已生成，可调整名称和 ROI 后保存")
         return
 
@@ -496,7 +510,7 @@ def handle_canvas_mousedown(mx, my, button):
 
 
 def handle_canvas_mouseup(mx, my, button):
-    global draw_phase, drag_current, editing_template, selected_index
+    global draw_phase, drag_current, editing_template, selected_index, l_outer_corners
     if button != 1 or draw_phase != "drawing" or not drag_start:
         return
     wx, wy = screen_to_world(mx, my)
@@ -537,6 +551,7 @@ def handle_canvas_mouseup(mx, my, button):
             toast.show("外框太小，请重新拖拽")
             draw_phase = "idle"
             return
+        l_outer_corners = (drag_start[0], drag_start[1], drag_current[0], drag_current[1])
         draw_phase = "l_cut"
         toast.show("外框完成，再点击内角位置")
 
@@ -572,7 +587,7 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
 def main():
     global screen, clock
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
-    global draw_phase, drag_current, preview_point, polygon_points
+    global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview
     global editing_template, selected_index
 
     if os.path.isfile(TEMPLATES_FILE):
@@ -632,8 +647,12 @@ def main():
                 elif current_tool == "polygon" and polygon_points:
                     wx, wy = screen_to_world(mx, my)
                     preview_point = snap_point(wx, wy, polygon_points[-1])
+                elif draw_phase == "l_cut" and l_outer_corners:
+                    wx, wy = screen_to_world(mx, my)
+                    l_cut_preview = (wx, wy)
                 else:
                     preview_point = None
+                    l_cut_preview = None
 
             elif event.type == pygame.KEYDOWN:
                 active = input_name.active or input_roi.active
