@@ -5,316 +5,647 @@ except ModuleNotFoundError:
     raise SystemExit(1) from None
 
 import json
+import math
+import os
 import sys
+import traceback
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
+
+from ui_common import (
+    SIDEBAR_WIDTH,
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    Button,
+    C_ACCENT,
+    C_BORDER,
+    C_CANVAS,
+    C_GRID,
+    C_MUTED,
+    C_PREVIEW,
+    C_PREVIEW_FILL,
+    C_TEXT,
+    FONT_BODY,
+    FONT_LABEL,
+    FONT_MARK,
+    FONT_SMALL,
+    FONT_TITLE,
+    InputBox,
+    Toast,
+    draw_sidebar_bg,
+)
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(SCRIPT_DIR)
+TEMPLATES_FILE = "furniture_templates.json"
 
 pygame.init()
-
-# ----- Global Constants -----
-SCREEN_WIDTH, SCREEN_HEIGHT = 700, 600
-screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("Furniture Template Manager")
-FONT = pygame.font.SysFont(None, 18)
-clock = pygame.time.Clock()
-
-# 初始化 Tkinter
 root = tk.Tk()
 root.withdraw()
 
-# ----- InputBox Class -----
-class InputBox:
-    def __init__(self, x, y, w, h, label, text='', is_name=False):
-        self.rect = pygame.Rect(x, y, w, h)
-        self.color_inactive = pygame.Color('lightskyblue3')
-        self.color_active = pygame.Color('dodgerblue2')
-        self.color = self.color_inactive
-        self.text = text
-        self.label = label
-        self.is_name = is_name
-        self.txt_surface = FONT.render(text, True, (0, 0, 0))
-        self.active = False
-        self.cleared = False
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("家具模板编辑器")
+clock = pygame.time.Clock()
 
-    def handle_event(self, event):
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if self.rect.collidepoint(event.pos):
-                self.active = True
-                if not self.cleared:
-                    self.text = ''
-                    self.cleared = True
-            else:
-                self.active = False
-            self.color = self.color_active if self.active else self.color_inactive
+# ── 画布状态 ────────────────────────────────────────────────
+offset_x, offset_y = 0.0, 0.0
+scale = 0.08
+dragging_view = False
+last_mouse_pos = (0, 0)
+mouse_pos = (0, 0)
+toast = Toast()
 
-        elif event.type == pygame.KEYDOWN and self.active:
-            if event.key == pygame.K_BACKSPACE:
-                self.text = self.text[:-1]
-            elif event.key == pygame.K_RETURN:
-                self.active = False
-                self.color = self.color_inactive
-            else:
-                if self.is_name:
-                    if event.unicode.isprintable():
-                        self.text += event.unicode
-                else:
-                    if event.unicode.isdigit():
-                        self.text += event.unicode
-            self.txt_surface = FONT.render(self.text, True, (0, 0, 0))
+# ── 工具与绘制 ──────────────────────────────────────────────
+TOOLS = [
+    ("rect", "矩形"),
+    ("circle", "圆形"),
+    ("l_shape", "L 形"),
+    ("polygon", "多边形"),
+]
+current_tool = "rect"
+draw_phase = "idle"  # idle | drawing | l_cut
+drag_start = None
+drag_current = None
+polygon_points = []
+preview_point = None
 
-    def draw(self, screen):
-        label_surf = FONT.render(self.label, True, (0, 0, 0))
-        screen.blit(label_surf, (self.rect.x, self.rect.y - 18))
-        screen.blit(self.txt_surface, (self.rect.x + 5, self.rect.y + 5))
-        pygame.draw.rect(screen, self.color, self.rect, 2)
-
-    def get_text(self):
-        return self.text.strip()
-    
-    def set_text(self, text):
-        self.text = text
-        self.txt_surface = FONT.render(self.text, True, (0, 0, 0))
-        self.cleared = True
-
-    def get_value(self):
-        try:
-            return int(self.text)
-        except ValueError:
-            return 0
-    def set_value(self, value):
-        self.text = str(value)
-        self.txt_surface = FONT.render(self.text, True, (0, 0, 0))
-        self.cleared = True  # 避免再次点击时清空
-
-# ----- Input Boxes and Controls -----
-input_name = InputBox(140, 70, 120, 20, "Template Name", is_name=True)
-input_w = InputBox(140, 110, 80, 20, "Width")
-input_h = InputBox(240, 110, 80, 20, "Height")
-input_radius = InputBox(140, 140, 80, 20, "Radius")
-input_cut_w = InputBox(140, 170, 80, 20, "Cut Width")
-input_cut_h = InputBox(240, 170, 80, 20, "Cut Height")
-
-btn_save_rect = pygame.Rect(140, 155, 180, 35)
-btn_export_rect = pygame.Rect(140, 200, 180, 35)
-btn_import_rect = pygame.Rect(140, 245, 180, 35)
-preview_rect = pygame.Rect(400, 60, 260, 260)
-
-shape_types = ["rectangle", "circle", "l_shape"]
-selected_shape_index = 0
+# ── 表单 ────────────────────────────────────────────────────
 furniture_templates = []
+selected_index = -1
+editing_template = None  # dict preview before save
 
-# ----- UI Drawing -----
-def draw_ui():
-    screen.fill((240, 240, 240))
-    screen.blit(FONT.render("Furniture Shape:", True, (0, 0, 0)), (20, 20))
-
-    for i, stype in enumerate(shape_types):
-        color = (100, 200, 100) if i == selected_shape_index else (180, 180, 180)
-        rect = pygame.Rect(140 + i * 90, 20, 80, 25)
-        pygame.draw.rect(screen, color, rect)
-        screen.blit(FONT.render(stype, True, (0, 0, 0)), (rect.x + 8, rect.y + 5))
-
-    input_name.draw(screen)
-    shape = shape_types[selected_shape_index]
-    if shape == "rectangle":
-        input_w.draw(screen)
-        input_h.draw(screen)
-    elif shape == "circle":
-        input_radius.draw(screen)
-    elif shape == "l_shape":
-        input_w.draw(screen)
-        input_h.draw(screen)
-        input_cut_w.draw(screen)
-        input_cut_h.draw(screen)
-
-    pygame.draw.rect(screen, (100, 200, 100), btn_save_rect)
-    screen.blit(FONT.render("Save Template", True, (0, 0, 0)), (btn_save_rect.x + 30, btn_save_rect.y + 10))
-
-    pygame.draw.rect(screen, (100, 100, 250), btn_export_rect)
-    screen.blit(FONT.render("Export JSON", True, (255, 255, 255)), (btn_export_rect.x + 30, btn_export_rect.y + 10))
-
-    pygame.draw.rect(screen, (100, 100, 250), btn_import_rect)
-    screen.blit(FONT.render("Import JSON", True, (255, 255, 255)), (btn_import_rect.x + 30, btn_import_rect.y + 10))
-
-    screen.blit(FONT.render("Templates:", True, (0, 0, 0)), (20, 300))
-    for i, tpl in enumerate(furniture_templates):
-        label = f"{tpl['id']} ({tpl['type']})"
-        screen.blit(FONT.render(label, True, (0, 0, 0)), (40, 330 + i * 20))
-
-    pygame.draw.rect(screen, (230, 230, 230), preview_rect)
-    pygame.draw.rect(screen, (0, 0, 0), preview_rect, 1)
-    draw_preview(preview_rect)
-
-# ----- Shape Preview -----
-
-import math
-def draw_preview(area):
-    shape = shape_types[selected_shape_index]
-    ox, oy = area.x + 10, area.y + 10
-    maxw, maxh = area.width - 20, area.height - 20
-
-    if shape == "rectangle":
-        w = input_w.get_value()
-        h = input_h.get_value()
-        if w > 0 and h > 0:
-            scale = min(maxw / w, maxh / h, 2)
-            points = [(0, 0), (w, 0), (w, h), (0, h)]
-            scaled_points = [(ox + x * scale, oy + y * scale) for x, y in points]
-            pygame.draw.polygon(screen, (200, 150, 100), scaled_points)
-            pygame.draw.polygon(screen, (0, 0, 0), scaled_points, 2)
-
-    elif shape == "circle":
-        r = input_radius.get_value()
-        if r > 0:
-            scale = min(maxw / (2 * r), maxh / (2 * r), 2)
-            cx, cy = ox + r * scale, oy + r * scale
-            points = []
-            num_points = 20  # 多边形顶点数，越大越圆
-            for i in range(num_points):
-                angle = 2 * math.pi * i / num_points
-                x = cx + r * scale * math.cos(angle)
-                y = cy + r * scale * math.sin(angle)
-                points.append((x, y))
-            pygame.draw.polygon(screen, (100, 200, 200), points)
-            pygame.draw.polygon(screen, (0, 0, 0), points, 2)
+input_name = InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
+input_roi = InputBox((0, 0, 0, 0), placeholder="0 ~ 10", numeric=True)
 
 
-    elif shape == "l_shape":
-        w = input_w.get_value()
-        h = input_h.get_value()
-        cw = input_cut_w.get_value()
-        ch = input_cut_h.get_value()
-        if w > 0 and h > 0 and cw < w and ch < h:
-            points = [(0, 0), (w, 0), (w, ch), (cw, ch), (cw, h), (0, h)]
-            scale = min(maxw / w, maxh / h, 2)
-            scaled = [(ox + x * scale, oy + y * scale) for x, y in points]
-            pygame.draw.polygon(screen, (180, 150, 220), scaled)
-            pygame.draw.polygon(screen, (0, 0, 0), scaled, 2)
+def screen_to_world(sx, sy):
+    return offset_x + (sx - SIDEBAR_WIDTH) / scale, offset_y + sy / scale
 
-# ----- Polygon Generator -----
-def generate_lshape_polygon(w, h, cw, ch):
-    return [[0, 0], [w, 0], [w, ch], [cw, ch], [cw, h], [0, h]]
 
-def popup_save_dialog():
-    global save_template_file
+def world_to_screen(wx, wy):
+    return (wx - offset_x) * scale + SIDEBAR_WIDTH, (wy - offset_y) * scale
 
-    save_template_file = filedialog.asksaveasfilename(
-        defaultextension=".json",
-        filetypes=[("JSON files", "*.json")],
-        title="Save template",
-    )
 
-    if save_template_file:
-        try:
-            with open(save_template_file, "w") as f:
-                json.dump(furniture_templates, f, indent=2)
-            print(f"Exported to {save_template_file}")
-        except Exception as e:
-            print("Export failed:", e)
-
-def popup_load_dialog():
-    global load_template_file
-    load_template_file = filedialog.askopenfilename(
-        defaultextension=".json",
-        filetypes=[("JSON files", "*.json")],
-        title="Load template",
-    )
-    if load_template_file:
-        try:
-            load_template(load_template_file)
-        except Exception as e:
-            print(f"load template file failed: {e}")
-            
-def load_template(file_path):
-    global furniture_templates
-    with open(file_path, 'r', encoding='utf-8') as f:
-        furniture_templates = json.load(f)
-    if furniture_templates:
-        first_item = furniture_templates[0]
-        shape_type = first_item['type']
-        print(f"显示第一个家具模板: ID={first_item['id']}, 类型={shape_type}")
-
-        if shape_type == "rectangle":
-            input_name.set_text(first_item['id'])
-            input_w.set_value(first_item['width'])
-            input_h.set_value(first_item['height'])
-            selected_shape_index = shape_types.index("rectangle")
-
-        elif shape_type == "circle":
-            input_name.set_text(first_item['id'])
-            input_radius.set_value(first_item['radius'])
-            selected_shape_index = shape_types.index("circle")
-
-        elif shape_type == "polygon":
-            input_name.set_text(first_item['id'])
-            selected_shape_index = shape_types.index("l_shape")
-
-            # ⚠️ 尝试从 polygon 的点反推出 w, h, cut_w, cut_h（仅适用于标准 L 型）
-            try:
-                points = first_item['points']
-                # 假设点顺序为：
-                # [(0,0), (w,0), (w,h), (cw,h), (cw,ch), (0,ch)]
-                w = points[1][0]
-                h = points[2][1]
-                cw = points[3][0]
-                ch = points[4][1]
-
-                input_w.set_value(w)
-                input_h.set_value(h)
-                input_cut_w.set_value(cw)
-                input_cut_h.set_value(ch)
-            except Exception as e:
-                print("无法从 polygon 点自动还原 l_shape 参数:", e)
-
+def snap_point(wx, wy, ref=None):
+    keys = pygame.key.get_pressed()
+    if ref and (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]):
+        rx, ry = ref
+        if abs(wx - rx) > abs(wy - ry):
+            wy = ry
         else:
-            print("JSON 数据为空，未加载任何模板")
-            print(f"Loaded template from {file_path}")
+            wx = rx
+    return wx, wy
 
 
-# ----- Main Loop -----
-running = True
-while running:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
+def draw_grid(surface):
+    spacing = 100
+    start_x = int(offset_x // spacing * spacing)
+    end_x = int((offset_x + (SCREEN_WIDTH - SIDEBAR_WIDTH) / scale) // spacing * spacing + spacing)
+    start_y = int(offset_y // spacing * spacing)
+    end_y = int((offset_y + SCREEN_HEIGHT / scale) // spacing * spacing + spacing)
+    for x in range(start_x, end_x, spacing):
+        sx = world_to_screen(x, 0)[0]
+        pygame.draw.line(surface, C_GRID, (sx, 0), (sx, SCREEN_HEIGHT))
+    for y in range(start_y, end_y, spacing):
+        sy = world_to_screen(0, y)[1]
+        pygame.draw.line(surface, C_GRID, (SIDEBAR_WIDTH, sy), (SCREEN_WIDTH, sy))
 
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            mx, my = event.pos
-            for i in range(len(shape_types)):
-                if pygame.Rect(140 + i * 90, 20, 80, 25).collidepoint(mx, my):
-                    selected_shape_index = i
 
-            if btn_save_rect.collidepoint(mx, my):
-                name = input_name.get_text() or f"{shape_types[selected_shape_index]}_{len(furniture_templates)+1}"
-                shape = shape_types[selected_shape_index]
+def polygon_from_rect(x0, y0, x1, y1):
+    left, right = sorted([x0, x1])
+    top, bottom = sorted([y0, y1])
+    return [(left, top), (right, top), (right, bottom), (left, bottom)]
 
-                if shape == "rectangle":
-                    w, h = input_w.get_value(), input_h.get_value()
-                    if w > 0 and h > 0:
-                        furniture_templates.append({"id": name, "type": "rectangle", "width": w, "height": h})
 
-                elif shape == "circle":
-                    r = input_radius.get_value()
-                    if r > 0:
-                        furniture_templates.append({"id": name, "type": "circle", "radius": r})
+def polygon_from_circle(cx, cy, r):
+    return [(cx + r * math.cos(2 * math.pi * i / 32), cy + r * math.sin(2 * math.pi * i / 32)) for i in range(32)]
 
-                elif shape == "l_shape":
-                    w, h = input_w.get_value(), input_h.get_value()
-                    cw, ch = input_cut_w.get_value(), input_cut_h.get_value()
-                    if w > 0 and h > 0 and cw < w and ch < h:
-                        furniture_templates.append({"id": name, "type": "polygon", "points": generate_lshape_polygon(w, h, cw, ch)})
 
-            if btn_export_rect.collidepoint(mx, my):
-                popup_save_dialog()
-            if btn_import_rect.collidepoint(mx, my):
-                popup_load_dialog()
+def polygon_from_l_shape(x0, y0, x1, y1, cut_x, cut_y):
+    left, right = sorted([x0, x1])
+    top, bottom = sorted([y0, y1])
+    cut_x = max(left + 1, min(right - 1, cut_x))
+    cut_y = max(top + 1, min(bottom - 1, cut_y))
+    return [(left, top), (right, top), (right, cut_y), (cut_x, cut_y), (cut_x, bottom), (left, bottom)]
 
-        for box in [input_name, input_w, input_h, input_radius, input_cut_w, input_cut_h]:
-            box.handle_event(event)
 
-    draw_ui()
-    pygame.display.flip()
-    clock.tick(30)
+def normalize_template_dict(data):
+    shape_type = data.get("type", "")
+    if shape_type == "rectangle":
+        w, h = data.get("width", 0), data.get("height", 0)
+        points = [(0, 0), (w, 0), (w, h), (0, h)]
+    elif shape_type == "circle":
+        r = data.get("radius", 0)
+        points = polygon_from_circle(0, 0, r)
+    else:
+        points = [tuple(p) for p in data.get("points", [])]
+    return points
 
-pygame.quit()
-sys.exit()
+
+def template_to_dict(name, roi, tool, points):
+    if tool == "rect":
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        w, h = max(xs) - min(xs), max(ys) - min(ys)
+        return {"id": name, "type": "rectangle", "width": int(round(w)), "height": int(round(h)), "roi": roi}
+    if tool == "circle":
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
+        r = math.hypot(points[0][0] - cx, points[0][1] - cy)
+        return {"id": name, "type": "circle", "radius": int(round(r)), "roi": roi}
+    return {"id": name, "type": "polygon", "points": [[int(round(x)), int(round(y))] for x, y in points], "roi": roi}
+
+
+def draw_shape(surface, points, fill=C_PREVIEW_FILL, border=C_PREVIEW, width=2, closed=True):
+    if len(points) < 2:
+        return
+    screen_pts = [world_to_screen(x, y) for x, y in points]
+    if closed and len(screen_pts) >= 3:
+        pygame.draw.polygon(surface, fill, screen_pts)
+    if len(screen_pts) >= 2:
+        pygame.draw.lines(surface, border, closed, screen_pts, width)
+    for pt in screen_pts:
+        pygame.draw.circle(surface, border, (int(pt[0]), int(pt[1])), 4)
+
+
+def draw_dimension_label(surface, p1, p2, text):
+    mid = world_to_screen((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+    label = FONT_MARK.render(text, True, C_ACCENT)
+    bg = label.get_rect(center=(mid[0], mid[1] - 12))
+    bg.inflate_ip(8, 4)
+    pygame.draw.rect(surface, (255, 255, 255), bg, border_radius=4)
+    surface.blit(label, label.get_rect(center=(mid[0], mid[1] - 12)))
+
+
+def draw_canvas(surface):
+    surface.fill(C_CANVAS)
+    draw_grid(surface)
+
+    if editing_template:
+        pts = normalize_template_dict(editing_template)
+        draw_shape(surface, pts, fill=(254, 243, 199), border=(217, 119, 6))
+
+    if current_tool == "polygon" and polygon_points:
+        pts = polygon_points + ([preview_point] if preview_point else [])
+        draw_shape(surface, pts, closed=False)
+        if len(polygon_points) >= 2:
+            p1, p2 = polygon_points[-2], polygon_points[-1]
+            draw_dimension_label(surface, p1, p2, f"{math.hypot(p2[0]-p1[0], p2[1]-p1[1])/1000:.2f} m")
+
+    if draw_phase == "drawing" and drag_start and drag_current:
+        if current_tool == "rect":
+            pts = polygon_from_rect(*drag_start, *drag_current)
+            draw_shape(surface, pts)
+            w = abs(drag_current[0] - drag_start[0]) / 1000
+            h = abs(drag_current[1] - drag_start[1]) / 1000
+            draw_dimension_label(surface, pts[0], pts[1], f"{w:.2f} m")
+            draw_dimension_label(surface, pts[1], pts[2], f"{h:.2f} m")
+        elif current_tool == "circle":
+            cx, cy = drag_start
+            r = math.hypot(drag_current[0] - cx, drag_current[1] - cy)
+            pts = polygon_from_circle(cx, cy, r)
+            draw_shape(surface, pts)
+            draw_dimension_label(surface, (cx, cy), drag_current, f"R {r/1000:.2f} m")
+
+    if draw_phase == "l_cut" and drag_start and drag_current:
+        pts = polygon_from_l_shape(*drag_start, *drag_current)
+        draw_shape(surface, pts)
+
+    # 十字中心线
+    cx, cy = world_to_screen(0, 0)
+    pygame.draw.line(surface, (148, 163, 184), (SIDEBAR_WIDTH, cy), (SCREEN_WIDTH, cy), 1)
+    pygame.draw.line(surface, (148, 163, 184), (cx, 0), (cx, SCREEN_HEIGHT), 1)
+
+    if current_tool == "polygon" and draw_phase != "idle":
+        banner = pygame.Rect(SIDEBAR_WIDTH + 16, 12, SCREEN_WIDTH - SIDEBAR_WIDTH - 32, 34)
+        pygame.draw.rect(surface, (219, 234, 254), banner, border_radius=8)
+        tip = "多边形模式: 左键加点 | Shift 正交 | Enter 完成 | Esc 取消 | 右键拖动画布"
+        surface.blit(FONT_SMALL.render(tip, True, C_ACCENT), (banner.x + 12, banner.y + 9))
+    elif draw_phase == "drawing":
+        tip = "拖拽绘制形状，松开鼠标完成"
+        surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
+    elif draw_phase == "l_cut":
+        tip = "第二步: 点击 L 形内角位置"
+        surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
+
+
+def build_sidebar():
+    pad = 16
+    w = SIDEBAR_WIDTH - pad * 2
+    y = 16
+    tool_buttons = {}
+    bw = (w - 8) // 2
+    for i, (tool_id, label) in enumerate(TOOLS):
+        col, row = i % 2, i // 2
+        rect = (pad + col * (bw + 8), y + 52 + row * 38, bw, 32)
+        tool_buttons[tool_id] = Button(rect, label, f"tool:{tool_id}", toggle=True)
+    y += 52 + 38 * 2 + 8
+
+    input_name.rect = pygame.Rect(pad, y + 18, w, 34)
+    input_roi.rect = pygame.Rect(pad, y + 72, w, 34)
+    y += 120
+
+    buttons = {
+        "apply": Button((pad, y, w, 38), "✓ 保存到列表", "apply", primary=True),
+        "write": Button((pad, y + 46, w, 34), "写入 furniture_templates.json", "write"),
+        "export": Button((pad, y + 86, bw, 34), "导出", "export"),
+        "import": Button((pad + bw + 8, y + 86, bw, 34), "导入", "import"),
+        "delete": Button((pad, y + 126, w, 34), "删除选中", "delete", danger=True),
+        "clear": Button((pad, y + 166, w, 34), "清空画布", "clear"),
+    }
+    list_top = y + 210
+    return tool_buttons, buttons, list_top
+
+
+def draw_sidebar(tool_buttons, buttons, list_top):
+    draw_sidebar_bg(screen)
+    screen.blit(FONT_TITLE.render("家具模板编辑器", True, C_TEXT), (16, 16))
+    screen.blit(FONT_SMALL.render("在右侧画布拖拽或点击绘制", True, C_MUTED), (16, 42))
+
+    for btn in tool_buttons.values():
+        btn.active = btn.action == f"tool:{current_tool}"
+        btn.draw(screen, mouse_pos)
+    for btn in buttons.values():
+        btn.draw(screen, mouse_pos)
+
+    input_name.draw(screen, "模板名称")
+    input_roi.draw(screen, "ROI (0~10)")
+
+    screen.blit(FONT_LABEL.render("已保存模板", True, C_TEXT), (16, list_top))
+    y = list_top + 28
+    for i, tpl in enumerate(furniture_templates):
+        row = pygame.Rect(12, y + i * 42, SIDEBAR_WIDTH - 24, 36)
+        selected = i == selected_index
+        bg = (219, 234, 254) if selected else (248, 250, 252)
+        pygame.draw.rect(screen, bg, row, border_radius=8)
+        if selected:
+            pygame.draw.rect(screen, C_ACCENT, row, 2, border_radius=8)
+        label = f"{tpl['id']}  ({tpl['type']})  ROI {tpl.get('roi', '-')}"
+        screen.blit(FONT_SMALL.render(label, True, C_TEXT), (row.x + 10, row.centery - 8))
+
+    screen.blit(
+        FONT_SMALL.render(f"共 {len(furniture_templates)} 个模板", True, C_MUTED),
+        (16, SCREEN_HEIGHT - 24),
+    )
+
+
+def reset_draw_state():
+    global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template
+    draw_phase = "idle"
+    drag_start = None
+    drag_current = None
+    polygon_points = []
+    preview_point = None
+    editing_template = None
+
+
+def apply_current_shape():
+    global editing_template
+    name = input_name.get_text() or f"template_{len(furniture_templates) + 1}"
+    roi = input_roi.get_float(0.0)
+
+    points = None
+    if current_tool == "polygon" and len(polygon_points) >= 3:
+        points = polygon_points[:]
+    elif editing_template:
+        points = normalize_template_dict(editing_template)
+        tool = current_tool
+    else:
+        toast.show("请先在画布上绘制形状")
+        return
+
+    if not points:
+        toast.show("形状无效，请重新绘制")
+        return
+
+    editing_template = template_to_dict(name, roi, current_tool if current_tool != "l_shape" else "polygon", points)
+    if current_tool == "l_shape":
+        editing_template["type"] = "polygon"
+    toast.show(f"已生成预览: {name}")
+
+
+def save_to_list():
+    global selected_index
+    if not editing_template:
+        apply_current_shape()
+    if not editing_template:
+        return
+    name = editing_template["id"]
+    if selected_index >= 0:
+        furniture_templates[selected_index] = editing_template.copy()
+        toast.show(f"已更新: {name}")
+    else:
+        furniture_templates.append(editing_template.copy())
+        selected_index = len(furniture_templates) - 1
+        toast.show(f"已添加: {name}")
+
+
+def write_templates_file():
+    if not furniture_templates:
+        toast.show("列表为空，请先保存模板")
+        return
+    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+        json.dump(furniture_templates, f, ensure_ascii=False, indent=2)
+    toast.show(f"已写入 {TEMPLATES_FILE}")
+
+
+def load_templates_file(path=TEMPLATES_FILE):
+    global furniture_templates, selected_index
+    if not os.path.isfile(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        furniture_templates = json.load(f)
+    selected_index = 0 if furniture_templates else -1
+    if furniture_templates:
+        load_template_into_editor(0)
+    toast.show(f"已加载 {len(furniture_templates)} 个模板")
+
+
+def load_template_into_editor(index):
+    global selected_index, editing_template, current_tool
+    selected_index = index
+    tpl = furniture_templates[index]
+    editing_template = tpl.copy()
+    input_name.set_text(tpl["id"])
+    input_roi.set_text(tpl.get("roi", 0))
+    if tpl["type"] == "rectangle":
+        current_tool = "rect"
+    elif tpl["type"] == "circle":
+        current_tool = "circle"
+    else:
+        current_tool = "polygon"
+    reset_draw_state()
+    editing_template = tpl.copy()
+    toast.show(f"编辑: {tpl['id']}")
+
+
+def delete_selected():
+    global selected_index
+    if selected_index < 0:
+        toast.show("请先选中模板")
+        return
+    name = furniture_templates[selected_index]["id"]
+    furniture_templates.pop(selected_index)
+    selected_index = min(selected_index, len(furniture_templates) - 1)
+    reset_draw_state()
+    input_name.set_text("")
+    input_roi.set_text("")
+    if selected_index >= 0:
+        load_template_into_editor(selected_index)
+    toast.show(f"已删除: {name}")
+
+
+def handle_toolbar(action):
+    global current_tool, selected_index
+    if action.startswith("tool:"):
+        current_tool = action.split(":", 1)[1]
+        reset_draw_state()
+        toast.show(f"工具: {dict(TOOLS)[current_tool]}")
+    elif action == "apply":
+        save_to_list()
+    elif action == "write":
+        save_to_list()
+        write_templates_file()
+    elif action == "export":
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(furniture_templates, f, ensure_ascii=False, indent=2)
+            toast.show(f"已导出: {os.path.basename(path)}")
+    elif action == "import":
+        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if path:
+            load_templates_file(path)
+    elif action == "delete":
+        delete_selected()
+    elif action == "clear":
+        reset_draw_state()
+        input_name.set_text("")
+        input_roi.set_text("")
+        selected_index = -1
+        toast.show("画布已清空")
+
+
+def handle_canvas_mousedown(mx, my, button):
+    global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template, selected_index
+    wx, wy = screen_to_world(mx, my)
+
+    if button == 3:
+        return "pan"
+
+    if current_tool == "polygon":
+        if draw_phase == "idle":
+            draw_phase = "drawing"
+        ref = polygon_points[-1] if polygon_points else None
+        wx, wy = snap_point(wx, wy, ref)
+        polygon_points.append((wx, wy))
+        return
+
+    if draw_phase == "l_cut":
+        drag_current = (wx, wy)
+        pts = polygon_from_l_shape(*drag_start, *drag_current)
+        editing_template = template_to_dict(
+            input_name.get_text() or "l_shape",
+            input_roi.get_float(0),
+            "polygon",
+            pts,
+        )
+        draw_phase = "idle"
+        toast.show("L 形已生成，可调整名称和 ROI 后保存")
+        return
+
+    draw_phase = "drawing"
+    drag_start = (wx, wy)
+    drag_current = (wx, wy)
+
+
+def handle_canvas_mouseup(mx, my, button):
+    global draw_phase, drag_current, editing_template, selected_index
+    if button != 1 or draw_phase != "drawing" or not drag_start:
+        return
+    wx, wy = screen_to_world(mx, my)
+    drag_current = snap_point(wx, wy, drag_start)
+
+    if current_tool == "rect":
+        pts = polygon_from_rect(*drag_start, *drag_current)
+        if abs(pts[1][0] - pts[0][0]) < 10 or abs(pts[2][1] - pts[1][1]) < 10:
+            toast.show("矩形太小，请重新拖拽")
+            draw_phase = "idle"
+            return
+        editing_template = template_to_dict(
+            input_name.get_text() or "rectangle",
+            input_roi.get_float(0),
+            "rect",
+            pts,
+        )
+        draw_phase = "idle"
+        selected_index = -1
+        toast.show("矩形已生成，填写名称后点保存")
+    elif current_tool == "circle":
+        pts = polygon_from_circle(drag_start[0], drag_start[1], math.hypot(drag_current[0] - drag_start[0], drag_current[1] - drag_start[1]))
+        if math.hypot(drag_current[0] - drag_start[0], drag_current[1] - drag_start[1]) < 10:
+            toast.show("圆形太小，请重新拖拽")
+            draw_phase = "idle"
+            return
+        editing_template = template_to_dict(
+            input_name.get_text() or "circle",
+            input_roi.get_float(0),
+            "circle",
+            pts,
+        )
+        draw_phase = "idle"
+        selected_index = -1
+        toast.show("圆形已生成，填写名称后点保存")
+    elif current_tool == "l_shape":
+        if abs(drag_current[0] - drag_start[0]) < 10 or abs(drag_current[1] - drag_start[1]) < 10:
+            toast.show("外框太小，请重新拖拽")
+            draw_phase = "idle"
+            return
+        draw_phase = "l_cut"
+        toast.show("外框完成，再点击内角位置")
+
+
+def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
+    for tool_id, btn in tool_buttons.items():
+        if btn.contains((mx, my)):
+            handle_toolbar(btn.action)
+            return True
+    for btn in buttons.values():
+        if btn.contains((mx, my)):
+            handle_toolbar(btn.action)
+            return True
+    if input_name.contains((mx, my)):
+        input_name.active = True
+        input_roi.active = False
+        return True
+    if input_roi.contains((mx, my)):
+        input_roi.active = True
+        input_name.active = False
+        return True
+    input_name.active = input_roi.active = False
+
+    y = list_top + 28
+    for i in range(len(furniture_templates)):
+        row = pygame.Rect(12, y + i * 42, SIDEBAR_WIDTH - 24, 36)
+        if row.collidepoint(mx, my):
+            load_template_into_editor(i)
+            return True
+    return False
+
+
+def main():
+    global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
+    global draw_phase, drag_current, preview_point, polygon_points
+    global editing_template, selected_index
+
+    if os.path.isfile(TEMPLATES_FILE):
+        try:
+            load_templates_file()
+        except Exception:
+            pass
+
+    tool_buttons, buttons, list_top = build_sidebar()
+    running = True
+
+    while running:
+        mouse_pos = pygame.mouse.get_pos()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            elif event.type == pygame.MOUSEWHEEL:
+                mx, my = mouse_pos
+                wx, wy = screen_to_world(mx, my)
+                scale = max(0.01, min(2.0, scale * (1.15 if event.y > 0 else 1 / 1.15)))
+                offset_x = wx - (mx - SIDEBAR_WIDTH) / scale
+                offset_y = wy - my / scale
+
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = event.pos
+                if mx < SIDEBAR_WIDTH:
+                    handle_sidebar_click(mx, my, tool_buttons, buttons, list_top)
+                elif event.button == 1:
+                    result = handle_canvas_mousedown(mx, my, 1)
+                    if result == "pan":
+                        dragging_view = True
+                        last_mouse_pos = event.pos
+                elif event.button == 3:
+                    dragging_view = True
+                    last_mouse_pos = event.pos
+
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button in (1, 3):
+                    dragging_view = False
+                if event.button == 1 and event.pos[0] >= SIDEBAR_WIDTH:
+                    handle_canvas_mouseup(*event.pos, 1)
+
+            elif event.type == pygame.MOUSEMOTION:
+                mx, my = event.pos
+                if dragging_view:
+                    offset_x += (last_mouse_pos[0] - mx) / scale
+                    offset_y += (last_mouse_pos[1] - my) / scale
+                    last_mouse_pos = (mx, my)
+                elif draw_phase == "drawing" and drag_start and current_tool != "polygon":
+                    wx, wy = screen_to_world(mx, my)
+                    drag_current = snap_point(wx, wy, drag_start)
+                elif current_tool == "polygon" and polygon_points:
+                    wx, wy = screen_to_world(mx, my)
+                    preview_point = snap_point(wx, wy, polygon_points[-1])
+                else:
+                    preview_point = None
+
+            elif event.type == pygame.KEYDOWN:
+                active = input_name.active or input_roi.active
+                box = input_name if input_name.active else input_roi
+                if active:
+                    if event.key == pygame.K_BACKSPACE:
+                        box.text = box.text[:-1]
+                    elif event.key == pygame.K_ESCAPE:
+                        box.active = False
+                    elif event.unicode and event.unicode.isprintable():
+                        if box.numeric and event.unicode not in "0123456789.":
+                            pass
+                        else:
+                            box.text += event.unicode
+                elif current_tool == "polygon":
+                    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
+                        editing_template = template_to_dict(
+                            input_name.get_text() or "polygon",
+                            input_roi.get_float(0),
+                            "polygon",
+                            polygon_points,
+                        )
+                        polygon_points = []
+                        draw_phase = "idle"
+                        preview_point = None
+                        selected_index = -1
+                        toast.show("多边形完成，可保存到列表")
+                    elif event.key == pygame.K_ESCAPE:
+                        polygon_points = []
+                        draw_phase = "idle"
+                        preview_point = None
+                elif event.key == pygame.K_s and event.mod & pygame.KMOD_CTRL:
+                    save_to_list()
+                    write_templates_file()
+
+        draw_canvas(screen)
+        draw_sidebar(tool_buttons, buttons, list_top)
+        toast.draw(screen, SIDEBAR_WIDTH + (SCREEN_WIDTH - SIDEBAR_WIDTH) // 2)
+        pygame.display.flip()
+        clock.tick(60)
+
+    pygame.quit()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            messagebox.showerror("启动失败", str(exc))
+        except Exception:
+            pass
+        if sys.platform == "win32":
+            input("\n按 Enter 退出...")
+        raise SystemExit(1) from exc

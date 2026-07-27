@@ -570,7 +570,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "右键拖动画布 | 滚轮缩放 | Del 删除"
+    hints = "右键拖动画布 | 滚轮缩放 | 模板编辑: furniture_sim.py"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     surface.blit(
         FONT_SMALL.render(f"家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}", True, C_MUTED),
