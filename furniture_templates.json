@@ -1,12 +1,14 @@
 [
   {
     "id": "xmas",
+    "product_family": "xmas",
     "type": "circle",
     "radius": 2000,
     "roi": 2.0
   },
   {
     "id": "liberty",
+    "product_family": "liberty",
     "type": "rectangle",
     "width": 3000,
     "height": 2000,
@@ -14,32 +16,15 @@
   },
   {
     "id": "nebula",
+    "product_family": "nebula",
     "type": "polygon",
     "points": [
-      [
-        0,
-        0
-      ],
-      [
-        3000,
-        0
-      ],
-      [
-        3000,
-        1000
-      ],
-      [
-        1000,
-        1000
-      ],
-      [
-        1000,
-        2000
-      ],
-      [
-        0,
-        2000
-      ]
+      [0, 0],
+      [3000, 0],
+      [3000, 1000],
+      [1000, 1000],
+      [1000, 2000],
+      [0, 2000]
     ],
     "roi": 1.0
   }

@@ -1,25 +1,24 @@
 import json
+
 import pandas as pd
 
-# 读取 Excel
-roi_df = pd.read_excel("roi.xlsx")  # 确保文件名正确
-roi_dict = dict(zip(roi_df['id'], roi_df['roi']))
+from roi_lookup import lookup_roi, reload_roi_map
 
-# 读取你的 furniture_templates.json
-with open("furniture_templates.json", "r") as f:
+reload_roi_map()
+
+with open("furniture_templates.json", "r", encoding="utf-8") as f:
     furniture_data = json.load(f)
 
-# 插入 ROI
 for item in furniture_data:
-    item_id = item.get("id")
-    if item_id in roi_dict:
-        try:
-            item["roi"] = float(roi_dict[item_id])
-        except Exception as e:
-            print(f"处理 ROI 时出错（ID: {item_id}）: {e}")
+    family = item.get("product_family") or item.get("id", "")
+    item["product_family"] = family
+    roi = lookup_roi(family)
+    if roi:
+        item["roi"] = roi
     else:
-        print(f"未找到 ROI：{item_id}")
+        print(f"未找到 ROI：{family}")
 
-# 保存新版本 JSON
-with open("furniture_templates.json", "w") as f:
-    json.dump(furniture_data, f, indent=2)
+with open("furniture_templates.json", "w", encoding="utf-8") as f:
+    json.dump(furniture_data, f, ensure_ascii=False, indent=2)
+
+print("ROI 已按 product_family 更新完成")

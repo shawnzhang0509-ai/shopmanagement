@@ -12,6 +12,8 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from roi_lookup import lookup_roi
+
 # 无论从哪启动，都切换到脚本所在目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
@@ -272,7 +274,9 @@ def load_furniture_templates(json_path):
     for item in data:
         points = shape_to_points(item)
         if points:
-            templates.append(Furniture(item.get("id", "unnamed"), item.get("roi", 0), points))
+            family = item.get("product_family") or item.get("id", "")
+            roi = item.get("roi", 0) or lookup_roi(family)
+            templates.append(Furniture(item.get("id", "unnamed"), roi, points))
     if not templates:
         raise ValueError(f"{json_path} 中没有有效的家具模板")
     return templates

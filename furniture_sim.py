@@ -11,6 +11,9 @@ import math
 import os
 import sys
 import traceback
+import copy
+
+from roi_lookup import lookup_roi, reload_roi_map
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
@@ -115,7 +118,7 @@ selected_index = -1
 editing_template = None  # dict preview before save
 
 input_name = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
-input_roi = ui.InputBox((0, 0, 0, 0), placeholder="0 ~ 10", numeric=True)
+input_family = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
 
 
 def screen_to_world(sx, sy):
@@ -191,18 +194,38 @@ def normalize_template_dict(data):
     return points
 
 
-def template_to_dict(name, roi, tool, points):
+def template_to_dict(name, product_family, tool, points):
+    roi = lookup_roi(product_family)
     if tool == "rect":
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
         w, h = max(xs) - min(xs), max(ys) - min(ys)
-        return {"id": name, "type": "rectangle", "width": int(round(w)), "height": int(round(h)), "roi": roi}
+        return {
+            "id": name,
+            "product_family": product_family,
+            "type": "rectangle",
+            "width": int(round(w)),
+            "height": int(round(h)),
+            "roi": roi,
+        }
     if tool == "circle":
         cx = sum(p[0] for p in points) / len(points)
         cy = sum(p[1] for p in points) / len(points)
         r = math.hypot(points[0][0] - cx, points[0][1] - cy)
-        return {"id": name, "type": "circle", "radius": int(round(r)), "roi": roi}
-    return {"id": name, "type": "polygon", "points": [[int(round(x)), int(round(y))] for x, y in points], "roi": roi}
+        return {
+            "id": name,
+            "product_family": product_family,
+            "type": "circle",
+            "radius": int(round(r)),
+            "roi": roi,
+        }
+    return {
+        "id": name,
+        "product_family": product_family,
+        "type": "polygon",
+        "points": [[int(round(x)), int(round(y))] for x, y in points],
+        "roi": roi,
+    }
 
 
 def draw_shape(surface, points, fill=C_PREVIEW_FILL, border=C_PREVIEW, width=2, closed=True):
@@ -370,18 +393,19 @@ def build_sidebar():
     y += 52 + 38 * 2 + 8
 
     input_name.rect = pygame.Rect(pad, y + 18, w, 34)
-    input_roi.rect = pygame.Rect(pad, y + 72, w, 34)
-    y += 120
+    input_family.rect = pygame.Rect(pad, y + 72, w, 34)
+    y += 132
 
     buttons = {
         "apply": Button((pad, y, w, 38), "保存到列表", "apply", primary=True),
-        "write": Button((pad, y + 46, w, 34), "写入 furniture_templates.json", "write"),
-        "export": Button((pad, y + 86, bw, 34), "导出", "export"),
-        "import": Button((pad + bw + 8, y + 86, bw, 34), "导入", "import"),
-        "delete": Button((pad, y + 126, w, 34), "删除选中", "delete", danger=True),
-        "clear": Button((pad, y + 166, w, 34), "清空画布", "clear"),
+        "copy": Button((pad, y + 46, w, 34), "复制选中模板", "copy"),
+        "write": Button((pad, y + 86, w, 34), "写入 furniture_templates.json", "write"),
+        "export": Button((pad, y + 126, bw, 34), "导出", "export"),
+        "import": Button((pad + bw + 8, y + 126, bw, 34), "导入", "import"),
+        "delete": Button((pad, y + 166, w, 34), "删除选中", "delete", danger=True),
+        "clear": Button((pad, y + 206, w, 34), "清空画布", "clear"),
     }
-    list_top = y + 210
+    list_top = y + 250
     return tool_buttons, buttons, list_top
 
 
@@ -397,19 +421,29 @@ def draw_sidebar(tool_buttons, buttons, list_top):
         btn.draw(screen, mouse_pos)
 
     input_name.draw(screen, "模板名称")
-    input_roi.draw(screen, "ROI (0~10)")
+    input_family.draw(screen, "Product Family")
+    family = input_family.get_text()
+    roi_val = lookup_roi(family)
+    roi_hint = f"ROI: {roi_val:.1f}（按 Product Family 自动匹配）"
+    if family and roi_val == 0:
+        roi_hint = f"ROI: 未找到「{family}」，请检查 roi.xlsx"
+    screen.blit(FONT_SMALL.render(roi_hint, True, C_MUTED), (16, input_family.rect.bottom + 6))
 
     screen.blit(FONT_LABEL.render("已保存模板", True, C_TEXT), (16, list_top))
     y = list_top + 28
     for i, tpl in enumerate(furniture_templates):
-        row = pygame.Rect(12, y + i * 42, SIDEBAR_WIDTH - 24, 36)
+        row = pygame.Rect(12, y + i * 46, SIDEBAR_WIDTH - 24, 40)
         selected = i == selected_index
         bg = (219, 234, 254) if selected else (248, 250, 252)
         pygame.draw.rect(screen, bg, row, border_radius=8)
         if selected:
             pygame.draw.rect(screen, C_ACCENT, row, 2, border_radius=8)
-        label = f"{tpl['id']}  ({tpl['type']})  ROI {tpl.get('roi', '-')}"
-        screen.blit(FONT_SMALL.render(label, True, C_TEXT), (row.x + 10, row.centery - 8))
+        family_label = tpl.get("product_family", tpl.get("id", ""))
+        screen.blit(FONT_SMALL.render(tpl["id"], True, C_TEXT), (row.x + 10, row.y + 6))
+        screen.blit(
+            FONT_SMALL.render(f"{family_label}  |  ROI {tpl.get('roi', '-')}", True, C_MUTED),
+            (row.x + 10, row.y + 22),
+        )
 
     screen.blit(
         FONT_SMALL.render(f"共 {len(furniture_templates)} 个模板", True, C_MUTED),
@@ -434,14 +468,13 @@ def reset_draw_state():
 def apply_current_shape():
     global editing_template
     name = input_name.get_text() or f"template_{len(furniture_templates) + 1}"
-    roi = input_roi.get_float(0.0)
+    family = input_family.get_text() or name
 
     points = None
     if current_tool == "polygon" and len(polygon_points) >= 3:
         points = polygon_points[:]
     elif editing_template:
         points = normalize_template_dict(editing_template)
-        tool = current_tool
     else:
         toast.show("请先在画布上绘制形状")
         return
@@ -450,10 +483,14 @@ def apply_current_shape():
         toast.show("形状无效，请重新绘制")
         return
 
-    editing_template = template_to_dict(name, roi, current_tool if current_tool != "l_shape" else "polygon", points)
+    editing_template = template_to_dict(name, family, current_tool if current_tool != "l_shape" else "polygon", points)
     if current_tool == "l_shape":
         editing_template["type"] = "polygon"
-    toast.show(f"已生成预览: {name}")
+    roi = editing_template["roi"]
+    if roi == 0:
+        toast.show(f"已生成: {name}，但 roi.xlsx 中未找到 {family}")
+    else:
+        toast.show(f"已生成: {name}，ROI={roi:.1f}")
 
 
 def save_to_list():
@@ -462,6 +499,10 @@ def save_to_list():
         apply_current_shape()
     if not editing_template:
         return
+    family = input_family.get_text() or editing_template.get("id", "")
+    editing_template["id"] = input_name.get_text() or editing_template["id"]
+    editing_template["product_family"] = family
+    editing_template["roi"] = lookup_roi(family)
     name = editing_template["id"]
     if selected_index >= 0:
         furniture_templates[selected_index] = editing_template.copy()
@@ -485,8 +526,13 @@ def load_templates_file(path=TEMPLATES_FILE):
     global furniture_templates, selected_index
     if not os.path.isfile(path):
         return
+    reload_roi_map()
     with open(path, "r", encoding="utf-8") as f:
         furniture_templates = json.load(f)
+    for tpl in furniture_templates:
+        family = tpl.get("product_family") or tpl.get("id", "")
+        tpl["product_family"] = family
+        tpl["roi"] = lookup_roi(family)
     selected_index = 0 if furniture_templates else -1
     if furniture_templates:
         load_template_into_editor(0)
@@ -499,7 +545,7 @@ def load_template_into_editor(index):
     tpl = furniture_templates[index]
     editing_template = tpl.copy()
     input_name.set_text(tpl["id"])
-    input_roi.set_text(tpl.get("roi", 0))
+    input_family.set_text(tpl.get("product_family", tpl["id"]))
     if tpl["type"] == "rectangle":
         current_tool = "rect"
     elif tpl["type"] == "circle":
@@ -521,10 +567,30 @@ def delete_selected():
     selected_index = min(selected_index, len(furniture_templates) - 1)
     reset_draw_state()
     input_name.set_text("")
-    input_roi.set_text("")
+    input_family.set_text("")
     if selected_index >= 0:
         load_template_into_editor(selected_index)
     toast.show(f"已删除: {name}")
+
+
+def copy_selected_template():
+    global editing_template, selected_index, draw_phase
+    if selected_index < 0:
+        toast.show("请先选中要复制的模板")
+        return
+    src = furniture_templates[selected_index]
+    new_tpl = copy.deepcopy(src)
+    new_name = f"{src['id']}_copy"
+    new_family = src.get("product_family", src["id"])
+    new_tpl["id"] = new_name
+    new_tpl["product_family"] = new_family
+    new_tpl["roi"] = lookup_roi(new_family)
+    editing_template = new_tpl
+    selected_index = -1
+    draw_phase = "idle"
+    input_name.set_text(new_name)
+    input_family.set_text(new_family)
+    toast.show(f"已复制 {src['id']}，请修改名称和 Product Family 后保存")
 
 
 def handle_toolbar(action):
@@ -535,6 +601,8 @@ def handle_toolbar(action):
         toast.show(f"工具: {dict(TOOLS)[current_tool]}")
     elif action == "apply":
         save_to_list()
+    elif action == "copy":
+        copy_selected_template()
     elif action == "write":
         save_to_list()
         write_templates_file()
@@ -553,7 +621,7 @@ def handle_toolbar(action):
     elif action == "clear":
         reset_draw_state()
         input_name.set_text("")
-        input_roi.set_text("")
+        input_family.set_text("")
         selected_index = -1
         toast.show("画布已清空")
 
@@ -590,7 +658,7 @@ def handle_canvas_mousedown(mx, my, button):
         pts = polygon_from_l_shape(x0, y0, x1, y1, wx, wy)
         editing_template = template_to_dict(
             input_name.get_text() or "l_shape",
-            input_roi.get_float(0),
+            input_family.get_text() or input_name.get_text() or "l_shape",
             "polygon",
             pts,
         )
@@ -620,7 +688,7 @@ def handle_canvas_mouseup(mx, my, button):
             return
         editing_template = template_to_dict(
             input_name.get_text() or "rectangle",
-            input_roi.get_float(0),
+            input_family.get_text() or input_name.get_text() or "rectangle",
             "rect",
             pts,
         )
@@ -635,7 +703,7 @@ def handle_canvas_mouseup(mx, my, button):
             return
         editing_template = template_to_dict(
             input_name.get_text() or "circle",
-            input_roi.get_float(0),
+            input_family.get_text() or input_name.get_text() or "circle",
             "circle",
             pts,
         )
@@ -663,17 +731,17 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
             return True
     if input_name.contains((mx, my)):
         input_name.active = True
-        input_roi.active = False
+        input_family.active = False
         return True
-    if input_roi.contains((mx, my)):
-        input_roi.active = True
+    if input_family.contains((mx, my)):
+        input_family.active = True
         input_name.active = False
         return True
-    input_name.active = input_roi.active = False
+    input_name.active = input_family.active = False
 
     y = list_top + 28
     for i in range(len(furniture_templates)):
-        row = pygame.Rect(12, y + i * 42, SIDEBAR_WIDTH - 24, 36)
+        row = pygame.Rect(12, y + i * 46, SIDEBAR_WIDTH - 24, 40)
         if row.collidepoint(mx, my):
             load_template_into_editor(i)
             return True
@@ -685,6 +753,8 @@ def main():
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
     global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview, resizing_handle, editing_template
     global editing_template, selected_index
+
+    reload_roi_map()
 
     if os.path.isfile(TEMPLATES_FILE):
         try:
@@ -758,23 +828,20 @@ def main():
                     l_cut_preview = None
 
             elif event.type == pygame.KEYDOWN:
-                active = input_name.active or input_roi.active
-                box = input_name if input_name.active else input_roi
+                active = input_name.active or input_family.active
+                box = input_name if input_name.active else input_family
                 if active:
                     if event.key == pygame.K_BACKSPACE:
                         box.text = box.text[:-1]
                     elif event.key == pygame.K_ESCAPE:
                         box.active = False
                     elif event.unicode and event.unicode.isprintable():
-                        if box.numeric and event.unicode not in "0123456789.":
-                            pass
-                        else:
                             box.text += event.unicode
                 elif current_tool == "polygon":
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
                         editing_template = template_to_dict(
                             input_name.get_text() or "polygon",
-                            input_roi.get_float(0),
+                            input_family.get_text() or input_name.get_text() or "polygon",
                             "polygon",
                             polygon_points,
                         )
