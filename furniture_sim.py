@@ -90,6 +90,8 @@ dragging_view = False
 last_mouse_pos = (0, 0)
 mouse_pos = (0, 0)
 toast = ui.Toast()
+GRID_SNAP = 100  # 100mm = 10cm
+resizing_handle = None
 
 # ── 工具与绘制 ──────────────────────────────────────────────
 TOOLS = [
@@ -124,7 +126,16 @@ def world_to_screen(wx, wy):
     return (wx - offset_x) * scale + SIDEBAR_WIDTH, (wy - offset_y) * scale
 
 
+def snap_grid(wx, wy):
+    """默认吸附 10cm 网格，按住 Shift 可自由定位。"""
+    keys = pygame.key.get_pressed()
+    if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+        return wx, wy
+    return round(wx / GRID_SNAP) * GRID_SNAP, round(wy / GRID_SNAP) * GRID_SNAP
+
+
 def snap_point(wx, wy, ref=None):
+    wx, wy = snap_grid(wx, wy)
     keys = pygame.key.get_pressed()
     if ref and (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]):
         rx, ry = ref
@@ -215,6 +226,76 @@ def draw_dimension_label(surface, p1, p2, text):
     surface.blit(label, label.get_rect(center=(mid[0], mid[1] - 12)))
 
 
+def get_resize_handles():
+    if not editing_template:
+        return []
+    t = editing_template
+    if t["type"] == "rectangle":
+        w, h = t.get("width", 0), t.get("height", 0)
+        return [
+            ("br", (w, h)),
+            ("tr", (w, 0)),
+            ("bl", (0, h)),
+        ]
+    if t["type"] == "circle":
+        r = t.get("radius", 0)
+        return [("r", (r, 0))]
+    return [(i, tuple(p)) for i, p in enumerate(t.get("points", []))]
+
+
+def hit_resize_handle(mx, my):
+    for handle_id, (wx, wy) in get_resize_handles():
+        sx, sy = world_to_screen(wx, wy)
+        if math.hypot(mx - sx, my - sy) <= 12:
+            return handle_id
+    return None
+
+
+def apply_resize(handle_id, wx, wy):
+    global editing_template
+    if not editing_template:
+        return
+    wx, wy = snap_grid(wx, wy)
+    t = editing_template
+    if t["type"] == "rectangle":
+        w, h = t.get("width", 0), t.get("height", 0)
+        if handle_id == "br":
+            t["width"] = int(max(GRID_SNAP, wx))
+            t["height"] = int(max(GRID_SNAP, wy))
+        elif handle_id == "tr":
+            t["width"] = int(max(GRID_SNAP, wx))
+            t["height"] = int(max(GRID_SNAP, h))
+        elif handle_id == "bl":
+            t["width"] = int(max(GRID_SNAP, w))
+            t["height"] = int(max(GRID_SNAP, wy))
+    elif t["type"] == "circle":
+        r = int(max(GRID_SNAP, math.hypot(wx, wy)))
+        t["radius"] = r
+    elif isinstance(handle_id, int):
+        pts = t.get("points", [])
+        if 0 <= handle_id < len(pts):
+            pts[handle_id] = [int(wx), int(wy)]
+
+
+def draw_resize_handles(surface):
+    if not editing_template or draw_phase != "idle":
+        return
+    for handle_id, (wx, wy) in get_resize_handles():
+        sx, sy = world_to_screen(wx, wy)
+        color = (234, 88, 12) if resizing_handle == handle_id else (251, 146, 60)
+        pygame.draw.circle(surface, color, (int(sx), int(sy)), 8)
+        pygame.draw.circle(surface, (255, 255, 255), (int(sx), int(sy)), 8, 2)
+    pts = normalize_template_dict(editing_template)
+    if editing_template["type"] == "rectangle" and len(pts) >= 4:
+        w = abs(pts[1][0] - pts[0][0]) / 1000
+        h = abs(pts[2][1] - pts[1][1]) / 1000
+        draw_dimension_label(surface, pts[0], pts[1], f"{w:.1f} m")
+        draw_dimension_label(surface, pts[1], pts[2], f"{h:.1f} m")
+    elif editing_template["type"] == "circle":
+        r = editing_template.get("radius", 0) / 1000
+        draw_dimension_label(surface, (0, 0), (editing_template.get("radius", 0), 0), f"R {r:.1f} m")
+
+
 def draw_canvas(surface):
     surface.fill(C_CANVAS)
     draw_grid(surface)
@@ -222,6 +303,7 @@ def draw_canvas(surface):
     if editing_template:
         pts = normalize_template_dict(editing_template)
         draw_shape(surface, pts, fill=(254, 243, 199), border=(217, 119, 6))
+        draw_resize_handles(surface)
 
     if current_tool == "polygon" and polygon_points:
         pts = polygon_points + ([preview_point] if preview_point else [])
@@ -266,6 +348,12 @@ def draw_canvas(surface):
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif draw_phase == "l_cut":
         tip = "第二步: 点击 L 形内角位置"
+        surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
+    elif editing_template and draw_phase == "idle":
+        tip = "拖动橙色角点调整大小 | 自动对齐 10cm | Shift 自由定位"
+        surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
+    elif draw_phase == "idle":
+        tip = "自动对齐 10cm 网格 | 按住 Shift 自由绘制"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
 
 
@@ -331,12 +419,13 @@ def draw_sidebar(tool_buttons, buttons, list_top):
 
 def reset_draw_state():
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template
-    global l_outer_corners, l_cut_preview
+    global l_outer_corners, l_cut_preview, resizing_handle
     draw_phase = "idle"
     drag_start = None
     drag_current = None
     l_outer_corners = None
     l_cut_preview = None
+    resizing_handle = None
     polygon_points = []
     preview_point = None
     editing_template = None
@@ -471,11 +560,18 @@ def handle_toolbar(action):
 
 def handle_canvas_mousedown(mx, my, button):
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template, selected_index
-    global l_outer_corners, l_cut_preview
+    global l_outer_corners, l_cut_preview, resizing_handle
     wx, wy = screen_to_world(mx, my)
+    wx, wy = snap_grid(wx, wy)
 
     if button == 3:
         return "pan"
+
+    if draw_phase == "idle" and editing_template:
+        handle = hit_resize_handle(mx, my)
+        if handle is not None:
+            resizing_handle = handle
+            return
 
     if current_tool == "polygon":
         if draw_phase == "idle":
@@ -587,7 +683,7 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
 def main():
     global screen, clock
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
-    global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview
+    global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview, resizing_handle, editing_template
     global editing_template, selected_index
 
     if os.path.isfile(TEMPLATES_FILE):
@@ -632,12 +728,19 @@ def main():
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button in (1, 3):
                     dragging_view = False
-                if event.button == 1 and event.pos[0] >= SIDEBAR_WIDTH:
-                    handle_canvas_mouseup(*event.pos, 1)
+                if event.button == 1:
+                    if resizing_handle is not None:
+                        resizing_handle = None
+                        toast.show("尺寸已更新")
+                    elif event.pos[0] >= SIDEBAR_WIDTH:
+                        handle_canvas_mouseup(*event.pos, 1)
 
             elif event.type == pygame.MOUSEMOTION:
                 mx, my = event.pos
-                if dragging_view:
+                if resizing_handle is not None:
+                    wx, wy = screen_to_world(mx, my)
+                    apply_resize(resizing_handle, wx, wy)
+                elif dragging_view:
                     offset_x += (last_mouse_pos[0] - mx) / scale
                     offset_y += (last_mouse_pos[1] - my) / scale
                     last_mouse_pos = (mx, my)
