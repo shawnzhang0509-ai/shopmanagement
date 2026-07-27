@@ -73,6 +73,7 @@ class Button:
         return self.enabled and self.rect.collidepoint(pos)
 
     def draw(self, surface, mouse_pos):
+        init_fonts()
         hover = self.enabled and self.rect.collidepoint(mouse_pos)
         if self.toggle and self.active:
             bg, fg, border = C_ACCENT, (255, 255, 255), C_ACCENT
@@ -120,6 +121,7 @@ class InputBox:
         self.text = "" if value is None else str(value)
 
     def draw(self, surface, label=None):
+        init_fonts()
         if label:
             surface.blit(FONT_SMALL.render(label, True, C_MUTED), (self.rect.x, self.rect.y - 18))
         bg = (255, 255, 255) if self.active else (248, 250, 252)
@@ -142,6 +144,7 @@ class Toast:
         print(msg)
 
     def draw(self, surface, x_center, y=16):
+        init_fonts()
         if pygame.time.get_ticks() > self.until or not self.message:
             return
         text = FONT_BODY.render(self.message, True, (255, 255, 255))

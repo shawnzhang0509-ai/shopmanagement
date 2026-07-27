@@ -19,29 +19,7 @@ TEMPLATES_FILE = "furniture_templates.json"
 pygame.init()
 
 try:
-    from ui_common import (
-        SIDEBAR_WIDTH,
-        SCREEN_HEIGHT,
-        SCREEN_WIDTH,
-        Button,
-        C_ACCENT,
-        C_BORDER,
-        C_CANVAS,
-        C_GRID,
-        C_MUTED,
-        C_PREVIEW,
-        C_PREVIEW_FILL,
-        C_TEXT,
-        FONT_BODY,
-        FONT_LABEL,
-        FONT_MARK,
-        FONT_SMALL,
-        FONT_TITLE,
-        InputBox,
-        Toast,
-        draw_sidebar_bg,
-        init_fonts,
-    )
+    import ui_common as ui
 except ImportError as exc:
     print("无法加载 ui_common.py，请确认该文件与 furniture_sim.py 在同一目录。")
     print(f"当前目录: {os.getcwd()}")
@@ -50,7 +28,27 @@ except ImportError as exc:
         input("\n按 Enter 退出...")
     raise SystemExit(1) from exc
 
-init_fonts()
+ui.init_fonts()
+
+# 必须在 init_fonts() 之后绑定，否则字体为 None
+SIDEBAR_WIDTH = ui.SIDEBAR_WIDTH
+SCREEN_WIDTH = ui.SCREEN_WIDTH
+SCREEN_HEIGHT = ui.SCREEN_HEIGHT
+C_ACCENT = ui.C_ACCENT
+C_BORDER = ui.C_BORDER
+C_CANVAS = ui.C_CANVAS
+C_GRID = ui.C_GRID
+C_MUTED = ui.C_MUTED
+C_PREVIEW = ui.C_PREVIEW
+C_PREVIEW_FILL = ui.C_PREVIEW_FILL
+C_TEXT = ui.C_TEXT
+FONT_TITLE = ui.FONT_TITLE
+FONT_BODY = ui.FONT_BODY
+FONT_SMALL = ui.FONT_SMALL
+FONT_LABEL = ui.FONT_LABEL
+FONT_MARK = ui.FONT_MARK
+Button = ui.Button
+draw_sidebar_bg = ui.draw_sidebar_bg
 
 _tk_root = None
 
@@ -91,7 +89,7 @@ scale = 0.08
 dragging_view = False
 last_mouse_pos = (0, 0)
 mouse_pos = (0, 0)
-toast = Toast()
+toast = ui.Toast()
 
 # ── 工具与绘制 ──────────────────────────────────────────────
 TOOLS = [
@@ -112,8 +110,8 @@ furniture_templates = []
 selected_index = -1
 editing_template = None  # dict preview before save
 
-input_name = InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
-input_roi = InputBox((0, 0, 0, 0), placeholder="0 ~ 10", numeric=True)
+input_name = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
+input_roi = ui.InputBox((0, 0, 0, 0), placeholder="0 ~ 10", numeric=True)
 
 
 def screen_to_world(sx, sy):
