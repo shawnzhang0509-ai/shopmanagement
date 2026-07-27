@@ -7,8 +7,8 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 
-REQUIRED_FILES = ["layout.py", "furniture_templates.json"]
-OPTIONAL_FILES = ["saved_layout.json", "furniture_sim.py"]
+REQUIRED_FILES = ["layout.py", "furniture_templates.json", "furniture_sim.py", "ui_common.py"]
+OPTIONAL_FILES = ["saved_layout.json", "start.bat", "start_template.bat"]
 
 
 def ok(msg: str) -> None:
@@ -66,6 +66,19 @@ def main() -> int:
             fail(f"furniture_templates.json 解析失败: {e}")
             errors += 1
 
+    print("\n--- 模块导入测试 ---")
+    if errors == 0:
+        try:
+            import pygame
+            pygame.init()
+            from ui_common import init_fonts
+            init_fonts()
+            ok("ui_common 加载成功")
+            pygame.quit()
+        except Exception as e:
+            fail(f"ui_common / furniture_sim 依赖异常: {e}")
+            errors += 1
+
     print("\n--- 显示测试 ---")
     if errors == 0:
         try:
@@ -82,7 +95,9 @@ def main() -> int:
     if errors:
         print(f"检查未通过，共 {errors} 项问题。请按上面提示修复。")
         return 1
-    print("全部通过！可以运行: python layout.py")
+    print("全部通过！可以运行:")
+    print("  python layout.py")
+    print("  python furniture_sim.py")
     return 0
 
 

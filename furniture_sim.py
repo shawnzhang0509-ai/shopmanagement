@@ -2,6 +2,8 @@ try:
     import pygame
 except ModuleNotFoundError:
     print("未找到 pygame。Python 3.14 请安装: python -m pip install pygame-ce")
+    if __name__ == "__main__":
+        input("\n按 Enter 退出...")
     raise SystemExit(1) from None
 
 import json
@@ -9,43 +11,79 @@ import math
 import os
 import sys
 import traceback
-import tkinter as tk
-from tkinter import filedialog, messagebox
-
-from ui_common import (
-    SIDEBAR_WIDTH,
-    SCREEN_HEIGHT,
-    SCREEN_WIDTH,
-    Button,
-    C_ACCENT,
-    C_BORDER,
-    C_CANVAS,
-    C_GRID,
-    C_MUTED,
-    C_PREVIEW,
-    C_PREVIEW_FILL,
-    C_TEXT,
-    FONT_BODY,
-    FONT_LABEL,
-    FONT_MARK,
-    FONT_SMALL,
-    FONT_TITLE,
-    InputBox,
-    Toast,
-    draw_sidebar_bg,
-)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 TEMPLATES_FILE = "furniture_templates.json"
 
 pygame.init()
-root = tk.Tk()
-root.withdraw()
 
-screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("家具模板编辑器")
-clock = pygame.time.Clock()
+try:
+    from ui_common import (
+        SIDEBAR_WIDTH,
+        SCREEN_HEIGHT,
+        SCREEN_WIDTH,
+        Button,
+        C_ACCENT,
+        C_BORDER,
+        C_CANVAS,
+        C_GRID,
+        C_MUTED,
+        C_PREVIEW,
+        C_PREVIEW_FILL,
+        C_TEXT,
+        FONT_BODY,
+        FONT_LABEL,
+        FONT_MARK,
+        FONT_SMALL,
+        FONT_TITLE,
+        InputBox,
+        Toast,
+        draw_sidebar_bg,
+        init_fonts,
+    )
+except ImportError as exc:
+    print("无法加载 ui_common.py，请确认该文件与 furniture_sim.py 在同一目录。")
+    print(f"当前目录: {os.getcwd()}")
+    print(f"错误: {exc}")
+    if __name__ == "__main__":
+        input("\n按 Enter 退出...")
+    raise SystemExit(1) from exc
+
+init_fonts()
+
+_tk_root = None
+
+
+def get_tk_root():
+    global _tk_root
+    if _tk_root is None:
+        import tkinter as tk
+        _tk_root = tk.Tk()
+        _tk_root.withdraw()
+    return _tk_root
+
+
+def filedialog_save(**kwargs):
+    from tkinter import filedialog
+    return filedialog.asksaveasfilename(parent=get_tk_root(), **kwargs)
+
+
+def filedialog_open(**kwargs):
+    from tkinter import filedialog
+    return filedialog.askopenfilename(parent=get_tk_root(), **kwargs)
+
+
+def show_error(title, message):
+    try:
+        from tkinter import messagebox
+        messagebox.showerror(title, message, parent=get_tk_root())
+    except Exception:
+        print(f"{title}: {message}")
+
+
+screen = None
+clock = None
 
 # ── 画布状态 ────────────────────────────────────────────────
 offset_x, offset_y = 0.0, 0.0
@@ -246,7 +284,7 @@ def build_sidebar():
     y += 120
 
     buttons = {
-        "apply": Button((pad, y, w, 38), "✓ 保存到列表", "apply", primary=True),
+        "apply": Button((pad, y, w, 38), "保存到列表", "apply", primary=True),
         "write": Button((pad, y + 46, w, 34), "写入 furniture_templates.json", "write"),
         "export": Button((pad, y + 86, bw, 34), "导出", "export"),
         "import": Button((pad + bw + 8, y + 86, bw, 34), "导入", "import"),
@@ -407,13 +445,13 @@ def handle_toolbar(action):
         save_to_list()
         write_templates_file()
     elif action == "export":
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        path = filedialog_save(defaultextension=".json", filetypes=[("JSON", "*.json")])
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(furniture_templates, f, ensure_ascii=False, indent=2)
             toast.show(f"已导出: {os.path.basename(path)}")
     elif action == "import":
-        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        path = filedialog_open(filetypes=[("JSON", "*.json")])
         if path:
             load_templates_file(path)
     elif action == "delete":
@@ -534,6 +572,7 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
 
 
 def main():
+    global screen, clock
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
     global draw_phase, drag_current, preview_point, polygon_points
     global editing_template, selected_index
@@ -541,8 +580,12 @@ def main():
     if os.path.isfile(TEMPLATES_FILE):
         try:
             load_templates_file()
-        except Exception:
-            pass
+        except Exception as exc:
+            show_error("加载模板失败", str(exc))
+
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption("家具模板编辑器")
+    clock = pygame.time.Clock()
 
     tool_buttons, buttons, list_top = build_sidebar()
     running = True
@@ -642,10 +685,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         traceback.print_exc()
-        try:
-            messagebox.showerror("启动失败", str(exc))
-        except Exception:
-            pass
+        show_error("启动失败", f"{exc}\n\n请运行: python check_env.py")
         if sys.platform == "win32":
             input("\n按 Enter 退出...")
         raise SystemExit(1) from exc

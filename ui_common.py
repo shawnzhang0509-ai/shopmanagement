@@ -24,20 +24,30 @@ C_PREVIEW_FILL = (191, 219, 254)
 
 FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
 
-
-def load_font(size: int, bold: bool = False) -> pygame.font.Font:
-    for name in FONT_CANDIDATES:
-        path = pygame.font.match_font(name, bold=bold)
-        if path:
-            return pygame.font.Font(path, size)
-    return pygame.font.SysFont(None, size, bold=bold)
+FONT_TITLE = None
+FONT_BODY = None
+FONT_SMALL = None
+FONT_LABEL = None
+FONT_MARK = None
 
 
-FONT_TITLE = load_font(22, bold=True)
-FONT_BODY = load_font(16)
-FONT_SMALL = load_font(13)
-FONT_LABEL = load_font(14, bold=True)
-FONT_MARK = load_font(12)
+def init_fonts():
+    global FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_LABEL, FONT_MARK
+    if FONT_TITLE is not None:
+        return
+
+    def load_font(size: int, bold: bool = False) -> pygame.font.Font:
+        for name in FONT_CANDIDATES:
+            path = pygame.font.match_font(name, bold=bold)
+            if path:
+                return pygame.font.Font(path, size)
+        return pygame.font.SysFont(None, size, bold=bold)
+
+    FONT_TITLE = load_font(22, bold=True)
+    FONT_BODY = load_font(16)
+    FONT_SMALL = load_font(13)
+    FONT_LABEL = load_font(14, bold=True)
+    FONT_MARK = load_font(12)
 
 
 class Button:
