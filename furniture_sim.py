@@ -133,6 +133,8 @@ _last_input_click = {"box": None, "time": 0}
 
 FOCUS_ZONES = ("name", "family", "search", "list")
 focus_zone = "canvas"
+_pending_input_focus = None
+_pending_focus_frames = 0
 
 
 class TemplateBrowser:
@@ -283,7 +285,7 @@ template_browser = TemplateBrowser()
 
 
 def focus_input(box):
-    global focus_zone
+    global focus_zone, _pending_input_focus, _pending_focus_frames
     input_name.deactivate()
     input_family.deactivate()
     input_search.deactivate()
@@ -296,6 +298,19 @@ def focus_input(box):
     elif box is input_search:
         input_search.activate()
         focus_zone = "search"
+    _pending_input_focus = box
+    _pending_focus_frames = 10
+
+
+def tick_input_focus():
+    """Re-attach text input after programmatic focus (copy / Tab) on Windows."""
+    global _pending_focus_frames
+    if _pending_input_focus and _pending_focus_frames > 0:
+        _pending_input_focus.refresh_text_input()
+        _pending_focus_frames -= 1
+    for box in (input_name, input_family, input_search):
+        if box.active:
+            box.refresh_text_input()
 
 
 def handle_input_click(box):
@@ -957,7 +972,7 @@ def _begin_template_copy_from(src: dict, source_label: str | None = None) -> Non
     input_family.set_text(new_family)
     focus_input(input_name)
     input_name.select_all_text()
-    toast.show(f"已复制 {label} → 新副本，改名称后点保存（不会覆盖原模板）")
+    toast.show(f"已复制 {label} → 可直接输入新名称")
 
 
 def copy_selected_template():
@@ -1293,6 +1308,14 @@ def main():
                         save_to_list()
                         write_templates_file()
 
+            elif event.type == pygame.TEXTEDITING:
+                if input_name.active:
+                    input_name.handle_event(event)
+                elif input_family.active:
+                    input_family.handle_event(event)
+                elif input_search.active:
+                    input_search.handle_event(event)
+
             elif event.type == pygame.TEXTINPUT:
                 if input_name.active:
                     input_name.handle_event(event)
@@ -1304,6 +1327,7 @@ def main():
 
         draw_canvas(screen)
         draw_sidebar(tool_buttons, buttons, list_top)
+        tick_input_focus()
         toast.draw(screen, SIDEBAR_WIDTH + (SCREEN_WIDTH - SIDEBAR_WIDTH) // 2)
         pygame.display.flip()
         clock.tick(60)

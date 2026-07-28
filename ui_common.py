@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pygame
 
-__version__ = "7"
+__version__ = "8"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
 SIDEBAR_WIDTH = 340
@@ -214,6 +214,7 @@ class InputBox:
         self.numeric = numeric
         self.select_all = False
         self._skip_next_textinput = False
+        self.composition = ""  # IME 预编辑（拼音/中文组字）
 
     def contains(self, pos):
         return self.rect.collidepoint(pos)
@@ -230,10 +231,22 @@ class InputBox:
     def set_text(self, value):
         self.text = "" if value is None else str(value)
         self.select_all = False
+        self.composition = ""
 
     def select_all_text(self):
         if self.text:
             self.select_all = True
+        self.composition = ""
+
+    def refresh_text_input(self):
+        """Keep SDL text input attached — needed after programmatic focus on Windows."""
+        if not self.active:
+            return
+        try:
+            pygame.key.start_text_input()
+            pygame.key.set_text_input_rect(self.rect)
+        except Exception:
+            pass
 
     def _filter_text(self, text: str) -> str:
         if not text:
@@ -299,6 +312,7 @@ class InputBox:
 
     def activate(self):
         self.active = True
+        self.composition = ""
         try:
             pygame.key.start_text_input()
             pygame.key.set_text_input_rect(self.rect)
@@ -309,6 +323,7 @@ class InputBox:
     def deactivate(self):
         self.active = False
         self.select_all = False
+        self.composition = ""
         try:
             pygame.key.stop_text_input()
             pygame.key.set_repeat(0)
@@ -318,15 +333,18 @@ class InputBox:
     def handle_event(self, event):
         if not self.active:
             return False
+        if event.type == pygame.TEXTEDITING:
+            self.composition = event.text or ""
+            if self.composition:
+                self.select_all = False
+            return True
         if event.type == pygame.TEXTINPUT:
             text = event.text or ""
+            self.composition = ""
             if self._skip_next_textinput:
                 self._skip_next_textinput = False
                 return True
-            if len(text) > 1:
-                self._insert_text(_normalize_paste(text))
-                return True
-            if pygame.key.get_mods() & (pygame.KMOD_CTRL | pygame.KMOD_META):
+            if len(text) > 1 and (pygame.key.get_mods() & (pygame.KMOD_CTRL | pygame.KMOD_META)):
                 return True
             self._insert_text(text)
             return True
@@ -368,28 +386,60 @@ class InputBox:
         pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=4)
         text_x = self.rect.x + 10
         text_y = self.rect.y + 9
-        if self.text:
-            display = self.text
-            color = C_TEXT if not on_dark else C_SIDEBAR_TEXT
-            text_surf = FONT_SMALL.render(display, True, color)
-            if self.active and self.select_all:
-                highlight = pygame.Rect(text_x - 2, self.rect.y + 6, text_surf.get_width() + 4, self.rect.height - 12)
-                pygame.draw.rect(surface, C_ACCENT_LIGHT, highlight, border_radius=4)
-            surface.blit(text_surf, (text_x, text_y))
+
+        if self.active:
+            text_color = C_TEXT
+            caret_color = C_ACCENT
+        elif on_dark:
+            text_color = C_SIDEBAR_TEXT
+            caret_color = C_SIDEBAR_TEXT
+        else:
+            text_color = C_TEXT
+            caret_color = C_ACCENT
+
+        has_content = bool(self.text or self.composition)
+        if has_content:
+            cursor_x = text_x
+            if self.text:
+                text_surf = FONT_SMALL.render(self.text, True, text_color)
+                if self.active and self.select_all:
+                    highlight = pygame.Rect(
+                        text_x - 2, self.rect.y + 6, text_surf.get_width() + 4, self.rect.height - 12
+                    )
+                    pygame.draw.rect(surface, C_ACCENT_LIGHT, highlight, border_radius=4)
+                surface.blit(text_surf, (text_x, text_y))
+                cursor_x = text_x + text_surf.get_width()
+            if self.composition and self.active:
+                comp_surf = FONT_SMALL.render(self.composition, True, C_MUTED)
+                surface.blit(comp_surf, (cursor_x, text_y))
+                ul_y = text_y + comp_surf.get_height() + 1
+                pygame.draw.line(
+                    surface,
+                    C_ACCENT,
+                    (cursor_x, ul_y),
+                    (cursor_x + comp_surf.get_width(), ul_y),
+                    1,
+                )
+                cursor_x += comp_surf.get_width()
+            elif self.active and not self.select_all:
+                if pygame.time.get_ticks() % 1000 < 500:
+                    pygame.draw.line(
+                        surface,
+                        caret_color,
+                        (cursor_x + 1, self.rect.y + 8),
+                        (cursor_x + 1, self.rect.bottom - 8),
+                        2,
+                    )
         else:
             display = self.placeholder
-            color = C_SIDEBAR_MUTED if on_dark else C_MUTED
-            text_surf = FONT_SMALL.render(display, True, color)
-            surface.blit(text_surf, (text_x, text_y))
-        if self.active and not self.select_all:
-            caret_color = C_ACCENT if not on_dark else (255, 255, 255)
-            caret_x = text_x + (FONT_SMALL.render(self.text, True, caret_color).get_width() if self.text else 0) + 1
-            if pygame.time.get_ticks() % 1000 < 500:
+            ph_color = C_MUTED if self.active else (C_SIDEBAR_MUTED if on_dark else C_MUTED)
+            surface.blit(FONT_SMALL.render(display, True, ph_color), (text_x, text_y))
+            if self.active and pygame.time.get_ticks() % 1000 < 500:
                 pygame.draw.line(
                     surface,
                     caret_color,
-                    (caret_x, self.rect.y + 8),
-                    (caret_x, self.rect.bottom - 8),
+                    (text_x + 1, self.rect.y + 8),
+                    (text_x + 1, self.rect.bottom - 8),
                     2,
                 )
 
