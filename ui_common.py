@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pygame
 
-__version__ = "5"
+__version__ = "6"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
 SIDEBAR_WIDTH = 300
@@ -46,20 +46,85 @@ def get_tk_root():
     return _tk_root
 
 
-def clipboard_get() -> str:
+_CTRL_UNICODE = {
+    "a": "\x01",
+    "c": "\x03",
+    "v": "\x16",
+    "x": "\x18",
+}
+_CTRL_SCANCODES = {
+    "a": 4,
+    "c": 6,
+    "v": 25,
+    "x": 45,
+}
+
+
+def is_ctrl_key(event, letter: str) -> bool:
+    """Detect Ctrl shortcuts reliably on Windows IME / pygame-ce."""
+    letter = letter.lower()
+    mods = getattr(event, "mod", 0)
+    if not (mods & (pygame.KMOD_CTRL | pygame.KMOD_META)):
+        return False
+    key_const = getattr(pygame, f"K_{letter}", None)
+    if key_const is not None and event.key == key_const:
+        return True
+    if getattr(event, "unicode", "") == _CTRL_UNICODE.get(letter):
+        return True
+    if getattr(event, "scancode", -1) == _CTRL_SCANCODES.get(letter, -2):
+        return True
+    return False
+
+
+def _init_clipboard() -> None:
     try:
-        return get_tk_root().clipboard_get()
+        import pygame.scrap as scrap
+
+        if not scrap.get_init():
+            scrap.init()
+    except Exception:
+        pass
+
+
+def clipboard_get() -> str:
+    _init_clipboard()
+    try:
+        import pygame.scrap as scrap
+
+        if scrap.has_text():
+            return scrap.get_text()
+    except Exception:
+        pass
+    try:
+        root = get_tk_root()
+        root.update_idletasks()
+        root.update()
+        return root.clipboard_get()
     except Exception:
         return ""
 
 
 def clipboard_set(text: str) -> None:
+    value = "" if text is None else str(text)
+    _init_clipboard()
+    try:
+        import pygame.scrap as scrap
+
+        scrap.put_text(value)
+    except Exception:
+        pass
     try:
         root = get_tk_root()
         root.clipboard_clear()
-        root.clipboard_append(text or "")
+        root.clipboard_append(value)
+        root.update_idletasks()
+        root.update()
     except Exception:
         pass
+
+
+def _normalize_paste(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0]
 
 
 def init_fonts():
@@ -134,6 +199,7 @@ class InputBox:
         self.active = False
         self.numeric = numeric
         self.select_all = False
+        self._skip_next_textinput = False
 
     def contains(self, pos):
         return self.rect.collidepoint(pos)
@@ -178,6 +244,45 @@ class InputBox:
         elif self.text:
             self.text = self.text[:-1]
 
+    def _pause_text_input(self):
+        try:
+            pygame.key.stop_text_input()
+        except Exception:
+            pass
+
+    def _resume_text_input(self):
+        if not self.active:
+            return
+        try:
+            pygame.key.start_text_input()
+            pygame.key.set_text_input_rect(self.rect)
+        except Exception:
+            pass
+
+    def _copy_text(self) -> None:
+        if not self.text:
+            return
+        self._pause_text_input()
+        clipboard_set(self.text)
+        self._resume_text_input()
+
+    def _cut_text(self) -> None:
+        if not self.text:
+            return
+        self._pause_text_input()
+        clipboard_set(self.text)
+        self.text = ""
+        self.select_all = False
+        self._resume_text_input()
+
+    def _paste_text(self) -> None:
+        self._pause_text_input()
+        pasted = _normalize_paste(clipboard_get())
+        if pasted:
+            self._skip_next_textinput = True
+            self._insert_text(pasted)
+        self._resume_text_input()
+
     def activate(self):
         self.active = True
         try:
@@ -200,30 +305,29 @@ class InputBox:
         if not self.active:
             return False
         if event.type == pygame.TEXTINPUT:
+            text = event.text or ""
+            if self._skip_next_textinput:
+                self._skip_next_textinput = False
+                return True
+            if len(text) > 1:
+                self._insert_text(_normalize_paste(text))
+                return True
             if pygame.key.get_mods() & (pygame.KMOD_CTRL | pygame.KMOD_META):
                 return True
-            self._insert_text(event.text)
+            self._insert_text(text)
             return True
         if event.type == pygame.KEYDOWN:
-            mods = event.mod
-            ctrl = bool(mods & (pygame.KMOD_CTRL | pygame.KMOD_META))
-
-            if ctrl and event.key == pygame.K_a:
+            if is_ctrl_key(event, "a"):
                 self.select_all_text()
                 return True
-            if ctrl and event.key == pygame.K_c:
-                if self.text:
-                    clipboard_set(self.text)
+            if is_ctrl_key(event, "c"):
+                self._copy_text()
                 return True
-            if ctrl and event.key == pygame.K_x:
-                if self.text:
-                    clipboard_set(self.text)
-                    self.text = ""
-                    self.select_all = False
+            if is_ctrl_key(event, "x"):
+                self._cut_text()
                 return True
-            if ctrl and event.key == pygame.K_v:
-                pasted = clipboard_get().replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0]
-                self._insert_text(pasted)
+            if is_ctrl_key(event, "v"):
+                self._paste_text()
                 return True
 
             if event.key == pygame.K_BACKSPACE:

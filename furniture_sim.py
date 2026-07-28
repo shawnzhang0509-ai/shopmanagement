@@ -814,6 +814,32 @@ def handle_canvas_mouseup(mx, my, button):
         toast.show("外框完成，再点击内角位置")
 
 
+def handle_global_clipboard_shortcuts(event):
+    """When input is not focused, still support copy/paste for template workflow."""
+    if event.type != pygame.KEYDOWN:
+        return False
+    if input_name.active or input_family.active:
+        return False
+    if ui.is_ctrl_key(event, "c"):
+        if selected_index >= 0:
+            ui.clipboard_set(furniture_templates[selected_index]["id"])
+            toast.show("已复制模板名称")
+            return True
+        if editing_template and editing_template.get("id"):
+            ui.clipboard_set(editing_template["id"])
+            toast.show("已复制模板名称")
+            return True
+    if ui.is_ctrl_key(event, "v"):
+        pasted = ui.clipboard_get()
+        if pasted:
+            focus_input(input_name)
+            input_name.set_text(pasted.replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0])
+            input_name.select_all_text()
+            toast.show("已粘贴到模板名称")
+            return True
+    return False
+
+
 def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
     for tool_id, btn in tool_buttons.items():
         if btn.contains((mx, my)):
@@ -919,18 +945,14 @@ def main():
                     preview_point = None
                     l_cut_preview = None
 
-            elif event.type == pygame.TEXTINPUT:
-                if input_name.active:
-                    input_name.handle_event(event)
-                elif input_family.active:
-                    input_family.handle_event(event)
-
             elif event.type == pygame.KEYDOWN:
                 handled = input_name.handle_event(event) or input_family.handle_event(event)
                 if handled:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         if input_name.active or input_family.active:
                             rename_template()
+                elif handle_global_clipboard_shortcuts(event):
+                    pass
                 elif current_tool == "polygon":
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
                         editing_template = template_to_dict(
@@ -949,8 +971,15 @@ def main():
                         draw_phase = "idle"
                         preview_point = None
                 elif event.key == pygame.K_s and event.mod & pygame.KMOD_CTRL:
-                    save_to_list()
-                    write_templates_file()
+                    if not (input_name.active or input_family.active):
+                        save_to_list()
+                        write_templates_file()
+
+            elif event.type == pygame.TEXTINPUT:
+                if input_name.active:
+                    input_name.handle_event(event)
+                elif input_family.active:
+                    input_family.handle_event(event)
 
         draw_canvas(screen)
         draw_sidebar(tool_buttons, buttons, list_top)
