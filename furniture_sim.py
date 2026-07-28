@@ -119,6 +119,7 @@ editing_template = None  # dict preview before save
 
 input_name = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
 input_family = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
+_last_input_click = {"box": None, "time": 0}
 
 
 def focus_input(box):
@@ -128,6 +129,21 @@ def focus_input(box):
         input_name.activate()
     elif box is input_family:
         input_family.activate()
+
+
+def handle_input_click(box):
+    global _last_input_click
+    now = pygame.time.get_ticks()
+    is_double = _last_input_click["box"] is box and now - _last_input_click["time"] < 400
+    if is_double:
+        focus_input(box)
+        box.select_all_text()
+    elif box.active and box.select_all:
+        box.select_all = False
+        focus_input(box)
+    else:
+        focus_input(box)
+    _last_input_click = {"box": box, "time": now}
 
 
 def blur_inputs():
@@ -664,7 +680,9 @@ def copy_selected_template():
     draw_phase = "idle"
     input_name.set_text(new_name)
     input_family.set_text(new_family)
-    toast.show(f"已复制 {src['id']}，改名称后点「重命名 / 确认名称」")
+    focus_input(input_name)
+    input_name.select_all_text()
+    toast.show(f"已复制 {src['id']}，可直接改名称或 Ctrl+V 粘贴")
 
 
 def handle_toolbar(action):
@@ -806,10 +824,10 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
             handle_toolbar(btn.action)
             return True
     if input_name.contains((mx, my)):
-        focus_input(input_name)
+        handle_input_click(input_name)
         return True
     if input_family.contains((mx, my)):
-        focus_input(input_family)
+        handle_input_click(input_family)
         return True
     blur_inputs()
 
@@ -908,7 +926,8 @@ def main():
                     input_family.handle_event(event)
 
             elif event.type == pygame.KEYDOWN:
-                if input_name.handle_event(event) or input_family.handle_event(event):
+                handled = input_name.handle_event(event) or input_family.handle_event(event)
+                if handled:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         if input_name.active or input_family.active:
                             rename_template()
