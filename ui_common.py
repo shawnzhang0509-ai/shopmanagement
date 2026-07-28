@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pygame
 
-__version__ = "4"
+__version__ = "5"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
 SIDEBAR_WIDTH = 300
@@ -31,6 +31,35 @@ FONT_BODY = None
 FONT_SMALL = None
 FONT_LABEL = None
 FONT_MARK = None
+
+
+_tk_root = None
+
+
+def get_tk_root():
+    global _tk_root
+    if _tk_root is None:
+        import tkinter as tk
+
+        _tk_root = tk.Tk()
+        _tk_root.withdraw()
+    return _tk_root
+
+
+def clipboard_get() -> str:
+    try:
+        return get_tk_root().clipboard_get()
+    except Exception:
+        return ""
+
+
+def clipboard_set(text: str) -> None:
+    try:
+        root = get_tk_root()
+        root.clipboard_clear()
+        root.clipboard_append(text or "")
+    except Exception:
+        pass
 
 
 def init_fonts():
@@ -104,6 +133,7 @@ class InputBox:
         self.placeholder = placeholder
         self.active = False
         self.numeric = numeric
+        self.select_all = False
 
     def contains(self, pos):
         return self.rect.collidepoint(pos)
@@ -119,19 +149,50 @@ class InputBox:
 
     def set_text(self, value):
         self.text = "" if value is None else str(value)
+        self.select_all = False
+
+    def select_all_text(self):
+        if self.text:
+            self.select_all = True
+
+    def _filter_text(self, text: str) -> str:
+        if not text:
+            return ""
+        if self.numeric:
+            return "".join(ch for ch in text if ch in "0123456789.")
+        return text
+
+    def _insert_text(self, text: str) -> None:
+        text = self._filter_text(text)
+        if not text:
+            return
+        if self.select_all:
+            self.text = ""
+            self.select_all = False
+        self.text += text
+
+    def _delete_backward(self) -> None:
+        if self.select_all:
+            self.text = ""
+            self.select_all = False
+        elif self.text:
+            self.text = self.text[:-1]
 
     def activate(self):
         self.active = True
         try:
             pygame.key.start_text_input()
             pygame.key.set_text_input_rect(self.rect)
+            pygame.key.set_repeat(400, 35)
         except Exception:
             pass
 
     def deactivate(self):
         self.active = False
+        self.select_all = False
         try:
             pygame.key.stop_text_input()
+            pygame.key.set_repeat(0)
         except Exception:
             pass
 
@@ -139,15 +200,37 @@ class InputBox:
         if not self.active:
             return False
         if event.type == pygame.TEXTINPUT:
-            text = event.text
-            if self.numeric:
-                text = "".join(ch for ch in text if ch in "0123456789.")
-            if text:
-                self.text += text
+            if pygame.key.get_mods() & (pygame.KMOD_CTRL | pygame.KMOD_META):
+                return True
+            self._insert_text(event.text)
             return True
         if event.type == pygame.KEYDOWN:
+            mods = event.mod
+            ctrl = bool(mods & (pygame.KMOD_CTRL | pygame.KMOD_META))
+
+            if ctrl and event.key == pygame.K_a:
+                self.select_all_text()
+                return True
+            if ctrl and event.key == pygame.K_c:
+                if self.text:
+                    clipboard_set(self.text)
+                return True
+            if ctrl and event.key == pygame.K_x:
+                if self.text:
+                    clipboard_set(self.text)
+                    self.text = ""
+                    self.select_all = False
+                return True
+            if ctrl and event.key == pygame.K_v:
+                pasted = clipboard_get().replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0]
+                self._insert_text(pasted)
+                return True
+
             if event.key == pygame.K_BACKSPACE:
-                self.text = self.text[:-1]
+                self._delete_backward()
+                return True
+            if event.key == pygame.K_DELETE:
+                self._delete_backward()
                 return True
             if event.key == pygame.K_ESCAPE:
                 self.deactivate()
@@ -164,16 +247,23 @@ class InputBox:
         pygame.draw.rect(surface, bg, self.rect, border_radius=8)
         border = C_ACCENT if self.active else C_BORDER
         pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=8)
+        text_x = self.rect.x + 10
+        text_y = self.rect.y + 9
         if self.text:
             display = self.text
             color = C_TEXT
+            text_surf = FONT_SMALL.render(display, True, color)
+            if self.active and self.select_all:
+                highlight = pygame.Rect(text_x - 2, self.rect.y + 6, text_surf.get_width() + 4, self.rect.height - 12)
+                pygame.draw.rect(surface, C_ACCENT_LIGHT, highlight, border_radius=4)
+            surface.blit(text_surf, (text_x, text_y))
         else:
             display = self.placeholder
             color = C_MUTED
-        text_surf = FONT_SMALL.render(display, True, color)
-        surface.blit(text_surf, (self.rect.x + 10, self.rect.y + 9))
-        if self.active:
-            caret_x = self.rect.x + 10 + text_surf.get_width() + 1
+            text_surf = FONT_SMALL.render(display, True, color)
+            surface.blit(text_surf, (text_x, text_y))
+        if self.active and not self.select_all:
+            caret_x = text_x + (FONT_SMALL.render(self.text, True, C_TEXT).get_width() if self.text else 0) + 1
             if pygame.time.get_ticks() % 1000 < 500:
                 pygame.draw.line(
                     surface,
