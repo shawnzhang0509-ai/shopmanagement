@@ -265,6 +265,7 @@ class InputBox:
         self.text += text
 
     def _delete_backward(self) -> None:
+        self.composition = ""
         if self.select_all:
             self.text = ""
             self.select_all = False
@@ -380,22 +381,27 @@ class InputBox:
         label_color = C_SIDEBAR_MUTED if on_dark else C_MUTED
         if label:
             surface.blit(FONT_SMALL.render(label, True, label_color), (self.rect.x, self.rect.y - 18))
-        bg = (255, 255, 255) if self.active else ((60, 80, 100) if on_dark else (248, 250, 252))
+
+        # Sidebar inputs: always light box + dark text (ERP form style)
+        if on_dark:
+            bg = (255, 255, 255)
+            text_color = (15, 23, 42)
+            ph_color = (127, 140, 141)
+            caret_color = C_ACCENT
+            border = C_ACCENT if self.active else (180, 190, 200)
+            border_w = 2 if self.active else 1
+        else:
+            bg = (255, 255, 255) if self.active else (248, 250, 252)
+            text_color = C_TEXT
+            ph_color = C_MUTED
+            caret_color = C_ACCENT
+            border = C_ACCENT if self.active else C_BORDER
+            border_w = 2 if self.active else 1
+
         pygame.draw.rect(surface, bg, self.rect, border_radius=4)
-        border = C_ACCENT if self.active else (C_SIDEBAR_HOVER if on_dark else C_BORDER)
-        pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=4)
+        pygame.draw.rect(surface, border, self.rect, border_w, border_radius=4)
         text_x = self.rect.x + 10
         text_y = self.rect.y + 9
-
-        if self.active:
-            text_color = C_TEXT
-            caret_color = C_ACCENT
-        elif on_dark:
-            text_color = C_SIDEBAR_TEXT
-            caret_color = C_SIDEBAR_TEXT
-        else:
-            text_color = C_TEXT
-            caret_color = C_ACCENT
 
         has_content = bool(self.text or self.composition)
         if has_content:
@@ -431,9 +437,7 @@ class InputBox:
                         2,
                     )
         else:
-            display = self.placeholder
-            ph_color = C_MUTED if self.active else (C_SIDEBAR_MUTED if on_dark else C_MUTED)
-            surface.blit(FONT_SMALL.render(display, True, ph_color), (text_x, text_y))
+            surface.blit(FONT_SMALL.render(self.placeholder, True, ph_color), (text_x, text_y))
             if self.active and pygame.time.get_ticks() % 1000 < 500:
                 pygame.draw.line(
                     surface,
