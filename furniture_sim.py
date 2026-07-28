@@ -900,8 +900,10 @@ def main():
                             rename_template()
                         else:
                             box.active = False
+                    elif event.key == pygame.K_ESCAPE:
+                        box.active = False
                     elif event.unicode and event.unicode.isprintable():
-                            box.text += event.unicode
+                        box.text += event.unicode
                 elif current_tool == "polygon":
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
                         editing_template = template_to_dict(
