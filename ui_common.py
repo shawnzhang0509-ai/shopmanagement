@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pygame
 
-__version__ = "8"
+__version__ = "10"
+
+# Input field colors — always high contrast
+INPUT_BG = (255, 255, 255)
+INPUT_TEXT = (0, 0, 0)
+INPUT_PLACEHOLDER = (100, 116, 139)
+INPUT_COMPOSITION = (30, 64, 175)
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
 SIDEBAR_WIDTH = 340
@@ -214,7 +220,8 @@ class InputBox:
         self.numeric = numeric
         self.select_all = False
         self._skip_next_textinput = False
-        self.composition = ""  # IME 预编辑（拼音/中文组字）
+        self.composition = ""
+        self.composition_pos = 0
 
     def contains(self, pos):
         return self.rect.collidepoint(pos)
@@ -232,11 +239,13 @@ class InputBox:
         self.text = "" if value is None else str(value)
         self.select_all = False
         self.composition = ""
+        self.composition_pos = 0
 
     def select_all_text(self):
         if self.text:
             self.select_all = True
         self.composition = ""
+        self.composition_pos = 0
 
     def refresh_text_input(self):
         """Keep SDL text input attached — needed after programmatic focus on Windows."""
@@ -288,32 +297,27 @@ class InputBox:
             pass
 
     def _copy_text(self) -> None:
-        if not self.text:
-            return
-        self._pause_text_input()
-        clipboard_set(self.text)
-        self._resume_text_input()
+        if self.text:
+            clipboard_set(self.text)
 
     def _cut_text(self) -> None:
         if not self.text:
             return
-        self._pause_text_input()
         clipboard_set(self.text)
         self.text = ""
         self.select_all = False
-        self._resume_text_input()
+        self.composition = ""
 
     def _paste_text(self) -> None:
-        self._pause_text_input()
         pasted = _normalize_paste(clipboard_get())
         if pasted:
             self._skip_next_textinput = True
             self._insert_text(pasted)
-        self._resume_text_input()
 
     def activate(self):
         self.active = True
         self.composition = ""
+        self.composition_pos = 0
         try:
             pygame.key.start_text_input()
             pygame.key.set_text_input_rect(self.rect)
@@ -325,6 +329,7 @@ class InputBox:
         self.active = False
         self.select_all = False
         self.composition = ""
+        self.composition_pos = 0
         try:
             pygame.key.stop_text_input()
             pygame.key.set_repeat(0)
@@ -336,16 +341,16 @@ class InputBox:
             return False
         if event.type == pygame.TEXTEDITING:
             self.composition = event.text or ""
+            self.composition_pos = int(getattr(event, "length", 0) or 0)
             if self.composition:
                 self.select_all = False
             return True
         if event.type == pygame.TEXTINPUT:
             text = event.text or ""
             self.composition = ""
+            self.composition_pos = 0
             if self._skip_next_textinput:
                 self._skip_next_textinput = False
-                return True
-            if len(text) > 1 and (pygame.key.get_mods() & (pygame.KMOD_CTRL | pygame.KMOD_META)):
                 return True
             self._insert_text(text)
             return True
@@ -376,76 +381,73 @@ class InputBox:
                 return True
         return False
 
+    def _render_glyph(self, text: str, color):
+        """Render with explicit white background so text is never invisible."""
+        init_fonts()
+        try:
+            return FONT_SMALL.render(text, True, color, INPUT_BG)
+        except TypeError:
+            return FONT_SMALL.render(text, True, color)
+
     def draw(self, surface, label=None, on_dark=False):
         init_fonts()
         label_color = C_SIDEBAR_MUTED if on_dark else C_MUTED
         if label:
             surface.blit(FONT_SMALL.render(label, True, label_color), (self.rect.x, self.rect.y - 18))
 
-        # Sidebar inputs: always light box + dark text (ERP form style)
-        if on_dark:
-            bg = (255, 255, 255)
-            text_color = (15, 23, 42)
-            ph_color = (127, 140, 141)
-            caret_color = C_ACCENT
-            border = C_ACCENT if self.active else (180, 190, 200)
-            border_w = 2 if self.active else 1
-        else:
-            bg = (255, 255, 255) if self.active else (248, 250, 252)
-            text_color = C_TEXT
-            ph_color = C_MUTED
-            caret_color = C_ACCENT
-            border = C_ACCENT if self.active else C_BORDER
-            border_w = 2 if self.active else 1
-
-        pygame.draw.rect(surface, bg, self.rect, border_radius=4)
+        border = C_ACCENT if self.active else ((180, 190, 200) if on_dark else C_BORDER)
+        border_w = 2 if self.active else 1
+        pygame.draw.rect(surface, INPUT_BG, self.rect, border_radius=4)
         pygame.draw.rect(surface, border, self.rect, border_w, border_radius=4)
+
         text_x = self.rect.x + 10
         text_y = self.rect.y + 9
+        cursor_x = text_x
 
-        has_content = bool(self.text or self.composition)
-        if has_content:
-            cursor_x = text_x
-            if self.text:
-                text_surf = FONT_SMALL.render(self.text, True, text_color)
-                if self.active and self.select_all:
-                    highlight = pygame.Rect(
-                        text_x - 2, self.rect.y + 6, text_surf.get_width() + 4, self.rect.height - 12
-                    )
-                    pygame.draw.rect(surface, C_ACCENT_LIGHT, highlight, border_radius=4)
-                surface.blit(text_surf, (text_x, text_y))
-                cursor_x = text_x + text_surf.get_width()
-            if self.composition and self.active:
-                comp_surf = FONT_SMALL.render(self.composition, True, C_MUTED)
-                surface.blit(comp_surf, (cursor_x, text_y))
-                ul_y = text_y + comp_surf.get_height() + 1
+        if self.text:
+            text_surf = self._render_glyph(self.text, INPUT_TEXT)
+            if self.active and self.select_all:
+                highlight = pygame.Rect(
+                    text_x - 2, self.rect.y + 6, text_surf.get_width() + 4, self.rect.height - 12
+                )
+                pygame.draw.rect(surface, C_ACCENT_LIGHT, highlight, border_radius=4)
+            surface.blit(text_surf, (text_x, text_y))
+            cursor_x = text_x + text_surf.get_width()
+
+        if self.composition and self.active:
+            before = self.composition[: self.composition_pos]
+            after = self.composition[self.composition_pos :]
+            if before:
+                surface.blit(self._render_glyph(before, INPUT_COMPOSITION), (cursor_x, text_y))
+                cursor_x += self._render_glyph(before, INPUT_COMPOSITION).get_width()
+            caret = "|" if pygame.time.get_ticks() % 1000 < 500 else " "
+            caret_surf = self._render_glyph(caret, INPUT_COMPOSITION)
+            surface.blit(caret_surf, (cursor_x, text_y))
+            cursor_x += caret_surf.get_width()
+            if after:
+                surface.blit(self._render_glyph(after, INPUT_COMPOSITION), (cursor_x, text_y))
+                cursor_x += self._render_glyph(after, INPUT_COMPOSITION).get_width()
+        elif self.active and not self.select_all and not self.text and not self.composition:
+            if pygame.time.get_ticks() % 1000 < 500:
                 pygame.draw.line(
                     surface,
                     C_ACCENT,
-                    (cursor_x, ul_y),
-                    (cursor_x + comp_surf.get_width(), ul_y),
-                    1,
-                )
-                cursor_x += comp_surf.get_width()
-            elif self.active and not self.select_all:
-                if pygame.time.get_ticks() % 1000 < 500:
-                    pygame.draw.line(
-                        surface,
-                        caret_color,
-                        (cursor_x + 1, self.rect.y + 8),
-                        (cursor_x + 1, self.rect.bottom - 8),
-                        2,
-                    )
-        else:
-            surface.blit(FONT_SMALL.render(self.placeholder, True, ph_color), (text_x, text_y))
-            if self.active and pygame.time.get_ticks() % 1000 < 500:
-                pygame.draw.line(
-                    surface,
-                    caret_color,
                     (text_x + 1, self.rect.y + 8),
                     (text_x + 1, self.rect.bottom - 8),
                     2,
                 )
+        elif self.active and not self.select_all and self.text and not self.composition:
+            if pygame.time.get_ticks() % 1000 < 500:
+                pygame.draw.line(
+                    surface,
+                    C_ACCENT,
+                    (cursor_x + 1, self.rect.y + 8),
+                    (cursor_x + 1, self.rect.bottom - 8),
+                    2,
+                )
+
+        if not self.text and not self.composition:
+            surface.blit(self._render_glyph(self.placeholder, INPUT_PLACEHOLDER), (text_x, text_y))
 
 
 class Toast:
