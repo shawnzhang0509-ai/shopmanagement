@@ -117,6 +117,7 @@ furniture_templates = []
 selected_index = -1
 editing_template = None  # dict preview before save
 editing_mode = "new"  # "new" = 新绘制/副本, "edit" = 修改列表中已有项
+_template_clipboard = None  # 内存中的模板剪贴板（Ctrl+C/V 整模板复制）
 
 input_name = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
 input_family = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
@@ -701,18 +702,22 @@ def delete_selected():
     toast.show(f"已删除: {name}")
 
 
-def copy_selected_template():
+def _store_template_clipboard(tpl: dict) -> None:
+    global _template_clipboard
+    _template_clipboard = copy.deepcopy(tpl)
+
+
+def _begin_template_copy_from(src: dict, source_label: str | None = None) -> None:
+    """Create an unsaved draft copy — same behavior as the copy button."""
     global editing_template, selected_index, draw_phase, editing_mode
-    if selected_index < 0:
-        toast.show("请先选中要复制的模板")
-        return
-    src = furniture_templates[selected_index]
+    label = source_label or src.get("id", "template")
     new_tpl = copy.deepcopy(src)
     new_name = f"{src['id']}_copy"
     new_family = src.get("product_family", src["id"])
     new_tpl["id"] = new_name
     new_tpl["product_family"] = new_family
     new_tpl["roi"] = lookup_roi(new_family)
+    _store_template_clipboard(src)
     editing_template = new_tpl
     editing_mode = "copy"
     selected_index = -1
@@ -721,7 +726,14 @@ def copy_selected_template():
     input_family.set_text(new_family)
     focus_input(input_name)
     input_name.select_all_text()
-    toast.show(f"已复制 {src['id']} → 新副本，改名称后点保存（不会覆盖原模板）")
+    toast.show(f"已复制 {label} → 新副本，改名称后点保存（不会覆盖原模板）")
+
+
+def copy_selected_template():
+    if selected_index < 0:
+        toast.show("请先选中要复制的模板")
+        return
+    _begin_template_copy_from(furniture_templates[selected_index])
 
 
 def handle_toolbar(action):
@@ -858,28 +870,39 @@ def handle_canvas_mouseup(mx, my, button):
 
 
 def handle_global_clipboard_shortcuts(event):
-    """When input is not focused, still support copy/paste for template workflow."""
+    """Template-level Ctrl+C/V when input fields are not focused."""
     if event.type != pygame.KEYDOWN:
         return False
     if input_name.active or input_family.active:
         return False
+
     if ui.is_ctrl_key(event, "c"):
         if selected_index >= 0:
-            ui.clipboard_set(furniture_templates[selected_index]["id"])
-            toast.show("已复制模板名称")
+            copy_selected_template()
             return True
-        if editing_template and editing_template.get("id"):
-            ui.clipboard_set(editing_template["id"])
-            toast.show("已复制模板名称")
+        if editing_template:
+            _begin_template_copy_from(editing_template)
             return True
+        toast.show("请先选中要复制的模板")
+        return True
+
     if ui.is_ctrl_key(event, "v"):
-        pasted = ui.clipboard_get()
-        if pasted:
-            focus_input(input_name)
-            input_name.set_text(pasted.replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0])
-            input_name.select_all_text()
-            toast.show("已粘贴到模板名称")
+        if _is_new_entry_mode():
+            pasted = ui.clipboard_get()
+            if pasted:
+                focus_input(input_name)
+                input_name.set_text(pasted.replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0])
+                input_name.select_all_text()
+                toast.show("已粘贴名称，确认后点保存")
+                return True
+            toast.show("剪贴板为空")
             return True
+        if _template_clipboard:
+            _begin_template_copy_from(_template_clipboard, source_label=_template_clipboard.get("id"))
+            return True
+        toast.show("请先 Ctrl+C 或点「复制选中模板」")
+        return True
+
     return False
 
 
