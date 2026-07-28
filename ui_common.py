@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pygame
 
-__version__ = "2"
+__version__ = "4"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
 SIDEBAR_WIDTH = 300
@@ -120,6 +120,42 @@ class InputBox:
     def set_text(self, value):
         self.text = "" if value is None else str(value)
 
+    def activate(self):
+        self.active = True
+        try:
+            pygame.key.start_text_input()
+            pygame.key.set_text_input_rect(self.rect)
+        except Exception:
+            pass
+
+    def deactivate(self):
+        self.active = False
+        try:
+            pygame.key.stop_text_input()
+        except Exception:
+            pass
+
+    def handle_event(self, event):
+        if not self.active:
+            return False
+        if event.type == pygame.TEXTINPUT:
+            text = event.text
+            if self.numeric:
+                text = "".join(ch for ch in text if ch in "0123456789.")
+            if text:
+                self.text += text
+            return True
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_BACKSPACE:
+                self.text = self.text[:-1]
+                return True
+            if event.key == pygame.K_ESCAPE:
+                self.deactivate()
+                return True
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                return True
+        return False
+
     def draw(self, surface, label=None):
         init_fonts()
         if label:
@@ -128,9 +164,24 @@ class InputBox:
         pygame.draw.rect(surface, bg, self.rect, border_radius=8)
         border = C_ACCENT if self.active else C_BORDER
         pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=8)
-        display = self.text if self.text else self.placeholder
-        color = C_TEXT if self.text else C_MUTED
-        surface.blit(FONT_SMALL.render(display, True, color), (self.rect.x + 10, self.rect.y + 9))
+        if self.text:
+            display = self.text
+            color = C_TEXT
+        else:
+            display = self.placeholder
+            color = C_MUTED
+        text_surf = FONT_SMALL.render(display, True, color)
+        surface.blit(text_surf, (self.rect.x + 10, self.rect.y + 9))
+        if self.active:
+            caret_x = self.rect.x + 10 + text_surf.get_width() + 1
+            if pygame.time.get_ticks() % 1000 < 500:
+                pygame.draw.line(
+                    surface,
+                    C_ACCENT,
+                    (caret_x, self.rect.y + 8),
+                    (caret_x, self.rect.bottom - 8),
+                    2,
+                )
 
 
 class Toast:

@@ -121,6 +121,20 @@ input_name = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
 input_family = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
 
 
+def focus_input(box):
+    input_name.deactivate()
+    input_family.deactivate()
+    if box is input_name:
+        input_name.activate()
+    elif box is input_family:
+        input_family.activate()
+
+
+def blur_inputs():
+    input_name.deactivate()
+    input_family.deactivate()
+
+
 def screen_to_world(sx, sy):
     return offset_x + (sx - SIDEBAR_WIDTH) / scale, offset_y + sy / scale
 
@@ -792,14 +806,12 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
             handle_toolbar(btn.action)
             return True
     if input_name.contains((mx, my)):
-        input_name.active = True
-        input_family.active = False
+        focus_input(input_name)
         return True
     if input_family.contains((mx, my)):
-        input_family.active = True
-        input_name.active = False
+        focus_input(input_family)
         return True
-    input_name.active = input_family.active = False
+    blur_inputs()
 
     y = list_top + 28
     for i in range(len(furniture_templates)):
@@ -889,21 +901,17 @@ def main():
                     preview_point = None
                     l_cut_preview = None
 
+            elif event.type == pygame.TEXTINPUT:
+                if input_name.active:
+                    input_name.handle_event(event)
+                elif input_family.active:
+                    input_family.handle_event(event)
+
             elif event.type == pygame.KEYDOWN:
-                active = input_name.active or input_family.active
-                box = input_name if input_name.active else input_family
-                if active:
-                    if event.key == pygame.K_BACKSPACE:
-                        box.text = box.text[:-1]
-                    elif event.key == pygame.K_RETURN:
+                if input_name.handle_event(event) or input_family.handle_event(event):
+                    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         if input_name.active or input_family.active:
                             rename_template()
-                        else:
-                            box.active = False
-                    elif event.key == pygame.K_ESCAPE:
-                        box.active = False
-                    elif event.unicode and event.unicode.isprintable():
-                        box.text += event.unicode
                 elif current_tool == "polygon":
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
                         editing_template = template_to_dict(
