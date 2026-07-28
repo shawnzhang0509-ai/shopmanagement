@@ -397,15 +397,16 @@ def build_sidebar():
     y += 132
 
     buttons = {
-        "apply": Button((pad, y, w, 38), "保存到列表", "apply", primary=True),
-        "copy": Button((pad, y + 46, w, 34), "复制选中模板", "copy"),
-        "write": Button((pad, y + 86, w, 34), "写入 furniture_templates.json", "write"),
-        "export": Button((pad, y + 126, bw, 34), "导出", "export"),
-        "import": Button((pad + bw + 8, y + 126, bw, 34), "导入", "import"),
-        "delete": Button((pad, y + 166, w, 34), "删除选中", "delete", danger=True),
-        "clear": Button((pad, y + 206, w, 34), "清空画布", "clear"),
+        "apply": Button((pad, y, w, 38), "保存形状到列表", "apply", primary=True),
+        "rename": Button((pad, y + 46, w, 34), "重命名 / 确认名称", "rename"),
+        "copy": Button((pad, y + 86, w, 34), "复制选中模板", "copy"),
+        "write": Button((pad, y + 126, w, 34), "写入 furniture_templates.json", "write"),
+        "export": Button((pad, y + 166, bw, 34), "导出", "export"),
+        "import": Button((pad + bw + 8, y + 166, bw, 34), "导入", "import"),
+        "delete": Button((pad, y + 206, w, 34), "删除选中", "delete", danger=True),
+        "clear": Button((pad, y + 246, w, 34), "清空画布", "clear"),
     }
-    list_top = y + 250
+    list_top = y + 290
     return tool_buttons, buttons, list_top
 
 
@@ -420,7 +421,7 @@ def draw_sidebar(tool_buttons, buttons, list_top):
     for btn in buttons.values():
         btn.draw(screen, mouse_pos)
 
-    input_name.draw(screen, "模板名称")
+    input_name.draw(screen, "模板名称（可重命名）")
     input_family.draw(screen, "Product Family")
     family = input_family.get_text()
     roi_val = lookup_roi(family)
@@ -493,6 +494,53 @@ def apply_current_shape():
         toast.show(f"已生成: {name}，ROI={roi:.1f}")
 
 
+def _duplicate_id(name: str, ignore_index: int = -1) -> bool:
+    for i, tpl in enumerate(furniture_templates):
+        if i != ignore_index and tpl.get("id", "").lower() == name.lower():
+            return True
+    return False
+
+
+def rename_template():
+    """只更新名称和 Product Family，复制后也可用此保存新名称。"""
+    global selected_index, editing_template
+    name = input_name.get_text().strip()
+    family = input_family.get_text().strip() or name
+    if not name:
+        toast.show("请填写模板名称")
+        return
+    roi = lookup_roi(family)
+    if roi == 0:
+        toast.show(f"警告: roi.xlsx 中未找到 {family}，ROI 将为 0")
+
+    if selected_index >= 0:
+        if _duplicate_id(name, ignore_index=selected_index):
+            toast.show(f"名称「{name}」已存在，请换一个")
+            return
+        tpl = furniture_templates[selected_index]
+        old_name = tpl["id"]
+        tpl["id"] = name
+        tpl["product_family"] = family
+        tpl["roi"] = roi
+        editing_template = tpl.copy()
+        toast.show(f"已重命名: {old_name} → {name}，ROI={roi:.1f}")
+        return
+
+    if not editing_template:
+        toast.show("请先选中模板，或先复制再重命名")
+        return
+    if _duplicate_id(name):
+        toast.show(f"名称「{name}」已存在，请换一个")
+        return
+    editing_template = editing_template.copy()
+    editing_template["id"] = name
+    editing_template["product_family"] = family
+    editing_template["roi"] = roi
+    furniture_templates.append(editing_template)
+    selected_index = len(furniture_templates) - 1
+    toast.show(f"新模板已保存: {name}，ROI={roi:.1f}")
+
+
 def save_to_list():
     global selected_index
     if not editing_template:
@@ -505,9 +553,15 @@ def save_to_list():
     editing_template["roi"] = lookup_roi(family)
     name = editing_template["id"]
     if selected_index >= 0:
+        if _duplicate_id(name, ignore_index=selected_index):
+            toast.show(f"名称「{name}」已存在")
+            return
         furniture_templates[selected_index] = editing_template.copy()
         toast.show(f"已更新: {name}")
     else:
+        if _duplicate_id(name):
+            toast.show(f"名称「{name}」已存在")
+            return
         furniture_templates.append(editing_template.copy())
         selected_index = len(furniture_templates) - 1
         toast.show(f"已添加: {name}")
@@ -541,9 +595,12 @@ def load_templates_file(path=TEMPLATES_FILE):
 
 def load_template_into_editor(index):
     global selected_index, editing_template, current_tool
+    global draw_phase, drag_start, drag_current, polygon_points, preview_point
+    global l_outer_corners, l_cut_preview, resizing_handle
+
     selected_index = index
-    tpl = furniture_templates[index]
-    editing_template = tpl.copy()
+    tpl = furniture_templates[index].copy()
+    editing_template = tpl
     input_name.set_text(tpl["id"])
     input_family.set_text(tpl.get("product_family", tpl["id"]))
     if tpl["type"] == "rectangle":
@@ -552,9 +609,12 @@ def load_template_into_editor(index):
         current_tool = "circle"
     else:
         current_tool = "polygon"
-    reset_draw_state()
-    editing_template = tpl.copy()
-    toast.show(f"编辑: {tpl['id']}")
+    draw_phase = "idle"
+    drag_start = drag_current = None
+    l_outer_corners = l_cut_preview = resizing_handle = None
+    polygon_points = []
+    preview_point = None
+    toast.show(f"已选中: {tpl['id']}，改名称后点「重命名」")
 
 
 def delete_selected():
@@ -590,7 +650,7 @@ def copy_selected_template():
     draw_phase = "idle"
     input_name.set_text(new_name)
     input_family.set_text(new_family)
-    toast.show(f"已复制 {src['id']}，请修改名称和 Product Family 后保存")
+    toast.show(f"已复制 {src['id']}，改名称后点「重命名 / 确认名称」")
 
 
 def handle_toolbar(action):
@@ -601,6 +661,8 @@ def handle_toolbar(action):
         toast.show(f"工具: {dict(TOOLS)[current_tool]}")
     elif action == "apply":
         save_to_list()
+    elif action == "rename":
+        rename_template()
     elif action == "copy":
         copy_selected_template()
     elif action == "write":
@@ -833,8 +895,11 @@ def main():
                 if active:
                     if event.key == pygame.K_BACKSPACE:
                         box.text = box.text[:-1]
-                    elif event.key == pygame.K_ESCAPE:
-                        box.active = False
+                    elif event.key == pygame.K_RETURN:
+                        if input_name.active or input_family.active:
+                            rename_template()
+                        else:
+                            box.active = False
                     elif event.unicode and event.unicode.isprintable():
                             box.text += event.unicode
                 elif current_tool == "polygon":
