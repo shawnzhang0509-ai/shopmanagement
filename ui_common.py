@@ -3,26 +3,33 @@ from __future__ import annotations
 
 import pygame
 
-__version__ = "6"
+__version__ = "7"
 
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
-SIDEBAR_WIDTH = 300
+SIDEBAR_WIDTH = 340
 
-C_BG = (248, 250, 252)
-C_SIDEBAR = (255, 255, 255)
-C_CANVAS = (241, 245, 249)
-C_GRID = (203, 213, 225)
-C_TEXT = (15, 23, 42)
-C_MUTED = (100, 116, 139)
-C_BORDER = (226, 232, 240)
-C_ACCENT = (37, 99, 235)
-C_ACCENT_LIGHT = (219, 234, 254)
-C_SUCCESS = (22, 163, 74)
-C_SUCCESS_LIGHT = (220, 252, 231)
-C_DANGER = (220, 38, 38)
-C_DANGER_LIGHT = (254, 226, 226)
-C_PREVIEW = (96, 165, 250)
-C_PREVIEW_FILL = (191, 219, 254)
+# ifurniture ERP palette
+C_BG = (255, 255, 255)
+C_SIDEBAR = (44, 62, 80)
+C_SIDEBAR_DARK = (33, 47, 61)
+C_SIDEBAR_TEXT = (236, 240, 241)
+C_SIDEBAR_MUTED = (149, 165, 166)
+C_SIDEBAR_HOVER = (52, 73, 94)
+C_SIDEBAR_ACTIVE = (52, 152, 219)
+C_CANVAS = (245, 247, 250)
+C_GRID = (213, 219, 219)
+C_TEXT = (44, 62, 80)
+C_MUTED = (127, 140, 141)
+C_BORDER = (213, 219, 219)
+C_ACCENT = (52, 152, 219)
+C_ACCENT_LIGHT = (214, 234, 248)
+C_ACCENT_HOVER = (41, 128, 185)
+C_SUCCESS = (46, 204, 113)
+C_SUCCESS_LIGHT = (212, 239, 223)
+C_DANGER = (231, 76, 60)
+C_DANGER_LIGHT = (250, 219, 216)
+C_PREVIEW = (52, 152, 219)
+C_PREVIEW_FILL = (214, 234, 248)
 
 FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
 
@@ -166,27 +173,34 @@ class Button:
     def contains(self, pos):
         return self.enabled and self.rect.collidepoint(pos)
 
-    def draw(self, surface, mouse_pos):
+    def draw(self, surface, mouse_pos, on_dark=False):
         init_fonts()
         hover = self.enabled and self.rect.collidepoint(mouse_pos)
         if self.toggle and self.active:
-            bg, fg, border = C_ACCENT, (255, 255, 255), C_ACCENT
+            if on_dark:
+                bg, fg, border = C_SIDEBAR_ACTIVE, (255, 255, 255), C_SIDEBAR_ACTIVE
+            else:
+                bg, fg, border = C_ACCENT, (255, 255, 255), C_ACCENT
         elif self.danger:
             bg = C_DANGER if hover else C_DANGER_LIGHT
             fg = (255, 255, 255) if hover else C_DANGER
             border = C_DANGER
         elif self.primary:
-            bg = (29, 78, 216) if hover else C_ACCENT
+            bg = C_ACCENT_HOVER if hover else C_ACCENT
             fg = (255, 255, 255)
             border = C_ACCENT
+        elif on_dark:
+            bg = C_SIDEBAR_HOVER if hover else C_SIDEBAR_DARK
+            fg = C_SIDEBAR_TEXT
+            border = C_SIDEBAR_HOVER if hover else C_SIDEBAR_DARK
         else:
             bg = C_ACCENT_LIGHT if hover else (255, 255, 255)
             fg = C_ACCENT if hover else C_TEXT
             border = C_BORDER
         if not self.enabled:
             bg, fg, border = (241, 245, 249), C_MUTED, C_BORDER
-        pygame.draw.rect(surface, bg, self.rect, border_radius=8)
-        pygame.draw.rect(surface, border, self.rect, 1, border_radius=8)
+        pygame.draw.rect(surface, bg, self.rect, border_radius=4)
+        pygame.draw.rect(surface, border, self.rect, 1, border_radius=4)
         text = FONT_SMALL.render(self.label, True, fg)
         surface.blit(text, text.get_rect(center=self.rect.center))
 
@@ -343,19 +357,20 @@ class InputBox:
                 return True
         return False
 
-    def draw(self, surface, label=None):
+    def draw(self, surface, label=None, on_dark=False):
         init_fonts()
+        label_color = C_SIDEBAR_MUTED if on_dark else C_MUTED
         if label:
-            surface.blit(FONT_SMALL.render(label, True, C_MUTED), (self.rect.x, self.rect.y - 18))
-        bg = (255, 255, 255) if self.active else (248, 250, 252)
-        pygame.draw.rect(surface, bg, self.rect, border_radius=8)
-        border = C_ACCENT if self.active else C_BORDER
-        pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=8)
+            surface.blit(FONT_SMALL.render(label, True, label_color), (self.rect.x, self.rect.y - 18))
+        bg = (255, 255, 255) if self.active else ((60, 80, 100) if on_dark else (248, 250, 252))
+        pygame.draw.rect(surface, bg, self.rect, border_radius=4)
+        border = C_ACCENT if self.active else (C_SIDEBAR_HOVER if on_dark else C_BORDER)
+        pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=4)
         text_x = self.rect.x + 10
         text_y = self.rect.y + 9
         if self.text:
             display = self.text
-            color = C_TEXT
+            color = C_TEXT if not on_dark else C_SIDEBAR_TEXT
             text_surf = FONT_SMALL.render(display, True, color)
             if self.active and self.select_all:
                 highlight = pygame.Rect(text_x - 2, self.rect.y + 6, text_surf.get_width() + 4, self.rect.height - 12)
@@ -363,15 +378,16 @@ class InputBox:
             surface.blit(text_surf, (text_x, text_y))
         else:
             display = self.placeholder
-            color = C_MUTED
+            color = C_SIDEBAR_MUTED if on_dark else C_MUTED
             text_surf = FONT_SMALL.render(display, True, color)
             surface.blit(text_surf, (text_x, text_y))
         if self.active and not self.select_all:
-            caret_x = text_x + (FONT_SMALL.render(self.text, True, C_TEXT).get_width() if self.text else 0) + 1
+            caret_color = C_ACCENT if not on_dark else (255, 255, 255)
+            caret_x = text_x + (FONT_SMALL.render(self.text, True, caret_color).get_width() if self.text else 0) + 1
             if pygame.time.get_ticks() % 1000 < 500:
                 pygame.draw.line(
                     surface,
-                    C_ACCENT,
+                    caret_color,
                     (caret_x, self.rect.y + 8),
                     (caret_x, self.rect.bottom - 8),
                     2,
@@ -405,4 +421,13 @@ class Toast:
 
 def draw_sidebar_bg(surface):
     pygame.draw.rect(surface, C_SIDEBAR, (0, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT))
-    pygame.draw.line(surface, C_BORDER, (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, SCREEN_HEIGHT))
+    pygame.draw.line(surface, C_SIDEBAR_HOVER, (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, SCREEN_HEIGHT))
+
+
+def draw_sidebar_header(surface, title, subtitle=None):
+    """ERP-style sidebar title block."""
+    init_fonts()
+    pygame.draw.rect(surface, C_SIDEBAR_DARK, (0, 0, SIDEBAR_WIDTH, 56))
+    surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (16, 12))
+    if subtitle:
+        surface.blit(FONT_SMALL.render(subtitle, True, C_SIDEBAR_MUTED), (16, 36))
