@@ -116,6 +116,7 @@ preview_point = None
 furniture_templates = []
 selected_index = -1
 editing_template = None  # dict preview before save
+editing_mode = "new"  # "new" = 新绘制/副本, "edit" = 修改列表中已有项
 
 input_name = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
 input_family = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
@@ -459,6 +460,9 @@ def draw_sidebar(tool_buttons, buttons, list_top):
     if family and roi_val == 0:
         roi_hint = f"ROI: 未找到「{family}」，请检查 roi.xlsx"
     screen.blit(FONT_SMALL.render(roi_hint, True, C_MUTED), (16, input_family.rect.bottom + 6))
+    mode_label = _editing_mode_label()
+    if mode_label:
+        screen.blit(FONT_SMALL.render(mode_label, True, C_ACCENT), (16, input_family.rect.bottom + 24))
 
     screen.blit(FONT_LABEL.render("已保存模板", True, C_TEXT), (16, list_top))
     y = list_top + 28
@@ -482,9 +486,21 @@ def draw_sidebar(tool_buttons, buttons, list_top):
     )
 
 
+def _is_new_entry_mode() -> bool:
+    return editing_mode in ("new", "copy")
+
+
+def _editing_mode_label() -> str:
+    if editing_mode == "copy":
+        return "【新副本 · 保存后添加，不覆盖原模板】"
+    if editing_mode == "new":
+        return "【新模板 · 保存后添加】"
+    return ""
+
+
 def reset_draw_state():
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template
-    global l_outer_corners, l_cut_preview, resizing_handle
+    global l_outer_corners, l_cut_preview, resizing_handle, editing_mode
     draw_phase = "idle"
     drag_start = None
     drag_current = None
@@ -494,6 +510,7 @@ def reset_draw_state():
     polygon_points = []
     preview_point = None
     editing_template = None
+    editing_mode = "new"
 
 
 def apply_current_shape():
@@ -533,7 +550,7 @@ def _duplicate_id(name: str, ignore_index: int = -1) -> bool:
 
 def rename_template():
     """只更新名称和 Product Family，复制后也可用此保存新名称。"""
-    global selected_index, editing_template
+    global selected_index, editing_template, editing_mode
     name = input_name.get_text().strip()
     family = input_family.get_text().strip() or name
     if not name:
@@ -543,7 +560,7 @@ def rename_template():
     if roi == 0:
         toast.show(f"警告: roi.xlsx 中未找到 {family}，ROI 将为 0")
 
-    if selected_index >= 0:
+    if not _is_new_entry_mode() and selected_index >= 0:
         if _duplicate_id(name, ignore_index=selected_index):
             toast.show(f"名称「{name}」已存在，请换一个")
             return
@@ -552,7 +569,7 @@ def rename_template():
         tpl["id"] = name
         tpl["product_family"] = family
         tpl["roi"] = roi
-        editing_template = tpl.copy()
+        editing_template = copy.deepcopy(tpl)
         toast.show(f"已重命名: {old_name} → {name}，ROI={roi:.1f}")
         return
 
@@ -562,17 +579,18 @@ def rename_template():
     if _duplicate_id(name):
         toast.show(f"名称「{name}」已存在，请换一个")
         return
-    editing_template = editing_template.copy()
+    editing_template = copy.deepcopy(editing_template)
     editing_template["id"] = name
     editing_template["product_family"] = family
     editing_template["roi"] = roi
     furniture_templates.append(editing_template)
     selected_index = len(furniture_templates) - 1
-    toast.show(f"新模板已保存: {name}，ROI={roi:.1f}")
+    editing_mode = "edit"
+    toast.show(f"新模板已添加: {name}，ROI={roi:.1f}")
 
 
 def save_to_list():
-    global selected_index
+    global selected_index, editing_mode, editing_template
     if not editing_template:
         apply_current_shape()
     if not editing_template:
@@ -582,18 +600,34 @@ def save_to_list():
     editing_template["product_family"] = family
     editing_template["roi"] = lookup_roi(family)
     name = editing_template["id"]
+    saved = copy.deepcopy(editing_template)
+
+    if _is_new_entry_mode():
+        if _duplicate_id(name):
+            toast.show(f"名称「{name}」已存在，请换一个名称")
+            return
+        furniture_templates.append(saved)
+        selected_index = len(furniture_templates) - 1
+        editing_mode = "edit"
+        editing_template = saved
+        toast.show(f"已添加新模板: {name}")
+        return
+
     if selected_index >= 0:
         if _duplicate_id(name, ignore_index=selected_index):
             toast.show(f"名称「{name}」已存在")
             return
-        furniture_templates[selected_index] = editing_template.copy()
+        furniture_templates[selected_index] = saved
+        editing_template = saved
         toast.show(f"已更新: {name}")
     else:
         if _duplicate_id(name):
             toast.show(f"名称「{name}」已存在")
             return
-        furniture_templates.append(editing_template.copy())
+        furniture_templates.append(saved)
         selected_index = len(furniture_templates) - 1
+        editing_mode = "edit"
+        editing_template = saved
         toast.show(f"已添加: {name}")
 
 
@@ -624,12 +658,16 @@ def load_templates_file(path=TEMPLATES_FILE):
 
 
 def load_template_into_editor(index):
-    global selected_index, editing_template, current_tool
+    global selected_index, editing_template, current_tool, editing_mode
     global draw_phase, drag_start, drag_current, polygon_points, preview_point
     global l_outer_corners, l_cut_preview, resizing_handle
 
+    if _is_new_entry_mode() and editing_template:
+        toast.show("未保存的新副本已丢弃，已加载列表中的模板")
+
     selected_index = index
-    tpl = furniture_templates[index].copy()
+    editing_mode = "edit"
+    tpl = copy.deepcopy(furniture_templates[index])
     editing_template = tpl
     input_name.set_text(tpl["id"])
     input_family.set_text(tpl.get("product_family", tpl["id"]))
@@ -644,7 +682,7 @@ def load_template_into_editor(index):
     l_outer_corners = l_cut_preview = resizing_handle = None
     polygon_points = []
     preview_point = None
-    toast.show(f"已选中: {tpl['id']}，改名称后点「重命名」")
+    toast.show(f"已选中: {tpl['id']}（修改后保存会更新此项）")
 
 
 def delete_selected():
@@ -664,7 +702,7 @@ def delete_selected():
 
 
 def copy_selected_template():
-    global editing_template, selected_index, draw_phase
+    global editing_template, selected_index, draw_phase, editing_mode
     if selected_index < 0:
         toast.show("请先选中要复制的模板")
         return
@@ -676,13 +714,14 @@ def copy_selected_template():
     new_tpl["product_family"] = new_family
     new_tpl["roi"] = lookup_roi(new_family)
     editing_template = new_tpl
+    editing_mode = "copy"
     selected_index = -1
     draw_phase = "idle"
     input_name.set_text(new_name)
     input_family.set_text(new_family)
     focus_input(input_name)
     input_name.select_all_text()
-    toast.show(f"已复制 {src['id']}，可直接改名称或 Ctrl+V 粘贴")
+    toast.show(f"已复制 {src['id']} → 新副本，改名称后点保存（不会覆盖原模板）")
 
 
 def handle_toolbar(action):
@@ -722,7 +761,7 @@ def handle_toolbar(action):
 
 def handle_canvas_mousedown(mx, my, button):
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template, selected_index
-    global l_outer_corners, l_cut_preview, resizing_handle
+    global l_outer_corners, l_cut_preview, resizing_handle, editing_mode
     wx, wy = screen_to_world(mx, my)
     wx, wy = snap_grid(wx, wy)
 
@@ -756,6 +795,8 @@ def handle_canvas_mousedown(mx, my, button):
             "polygon",
             pts,
         )
+        editing_mode = "new"
+        selected_index = -1
         draw_phase = "idle"
         l_outer_corners = None
         l_cut_preview = None
@@ -768,7 +809,7 @@ def handle_canvas_mousedown(mx, my, button):
 
 
 def handle_canvas_mouseup(mx, my, button):
-    global draw_phase, drag_current, editing_template, selected_index, l_outer_corners
+    global draw_phase, drag_current, editing_template, selected_index, l_outer_corners, editing_mode
     if button != 1 or draw_phase != "drawing" or not drag_start:
         return
     wx, wy = screen_to_world(mx, my)
@@ -786,6 +827,7 @@ def handle_canvas_mouseup(mx, my, button):
             "rect",
             pts,
         )
+        editing_mode = "new"
         draw_phase = "idle"
         selected_index = -1
         toast.show("矩形已生成，填写名称后点保存")
@@ -801,6 +843,7 @@ def handle_canvas_mouseup(mx, my, button):
             "circle",
             pts,
         )
+        editing_mode = "new"
         draw_phase = "idle"
         selected_index = -1
         toast.show("圆形已生成，填写名称后点保存")
@@ -870,7 +913,7 @@ def main():
     global screen, clock
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
     global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview, resizing_handle, editing_template
-    global editing_template, selected_index
+    global editing_template, selected_index, editing_mode
 
     reload_roi_map()
 
@@ -961,6 +1004,7 @@ def main():
                             "polygon",
                             polygon_points,
                         )
+                        editing_mode = "new"
                         polygon_points = []
                         draw_phase = "idle"
                         preview_point = None
