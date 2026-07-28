@@ -1,3 +1,14 @@
+import json
+import math
+import os
+import sys
+import traceback
+import copy
+
+# IME / 中文输入：须在 import pygame 之前设置
+os.environ.setdefault("SDL_IME_SHOW_UI", "1")
+os.environ.setdefault("SDL_IME_SUPPORT_EXTENDED_TEXT", "1")
+
 try:
     import pygame
 except ModuleNotFoundError:
@@ -5,13 +16,6 @@ except ModuleNotFoundError:
     if __name__ == "__main__":
         input("\n按 Enter 退出...")
     raise SystemExit(1) from None
-
-import json
-import math
-import os
-import sys
-import traceback
-import copy
 
 from roi_lookup import lookup_roi, reload_roi_map
 
@@ -133,6 +137,8 @@ _last_input_click = {"box": None, "time": 0}
 
 FOCUS_ZONES = ("name", "family", "search", "list")
 focus_zone = "canvas"
+_pending_input_focus = None
+_pending_focus_frames = 0
 
 
 class TemplateBrowser:
@@ -283,7 +289,7 @@ template_browser = TemplateBrowser()
 
 
 def focus_input(box):
-    global focus_zone
+    global focus_zone, _pending_input_focus, _pending_focus_frames
     input_name.deactivate()
     input_family.deactivate()
     input_search.deactivate()
@@ -296,6 +302,19 @@ def focus_input(box):
     elif box is input_search:
         input_search.activate()
         focus_zone = "search"
+    _pending_input_focus = box
+    _pending_focus_frames = 10
+
+
+def tick_input_focus():
+    """Re-attach text input after programmatic focus (copy / Tab) on Windows."""
+    global _pending_focus_frames
+    if _pending_input_focus and _pending_focus_frames > 0:
+        _pending_input_focus.refresh_text_input()
+        _pending_focus_frames -= 1
+    for box in (input_name, input_family, input_search):
+        if box.active:
+            box.refresh_text_input()
 
 
 def handle_input_click(box):
@@ -697,6 +716,9 @@ def draw_sidebar(tool_buttons, buttons, list_top):
     for btn in buttons.values():
         btn.draw(screen, mouse_pos, on_dark=True)
 
+    template_browser.draw(screen, furniture_templates, selected_index, list_top)
+
+    # 输入框最后绘制，避免被其它元素盖住
     input_name.draw(screen, "模板名称", on_dark=True)
     input_family.draw(screen, "Product Family", on_dark=True)
     family = input_family.get_text()
@@ -713,8 +735,6 @@ def draw_sidebar(tool_buttons, buttons, list_top):
             FONT_MARK.render("Tab 切换字段  ·  Enter 确认  ·  Ctrl+C/V 复制", True, C_SIDEBAR_MUTED),
             (pad, input_family.rect.bottom + 18),
         )
-
-    template_browser.draw(screen, furniture_templates, selected_index, list_top)
 
 
 def _is_new_entry_mode() -> bool:
@@ -957,7 +977,7 @@ def _begin_template_copy_from(src: dict, source_label: str | None = None) -> Non
     input_family.set_text(new_family)
     focus_input(input_name)
     input_name.select_all_text()
-    toast.show(f"已复制 {label} → 新副本，改名称后点保存（不会覆盖原模板）")
+    toast.show(f"已复制 {label} → 可直接输入新名称")
 
 
 def copy_selected_template():
@@ -1182,7 +1202,7 @@ def main():
             show_error("加载模板失败", str(exc))
 
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("家具模板编辑器")
+    pygame.display.set_caption(f"家具模板编辑器 v{ui.__version__}")
     clock = pygame.time.Clock()
 
     tool_buttons, buttons, list_top = build_sidebar()
@@ -1293,6 +1313,14 @@ def main():
                         save_to_list()
                         write_templates_file()
 
+            elif event.type == pygame.TEXTEDITING:
+                if input_name.active:
+                    input_name.handle_event(event)
+                elif input_family.active:
+                    input_family.handle_event(event)
+                elif input_search.active:
+                    input_search.handle_event(event)
+
             elif event.type == pygame.TEXTINPUT:
                 if input_name.active:
                     input_name.handle_event(event)
@@ -1304,6 +1332,7 @@ def main():
 
         draw_canvas(screen)
         draw_sidebar(tool_buttons, buttons, list_top)
+        tick_input_focus()
         toast.draw(screen, SIDEBAR_WIDTH + (SCREEN_WIDTH - SIDEBAR_WIDTH) // 2)
         pygame.display.flip()
         clock.tick(60)
