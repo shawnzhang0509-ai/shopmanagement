@@ -139,6 +139,12 @@ FOCUS_ZONES = ("name", "family", "search", "list")
 focus_zone = "canvas"
 _pending_input_focus = None
 _pending_focus_frames = 0
+_sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
+_last_sidebar_wheel_ms = 0
+_last_list_pick = {"index": -1, "time": 0}
+SIDEBAR_LIST_TOP = 544  # updated in build_sidebar
+CLICK_MOVE_TOLERANCE = 10
+WHEEL_CLICK_COOLDOWN_MS = 350
 
 
 class TemplateBrowser:
@@ -700,6 +706,8 @@ def build_sidebar():
         "clear": Button((pad, y + 246, w, 34), "清空画布", "clear"),
     }
     list_top = y + 268
+    global SIDEBAR_LIST_TOP
+    SIDEBAR_LIST_TOP = list_top
     return tool_buttons, buttons, list_top
 
 
@@ -911,7 +919,15 @@ def load_templates_file(path=TEMPLATES_FILE):
 def load_template_into_editor(index, quiet=False):
     global selected_index, editing_template, current_tool, editing_mode
     global draw_phase, drag_start, drag_current, polygon_points, preview_point
-    global l_outer_corners, l_cut_preview, resizing_handle
+    global l_outer_corners, l_cut_preview, resizing_handle, _last_list_pick
+
+    now = pygame.time.get_ticks()
+    if index == _last_list_pick["index"] and now - _last_list_pick["time"] < WHEEL_CLICK_COOLDOWN_MS:
+        return
+    _last_list_pick = {"index": index, "time": now}
+
+    if index == selected_index and editing_mode == "edit" and editing_template and quiet:
+        return
 
     if _is_new_entry_mode() and editing_template and not quiet:
         toast.show("未保存的新副本已丢弃，已加载列表中的模板")
@@ -1157,6 +1173,21 @@ def handle_global_clipboard_shortcuts(event):
     return False
 
 
+def sidebar_wheel_scroll(delta: int):
+    """Scroll template list; never triggers buttons or canvas zoom."""
+    global _last_sidebar_wheel_ms
+    _last_sidebar_wheel_ms = pygame.time.get_ticks()
+    template_browser.scroll(-delta * 24)
+
+
+def try_sidebar_click(pos, tool_buttons, buttons, list_top):
+    global _last_sidebar_wheel_ms
+    if pygame.time.get_ticks() - _last_sidebar_wheel_ms < WHEEL_CLICK_COOLDOWN_MS:
+        return False
+    mx, my = pos
+    return handle_sidebar_click(mx, my, tool_buttons, buttons, list_top)
+
+
 def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
     for tool_id, btn in tool_buttons.items():
         if btn.contains((mx, my)):
@@ -1207,6 +1238,7 @@ def main():
 
     tool_buttons, buttons, list_top = build_sidebar()
     running = True
+    global _sidebar_click_start
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
@@ -1216,8 +1248,8 @@ def main():
 
             elif event.type == pygame.MOUSEWHEEL:
                 mx, my = mouse_pos
-                if mx < SIDEBAR_WIDTH and template_browser.viewport.collidepoint(mx, my):
-                    template_browser.scroll(-event.y * 24)
+                if mx < SIDEBAR_WIDTH:
+                    sidebar_wheel_scroll(event.y)
                 else:
                     wx, wy = screen_to_world(mx, my)
                     scale = max(0.01, min(2.0, scale * (1.15 if event.y > 0 else 1 / 1.15)))
@@ -1227,7 +1259,10 @@ def main():
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = event.pos
                 if mx < SIDEBAR_WIDTH:
-                    handle_sidebar_click(mx, my, tool_buttons, buttons, list_top)
+                    if event.button in (4, 5):
+                        sidebar_wheel_scroll(1 if event.button == 4 else -1)
+                    elif event.button == 1:
+                        _sidebar_click_start = event.pos
                 elif event.button == 1:
                     result = handle_canvas_mousedown(mx, my, 1)
                     if result == "pan":
@@ -1241,14 +1276,26 @@ def main():
                 if event.button in (1, 3):
                     dragging_view = False
                 if event.button == 1:
-                    if resizing_handle is not None:
-                        resizing_handle = None
-                        toast.show("尺寸已更新")
-                    elif event.pos[0] >= SIDEBAR_WIDTH:
-                        handle_canvas_mouseup(*event.pos, 1)
+                    mx, my = event.pos
+                    if mx < SIDEBAR_WIDTH:
+                        if _sidebar_click_start is not None:
+                            sx, sy = _sidebar_click_start
+                            if abs(mx - sx) <= CLICK_MOVE_TOLERANCE and abs(my - sy) <= CLICK_MOVE_TOLERANCE:
+                                try_sidebar_click(event.pos, tool_buttons, buttons, list_top)
+                        _sidebar_click_start = None
+                    else:
+                        if resizing_handle is not None:
+                            resizing_handle = None
+                            toast.show("尺寸已更新")
+                        else:
+                            handle_canvas_mouseup(*event.pos, 1)
 
             elif event.type == pygame.MOUSEMOTION:
                 mx, my = event.pos
+                if _sidebar_click_start is not None and mx < SIDEBAR_WIDTH:
+                    sx, sy = _sidebar_click_start
+                    if abs(mx - sx) > CLICK_MOVE_TOLERANCE or abs(my - sy) > CLICK_MOVE_TOLERANCE:
+                        _sidebar_click_start = None
                 if resizing_handle is not None:
                     wx, wy = screen_to_world(mx, my)
                     apply_resize(resizing_handle, wx, wy)
