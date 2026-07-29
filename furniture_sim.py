@@ -53,8 +53,10 @@ C_SIDEBAR_TEXT = ui.C_SIDEBAR_TEXT
 C_SIDEBAR_MUTED = ui.C_SIDEBAR_MUTED
 C_SIDEBAR_ACTIVE = ui.C_SIDEBAR_ACTIVE
 C_SIDEBAR_HOVER = ui.C_SIDEBAR_HOVER
+C_SIDEBAR = ui.C_SIDEBAR
 C_SIDEBAR_DARK = ui.C_SIDEBAR_DARK
 C_SUCCESS = ui.C_SUCCESS
+INPUT_TEXT = ui.INPUT_TEXT
 FONT_TITLE = ui.FONT_TITLE
 FONT_BODY = ui.FONT_BODY
 FONT_SMALL = ui.FONT_SMALL
@@ -135,33 +137,35 @@ input_family = ui.InputBox((0, 0, 0, 0), placeholder="例如 corner_sofa")
 input_search = ui.InputBox((0, 0, 0, 0), placeholder="搜索名称或 Product Family…")
 _last_input_click = {"box": None, "time": 0}
 
-FOCUS_ZONES = ("name", "family", "search", "list")
+FOCUS_ZONES = ("name", "family")
 focus_zone = "canvas"
+app_screen = "editor"  # editor | gallery
 _pending_input_focus = None
 _pending_focus_frames = 0
 _sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
-_last_sidebar_wheel_ms = 0
 _last_list_pick = {"index": -1, "time": 0}
-SIDEBAR_LIST_TOP = 544  # updated in build_sidebar
 CLICK_MOVE_TOLERANCE = 10
-WHEEL_CLICK_COOLDOWN_MS = 350
 
 
-class TemplateBrowser:
-    HEADER_H = 30
-    ROW_H = 34
+class GalleryView:
+    """全屏产品总览：每个 Product Family 一行，卡片展示形状缩略图。"""
+
+    TOP_H = 52
+    FAMILY_H = 40
+    CARD_W = 140
+    CARD_H = 120
+    CARD_GAP = 14
+    PAD = 28
+    FAMILY_GAP = 24
 
     def __init__(self):
-        self.expanded_families = set()
         self.scroll_y = 0
-        self.viewport = pygame.Rect(0, 0, 0, 0)
-        self._visible_rows = []
-
-    def get_query(self) -> str:
-        return input_search.get_text().lower().strip()
+        self.back_btn = Button((0, 0, 0, 0), "← 返回绘制", "gallery_back")
+        self._layout = []
+        self._cards = []
 
     def group_templates(self, templates):
-        query = self.get_query()
+        query = input_search.get_text().lower().strip()
         groups = {}
         for i, tpl in enumerate(templates):
             family = tpl.get("product_family") or tpl.get("id", "未分类")
@@ -171,127 +175,134 @@ class TemplateBrowser:
             groups.setdefault(family, []).append((i, tpl))
         return sorted(groups.items(), key=lambda item: item[0].lower())
 
-    def _sync_expanded(self, groups):
-        if self.get_query():
-            self.expanded_families = {fam for fam, _ in groups}
-        elif not self.expanded_families and groups:
-            self.expanded_families = {fam for fam, _ in groups}
-
-    def build_rows(self, templates):
-        groups = self.group_templates(templates)
-        self._sync_expanded(groups)
-        rows = []
-        for family, items in groups:
-            rows.append(("header", family, len(items)))
-            if family in self.expanded_families:
-                for idx, tpl in sorted(items, key=lambda x: x[1].get("id", "").lower()):
-                    rows.append(("item", idx, tpl))
-        self._visible_rows = rows
-        return rows
-
-    def visible_template_indices(self, templates):
-        return [row[1] for row in self.build_rows(templates) if row[0] == "item"]
-
-    def _row_height(self, kind: str) -> int:
-        return self.HEADER_H if kind == "header" else self.ROW_H
-
-    def _content_height(self, rows) -> int:
-        return sum(self._row_height(r[0]) for r in rows)
-
-    def clamp_scroll(self, rows):
-        max_scroll = max(0, self._content_height(rows) - self.viewport.height)
-        self.scroll_y = max(0, min(self.scroll_y, max_scroll))
-
-    def draw(self, surface, templates, selected_index: int, list_top: int):
-        input_search.rect = pygame.Rect(12, list_top, SIDEBAR_WIDTH - 24, 32)
-        self.viewport = pygame.Rect(12, list_top + 38, SIDEBAR_WIDTH - 24, SCREEN_HEIGHT - list_top - 66)
-
-        surface.blit(FONT_LABEL.render("已保存模板", True, C_SIDEBAR_TEXT), (16, list_top - 22))
-        input_search.draw(surface, None, on_dark=True)
-
-        rows = self.build_rows(templates)
-        self.clamp_scroll(rows)
-
-        clip = surface.get_clip()
-        surface.set_clip(self.viewport)
-        y = self.viewport.y - self.scroll_y
-        for row in rows:
-            h = self._row_height(row[0])
-            if row[0] == "header":
-                family, count = row[1], row[2]
-                expanded = family in self.expanded_families
-                header_rect = pygame.Rect(self.viewport.x, y, self.viewport.width, h)
-                if header_rect.colliderect(self.viewport):
-                    hover = header_rect.collidepoint(pygame.mouse.get_pos())
-                    bg = C_SIDEBAR_HOVER if hover else C_SIDEBAR_DARK
-                    pygame.draw.rect(surface, bg, header_rect, border_radius=4)
-                    arrow = "▼" if expanded else "▶"
-                    label = f"{arrow}  {family}  ({count})"
-                    surface.blit(FONT_SMALL.render(label, True, C_SIDEBAR_TEXT), (header_rect.x + 8, header_rect.y + 8))
-                y += h
-            else:
-                idx, tpl = row[1], row[2]
-                item_rect = pygame.Rect(self.viewport.x + 8, y, self.viewport.width - 8, h - 2)
-                if item_rect.colliderect(self.viewport):
-                    selected = idx == selected_index
-                    kb_focus = focus_zone == "list" and selected
-                    if selected:
-                        bg = C_SIDEBAR_ACTIVE
-                        fg, sub_fg = (255, 255, 255), (214, 234, 248)
-                    else:
-                        bg = C_SIDEBAR_HOVER if item_rect.collidepoint(pygame.mouse.get_pos()) else (55, 75, 95)
-                        fg, sub_fg = C_SIDEBAR_TEXT, C_SIDEBAR_MUTED
-                    pygame.draw.rect(surface, bg, item_rect, border_radius=4)
-                    if kb_focus:
-                        pygame.draw.rect(surface, (255, 255, 255), item_rect, 1, border_radius=4)
-                    family_label = tpl.get("product_family", tpl.get("id", ""))
-                    surface.blit(FONT_SMALL.render(tpl["id"], True, fg), (item_rect.x + 8, item_rect.y + 4))
-                    surface.blit(
-                        FONT_MARK.render(f"{family_label}  ·  ROI {tpl.get('roi', '-')}", True, sub_fg),
-                        (item_rect.x + 8, item_rect.y + 18),
-                    )
-                y += h
-        surface.set_clip(clip)
-
-        total = len(templates)
-        shown = len(self.visible_template_indices(templates))
-        query = self.get_query()
-        if query:
-            footer = f"显示 {shown} / 共 {total} 个  ·  Tab 切换  ·  Enter 确认"
-        else:
-            footer = f"共 {total} 个模板  ·  Tab 切换  ·  Enter 确认"
-        surface.blit(FONT_MARK.render(footer, True, C_SIDEBAR_MUTED), (16, SCREEN_HEIGHT - 22))
-
-    def handle_click(self, mx, my, templates) -> int | None:
-        """Return template index if an item was clicked, -1 for header toggle, None if miss."""
-        if input_search.contains((mx, my)):
-            return None
-        if not self.viewport.collidepoint(mx, my):
-            return None
-        rows = self.build_rows(templates)
-        y = self.viewport.y - self.scroll_y
-        for row in rows:
-            h = self._row_height(row[0])
-            row_rect = pygame.Rect(self.viewport.x, y, self.viewport.width, h)
-            if row_rect.collidepoint(mx, my):
-                if row[0] == "header":
-                    family = row[1]
-                    if family in self.expanded_families:
-                        self.expanded_families.discard(family)
-                    else:
-                        self.expanded_families.add(family)
-                    return -1
-                return row[1]
-            y += h
-        return None
+    def build_layout(self, templates, screen_w: int):
+        self._layout = []
+        self._cards = []
+        y = self.PAD
+        for family, tpls in self.group_templates(templates):
+            rois = [t.get("roi", 0) or 0 for _, t in tpls]
+            avg_roi = sum(rois) / max(len(rois), 1)
+            self._layout.append(("family", family, len(tpls), avg_roi, y))
+            y += self.FAMILY_H
+            x = self.PAD
+            row_y = y
+            for idx, tpl in sorted(tpls, key=lambda x: x[1].get("id", "").lower()):
+                if x + self.CARD_W > screen_w - self.PAD:
+                    x = self.PAD
+                    row_y += self.CARD_H + self.CARD_GAP
+                rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
+                self._layout.append(("card", rect, idx, tpl))
+                self._cards.append((rect, idx))
+                x += self.CARD_W + self.CARD_GAP
+            y = row_y + self.CARD_H + self.FAMILY_GAP
+        return y + self.PAD
 
     def scroll(self, delta: int):
-        rows = self.build_rows(furniture_templates)
-        self.scroll_y += delta
-        self.clamp_scroll(rows)
+        self.scroll_y = max(0, self.scroll_y + delta)
+
+    def clamp_scroll(self, content_h: int, screen_h: int):
+        view_h = screen_h - self.TOP_H
+        self.scroll_y = min(self.scroll_y, max(0, content_h - view_h))
+
+    def content_y(self, my: int) -> int:
+        return my - self.TOP_H + self.scroll_y
+
+    def handle_click(self, mx: int, my: int) -> str | int | None:
+        if self.back_btn.contains((mx, my)):
+            return "back"
+        if input_search.contains((mx, my)):
+            return None
+        if my < self.TOP_H:
+            return None
+        cy = self.content_y(my)
+        for rect, idx in self._cards:
+            if rect.collidepoint(mx, cy):
+                return idx
+        return None
+
+    def draw(self, surface, templates, selected_index: int):
+        sw, sh = surface.get_width(), surface.get_height()
+        surface.fill((245, 247, 250))
+        pygame.draw.rect(surface, C_SIDEBAR_DARK, (0, 0, sw, self.TOP_H))
+        surface.blit(FONT_TITLE.render("产品模板总览", True, C_SIDEBAR_TEXT), (20, 12))
+        surface.blit(FONT_MARK.render("按 Product Family 浏览 · 点击卡片进入绘制", True, C_SIDEBAR_MUTED), (20, 34))
+
+        input_search.rect = pygame.Rect(300, 10, min(420, sw - 490), 32)
+        input_search.draw(surface, None, on_dark=True)
+
+        total = len(templates)
+        shown = len(self._cards)
+        label = f"共 {total} 个" if shown == total else f"显示 {shown} / {total}"
+        surface.blit(FONT_SMALL.render(label, True, C_SIDEBAR_MUTED), (input_search.rect.right + 12, 18))
+
+        self.back_btn.rect = pygame.Rect(sw - 148, 10, 128, 32)
+        self.back_btn.draw(surface, mouse_pos, on_dark=True)
+
+        content_h = self.build_layout(templates, sw)
+        self.clamp_scroll(content_h, sh)
+
+        viewport = pygame.Rect(0, self.TOP_H, sw, sh - self.TOP_H)
+        clip = surface.get_clip()
+        surface.set_clip(viewport)
+
+        for item in self._layout:
+            if item[0] == "family":
+                _, family, count, avg_roi, y = item
+                sy = self.TOP_H + y - self.scroll_y
+                if sy > sh or sy + self.FAMILY_H < self.TOP_H:
+                    continue
+                bar = pygame.Rect(self.PAD, sy, sw - self.PAD * 2, self.FAMILY_H - 4)
+                pygame.draw.rect(surface, C_SIDEBAR, bar, border_radius=6)
+                surface.blit(FONT_LABEL.render(family, True, (255, 255, 255)), (bar.x + 14, bar.y + 6))
+                meta = f"{count} 款  ·  ROI {avg_roi:.1f}"
+                meta_surf = FONT_SMALL.render(meta, True, C_SIDEBAR_MUTED)
+                surface.blit(meta_surf, (bar.right - meta_surf.get_width() - 14, bar.y + 12))
+            else:
+                _, rect, idx, tpl = item
+                screen_rect = rect.move(0, self.TOP_H - self.scroll_y)
+                if screen_rect.bottom < self.TOP_H or screen_rect.top > sh:
+                    continue
+                selected = idx == selected_index
+                draw_template_card(surface, tpl, screen_rect, selected)
+                name = tpl.get("id", "")
+                name_surf = FONT_SMALL.render(name, True, INPUT_TEXT if not selected else (255, 255, 255))
+                surface.blit(name_surf, (screen_rect.x + 8, screen_rect.bottom - 20))
+
+        surface.set_clip(clip)
 
 
-template_browser = TemplateBrowser()
+gallery_view = GalleryView()
+
+
+def draw_template_card(surface, tpl, rect, selected=False):
+    bg = C_SIDEBAR_ACTIVE if selected else (255, 255, 255)
+    border = C_ACCENT if selected else (210, 218, 226)
+    pygame.draw.rect(surface, bg, rect, border_radius=8)
+    pygame.draw.rect(surface, border, rect, 2 if selected else 1, border_radius=8)
+    preview = rect.inflate(-12, -28)
+    preview.height = max(40, preview.height)
+    points = normalize_template_dict(tpl)
+    if len(points) < 2:
+        return
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    bw, bh = max(max_x - min_x, 1), max(max_y - min_y, 1)
+    pad = 6
+    sc = min((preview.width - pad * 2) / bw, (preview.height - pad * 2) / bh)
+    cx, cy = preview.centerx, preview.centery
+    mid_x, mid_y = (min_x + max_x) / 2, (min_y + max_y) / 2
+    screen_pts = [
+        (cx + (x - mid_x) * sc, cy + (y - mid_y) * sc) for x, y in points
+    ]
+    fill = (214, 234, 248) if not selected else (255, 255, 255)
+    line = C_ACCENT if not selected else (255, 255, 255)
+    if len(screen_pts) >= 3:
+        pygame.draw.polygon(surface, fill, screen_pts)
+    pygame.draw.lines(surface, line, True, screen_pts, 2)
+
+
 
 
 def focus_input(box):
@@ -368,10 +379,6 @@ def advance_focus(reverse: bool = False):
         idx = (idx - 1) if reverse else (idx + 1)
         focus_zone = FOCUS_ZONES[idx % len(FOCUS_ZONES)]
     apply_focus_zone()
-    if focus_zone == "list":
-        indices = template_browser.visible_template_indices(furniture_templates)
-        if indices and selected_index not in indices:
-            selected_index = indices[0]
 
 
 def handle_enter_action():
@@ -385,39 +392,20 @@ def handle_enter_action():
         else:
             rename_template()
         return True
-    if input_search.active:
-        indices = template_browser.visible_template_indices(furniture_templates)
-        if indices:
-            load_template_into_editor(indices[0])
-            toast.show(f"已打开: {furniture_templates[indices[0]]['id']}")
-        else:
-            toast.show("没有匹配的模板")
-        return True
-    if focus_zone == "list" and selected_index >= 0:
-        load_template_into_editor(selected_index)
-        return True
     return False
 
 
-def handle_list_arrow(key):
-    global focus_zone
-    indices = template_browser.visible_template_indices(furniture_templates)
-    if not indices:
-        return False
-    focus_zone = "list"
+def open_gallery():
+    global app_screen
     blur_inputs()
-    try:
-        pos = indices.index(selected_index)
-    except ValueError:
-        pos = 0
-    if key == pygame.K_UP:
-        pos = max(0, pos - 1)
-    elif key == pygame.K_DOWN:
-        pos = min(len(indices) - 1, pos + 1)
-    else:
-        return False
-    load_template_into_editor(indices[pos], quiet=True)
-    return True
+    app_screen = "gallery"
+    gallery_view.scroll_y = 0
+
+
+def close_gallery():
+    global app_screen
+    app_screen = "editor"
+    input_search.deactivate()
 
 
 def screen_to_world(sx, sy):
@@ -449,17 +437,18 @@ def snap_point(wx, wy, ref=None):
 
 
 def draw_grid(surface):
+    sw, sh = surface.get_width(), surface.get_height()
     spacing = 100
     start_x = int(offset_x // spacing * spacing)
-    end_x = int((offset_x + (SCREEN_WIDTH - SIDEBAR_WIDTH) / scale) // spacing * spacing + spacing)
+    end_x = int((offset_x + (sw - SIDEBAR_WIDTH) / scale) // spacing * spacing + spacing)
     start_y = int(offset_y // spacing * spacing)
-    end_y = int((offset_y + SCREEN_HEIGHT / scale) // spacing * spacing + spacing)
+    end_y = int((offset_y + sh / scale) // spacing * spacing + spacing)
     for x in range(start_x, end_x, spacing):
         sx = world_to_screen(x, 0)[0]
-        pygame.draw.line(surface, C_GRID, (sx, 0), (sx, SCREEN_HEIGHT))
+        pygame.draw.line(surface, C_GRID, (sx, 0), (sx, sh))
     for y in range(start_y, end_y, spacing):
         sy = world_to_screen(0, y)[1]
-        pygame.draw.line(surface, C_GRID, (SIDEBAR_WIDTH, sy), (SCREEN_WIDTH, sy))
+        pygame.draw.line(surface, C_GRID, (SIDEBAR_WIDTH, sy), (sw, sy))
 
 
 def polygon_from_rect(x0, y0, x1, y1):
@@ -619,6 +608,7 @@ def draw_resize_handles(surface):
 
 
 def draw_canvas(surface):
+    sw, sh = surface.get_width(), surface.get_height()
     surface.fill(C_CANVAS)
     draw_grid(surface)
 
@@ -657,11 +647,11 @@ def draw_canvas(surface):
 
     # 十字中心线
     cx, cy = world_to_screen(0, 0)
-    pygame.draw.line(surface, (148, 163, 184), (SIDEBAR_WIDTH, cy), (SCREEN_WIDTH, cy), 1)
-    pygame.draw.line(surface, (148, 163, 184), (cx, 0), (cx, SCREEN_HEIGHT), 1)
+    pygame.draw.line(surface, (148, 163, 184), (SIDEBAR_WIDTH, cy), (sw, cy), 1)
+    pygame.draw.line(surface, (148, 163, 184), (cx, 0), (cx, sh), 1)
 
     if current_tool == "polygon" and draw_phase != "idle":
-        banner = pygame.Rect(SIDEBAR_WIDTH + 16, 12, SCREEN_WIDTH - SIDEBAR_WIDTH - 32, 34)
+        banner = pygame.Rect(SIDEBAR_WIDTH + 16, 12, sw - SIDEBAR_WIDTH - 32, 34)
         pygame.draw.rect(surface, (219, 234, 254), banner, border_radius=8)
         tip = "多边形模式: 左键加点 | Shift 正交 | Enter 完成 | Esc 取消 | 右键拖动画布"
         surface.blit(FONT_SMALL.render(tip, True, C_ACCENT), (banner.x + 12, banner.y + 9))
@@ -695,23 +685,22 @@ def build_sidebar():
     input_family.rect = pygame.Rect(pad, y + 66, w, 32)
     y += 118
 
+    half = (w - 8) // 2
     buttons = {
-        "apply": Button((pad, y, w, 38), "保存形状到列表", "apply", primary=True),
-        "rename": Button((pad, y + 46, w, 34), "重命名 / 确认名称", "rename"),
-        "copy": Button((pad, y + 86, w, 34), "复制选中模板", "copy"),
-        "write": Button((pad, y + 126, w, 34), "写入 furniture_templates.json", "write"),
-        "export": Button((pad, y + 166, bw, 34), "导出", "export"),
-        "import": Button((pad + bw + 8, y + 166, bw, 34), "导入", "import"),
-        "delete": Button((pad, y + 206, w, 34), "删除选中", "delete", danger=True),
-        "clear": Button((pad, y + 246, w, 34), "清空画布", "clear"),
+        "gallery": Button((pad, y, w, 40), "产品总览 →", "gallery"),
+        "apply": Button((pad, y + 48, w, 38), "保存", "apply", primary=True),
+        "rename": Button((pad, y + 94, half, 34), "重命名", "rename"),
+        "copy": Button((pad + half + 8, y + 94, half, 34), "复制", "copy"),
+        "write": Button((pad, y + 136, w, 34), "写入 JSON", "write"),
+        "export": Button((pad, y + 178, half, 34), "导出", "export"),
+        "import": Button((pad + half + 8, y + 178, half, 34), "导入", "import"),
+        "delete": Button((pad, y + 220, w, 34), "删除", "delete", danger=True),
+        "clear": Button((pad, y + 260, w, 34), "清空画布", "clear"),
     }
-    list_top = y + 268
-    global SIDEBAR_LIST_TOP
-    SIDEBAR_LIST_TOP = list_top
-    return tool_buttons, buttons, list_top
+    return tool_buttons, buttons
 
 
-def draw_sidebar(tool_buttons, buttons, list_top):
+def draw_sidebar(tool_buttons, buttons):
     draw_sidebar_bg(screen)
     draw_sidebar_header(screen, "家具模板编辑器", "Furniture Template")
 
@@ -724,9 +713,6 @@ def draw_sidebar(tool_buttons, buttons, list_top):
     for btn in buttons.values():
         btn.draw(screen, mouse_pos, on_dark=True)
 
-    template_browser.draw(screen, furniture_templates, selected_index, list_top)
-
-    # 输入框最后绘制，避免被其它元素盖住
     input_name.draw(screen, "模板名称", on_dark=True)
     input_family.draw(screen, "Product Family", on_dark=True)
     family = input_family.get_text()
@@ -738,11 +724,18 @@ def draw_sidebar(tool_buttons, buttons, list_top):
     mode_label = _editing_mode_label()
     if mode_label:
         screen.blit(FONT_MARK.render(mode_label, True, C_SUCCESS), (pad, input_family.rect.bottom + 18))
+
+    footer_y = screen.get_height() - 44
+    pygame.draw.line(screen, C_SIDEBAR_HOVER, (pad, footer_y - 8), (SIDEBAR_WIDTH - pad, footer_y - 8), 1)
+    if selected_index >= 0 and selected_index < len(furniture_templates):
+        tpl = furniture_templates[selected_index]
+        status = f"当前: {tpl.get('id', '')}"
+        sub = tpl.get("product_family", "")
     else:
-        screen.blit(
-            FONT_MARK.render("Tab 切换字段  ·  Enter 确认  ·  Ctrl+C/V 复制", True, C_SIDEBAR_MUTED),
-            (pad, input_family.rect.bottom + 18),
-        )
+        status = "未选中模板"
+        sub = "从产品总览打开或新建"
+    screen.blit(FONT_SMALL.render(status, True, C_SIDEBAR_TEXT), (pad, footer_y))
+    screen.blit(FONT_MARK.render(sub, True, C_SIDEBAR_MUTED), (pad, footer_y + 18))
 
 
 def _is_new_entry_mode() -> bool:
@@ -1036,6 +1029,10 @@ def handle_toolbar(action):
         input_family.set_text("")
         selected_index = -1
         toast.show("画布已清空")
+    elif action == "gallery":
+        open_gallery()
+    elif action == "gallery_back":
+        close_gallery()
 
 
 def handle_canvas_mousedown(mx, my, button):
@@ -1173,22 +1170,12 @@ def handle_global_clipboard_shortcuts(event):
     return False
 
 
-def sidebar_wheel_scroll(delta: int):
-    """Scroll template list; never triggers buttons or canvas zoom."""
-    global _last_sidebar_wheel_ms
-    _last_sidebar_wheel_ms = pygame.time.get_ticks()
-    template_browser.scroll(-delta * 24)
-
-
-def try_sidebar_click(pos, tool_buttons, buttons, list_top):
-    global _last_sidebar_wheel_ms
-    if pygame.time.get_ticks() - _last_sidebar_wheel_ms < WHEEL_CLICK_COOLDOWN_MS:
-        return False
+def try_sidebar_click(pos, tool_buttons, buttons):
     mx, my = pos
-    return handle_sidebar_click(mx, my, tool_buttons, buttons, list_top)
+    return handle_sidebar_click(mx, my, tool_buttons, buttons)
 
 
-def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
+def handle_sidebar_click(mx, my, tool_buttons, buttons):
     for tool_id, btn in tool_buttons.items():
         if btn.contains((mx, my)):
             handle_toolbar(btn.action)
@@ -1203,17 +1190,22 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons, list_top):
     if input_family.contains((mx, my)):
         handle_input_click(input_family)
         return True
+    blur_inputs()
+    return False
+
+
+def handle_gallery_click(mx, my):
+    hit = gallery_view.handle_click(mx, my)
+    if hit == "back":
+        close_gallery()
+        return True
+    if hit is not None and isinstance(hit, int):
+        load_template_into_editor(hit)
+        close_gallery()
+        return True
     if input_search.contains((mx, my)):
         handle_input_click(input_search)
         return True
-
-    hit = template_browser.handle_click(mx, my, furniture_templates)
-    if hit is not None:
-        if hit >= 0:
-            blur_inputs()
-            load_template_into_editor(hit)
-        return True
-
     blur_inputs()
     return False
 
@@ -1222,7 +1214,7 @@ def main():
     global screen, clock
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
     global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview, resizing_handle, editing_template
-    global editing_template, selected_index, editing_mode
+    global editing_template, selected_index, editing_mode, app_screen
 
     reload_roi_map()
 
@@ -1232,13 +1224,15 @@ def main():
         except Exception as exc:
             show_error("加载模板失败", str(exc))
 
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
     pygame.display.set_caption(f"家具模板编辑器 v{ui.__version__}")
     clock = pygame.time.Clock()
 
-    tool_buttons, buttons, list_top = build_sidebar()
+    tool_buttons, buttons = build_sidebar()
     running = True
     global _sidebar_click_start
+    _gallery_click_start = None
+    is_fullscreen = False
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
@@ -1246,141 +1240,176 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
 
-            elif event.type == pygame.MOUSEWHEEL:
-                mx, my = mouse_pos
-                if mx < SIDEBAR_WIDTH:
-                    sidebar_wheel_scroll(event.y)
-                else:
-                    wx, wy = screen_to_world(mx, my)
-                    scale = max(0.01, min(2.0, scale * (1.15 if event.y > 0 else 1 / 1.15)))
-                    offset_x = wx - (mx - SIDEBAR_WIDTH) / scale
-                    offset_y = wy - my / scale
+            elif event.type == pygame.VIDEORESIZE and not is_fullscreen:
+                screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
 
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                mx, my = event.pos
-                if mx < SIDEBAR_WIDTH:
-                    if event.button in (4, 5):
-                        sidebar_wheel_scroll(1 if event.button == 4 else -1)
-                    elif event.button == 1:
-                        _sidebar_click_start = event.pos
-                elif event.button == 1:
-                    result = handle_canvas_mousedown(mx, my, 1)
-                    if result == "pan":
-                        dragging_view = True
-                        last_mouse_pos = event.pos
-                elif event.button == 3:
-                    dragging_view = True
-                    last_mouse_pos = event.pos
+            elif app_screen == "gallery":
+                if event.type == pygame.MOUSEWHEEL:
+                    gallery_view.scroll(-event.y * 48)
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    _gallery_click_start = event.pos
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    if _gallery_click_start is not None:
+                        gx, gy = _gallery_click_start
+                        mx, my = event.pos
+                        if abs(mx - gx) <= CLICK_MOVE_TOLERANCE and abs(my - gy) <= CLICK_MOVE_TOLERANCE:
+                            handle_gallery_click(mx, my)
+                    _gallery_click_start = None
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        close_gallery()
+                    elif event.key == pygame.K_F11:
+                        is_fullscreen = not is_fullscreen
+                        screen = pygame.display.set_mode(
+                            (0, 0) if is_fullscreen else (SCREEN_WIDTH, SCREEN_HEIGHT),
+                            pygame.FULLSCREEN if is_fullscreen else pygame.RESIZABLE,
+                        )
+                    else:
+                        handled = input_search.handle_event(event)
+                        if handled and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            pass
+                elif event.type in (pygame.TEXTEDITING, pygame.TEXTINPUT):
+                    if input_search.active:
+                        input_search.handle_event(event)
+                        if event.type == pygame.TEXTINPUT:
+                            gallery_view.scroll_y = 0
 
-            elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button in (1, 3):
-                    dragging_view = False
-                if event.button == 1:
+            else:
+                if event.type == pygame.MOUSEWHEEL:
+                    mx, my = mouse_pos
+                    if mx < SIDEBAR_WIDTH:
+                        pass
+                    else:
+                        wx, wy = screen_to_world(mx, my)
+                        scale = max(0.01, min(2.0, scale * (1.15 if event.y > 0 else 1 / 1.15)))
+                        offset_x = wx - (mx - SIDEBAR_WIDTH) / scale
+                        offset_y = wy - my / scale
+
+                elif event.type == pygame.MOUSEBUTTONDOWN:
                     mx, my = event.pos
                     if mx < SIDEBAR_WIDTH:
-                        if _sidebar_click_start is not None:
-                            sx, sy = _sidebar_click_start
-                            if abs(mx - sx) <= CLICK_MOVE_TOLERANCE and abs(my - sy) <= CLICK_MOVE_TOLERANCE:
-                                try_sidebar_click(event.pos, tool_buttons, buttons, list_top)
-                        _sidebar_click_start = None
-                    else:
-                        if resizing_handle is not None:
-                            resizing_handle = None
-                            toast.show("尺寸已更新")
+                        if event.button == 1:
+                            _sidebar_click_start = event.pos
+                    elif event.button == 1:
+                        result = handle_canvas_mousedown(mx, my, 1)
+                        if result == "pan":
+                            dragging_view = True
+                            last_mouse_pos = event.pos
+                    elif event.button == 3:
+                        dragging_view = True
+                        last_mouse_pos = event.pos
+
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    if event.button in (1, 3):
+                        dragging_view = False
+                    if event.button == 1:
+                        mx, my = event.pos
+                        if mx < SIDEBAR_WIDTH:
+                            if _sidebar_click_start is not None:
+                                sx, sy = _sidebar_click_start
+                                if abs(mx - sx) <= CLICK_MOVE_TOLERANCE and abs(my - sy) <= CLICK_MOVE_TOLERANCE:
+                                    try_sidebar_click(event.pos, tool_buttons, buttons)
+                            _sidebar_click_start = None
                         else:
-                            handle_canvas_mouseup(*event.pos, 1)
+                            if resizing_handle is not None:
+                                resizing_handle = None
+                                toast.show("尺寸已更新")
+                            else:
+                                handle_canvas_mouseup(*event.pos, 1)
 
-            elif event.type == pygame.MOUSEMOTION:
-                mx, my = event.pos
-                if _sidebar_click_start is not None and mx < SIDEBAR_WIDTH:
-                    sx, sy = _sidebar_click_start
-                    if abs(mx - sx) > CLICK_MOVE_TOLERANCE or abs(my - sy) > CLICK_MOVE_TOLERANCE:
-                        _sidebar_click_start = None
-                if resizing_handle is not None:
-                    wx, wy = screen_to_world(mx, my)
-                    apply_resize(resizing_handle, wx, wy)
-                elif dragging_view:
-                    offset_x += (last_mouse_pos[0] - mx) / scale
-                    offset_y += (last_mouse_pos[1] - my) / scale
-                    last_mouse_pos = (mx, my)
-                elif draw_phase == "drawing" and drag_start and current_tool != "polygon":
-                    wx, wy = screen_to_world(mx, my)
-                    drag_current = snap_point(wx, wy, drag_start)
-                elif current_tool == "polygon" and polygon_points:
-                    wx, wy = screen_to_world(mx, my)
-                    preview_point = snap_point(wx, wy, polygon_points[-1])
-                elif draw_phase == "l_cut" and l_outer_corners:
-                    wx, wy = screen_to_world(mx, my)
-                    l_cut_preview = (wx, wy)
-                else:
-                    preview_point = None
-                    l_cut_preview = None
+                elif event.type == pygame.MOUSEMOTION:
+                    mx, my = event.pos
+                    if _sidebar_click_start is not None and mx < SIDEBAR_WIDTH:
+                        sx, sy = _sidebar_click_start
+                        if abs(mx - sx) > CLICK_MOVE_TOLERANCE or abs(my - sy) > CLICK_MOVE_TOLERANCE:
+                            _sidebar_click_start = None
+                    if resizing_handle is not None:
+                        wx, wy = screen_to_world(mx, my)
+                        apply_resize(resizing_handle, wx, wy)
+                    elif dragging_view:
+                        offset_x += (last_mouse_pos[0] - mx) / scale
+                        offset_y += (last_mouse_pos[1] - my) / scale
+                        last_mouse_pos = (mx, my)
+                    elif draw_phase == "drawing" and drag_start and current_tool != "polygon":
+                        wx, wy = screen_to_world(mx, my)
+                        drag_current = snap_point(wx, wy, drag_start)
+                    elif current_tool == "polygon" and polygon_points:
+                        wx, wy = screen_to_world(mx, my)
+                        preview_point = snap_point(wx, wy, polygon_points[-1])
+                    elif draw_phase == "l_cut" and l_outer_corners:
+                        wx, wy = screen_to_world(mx, my)
+                        l_cut_preview = (wx, wy)
+                    else:
+                        preview_point = None
+                        l_cut_preview = None
 
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_TAB:
-                    advance_focus(bool(event.mod & pygame.KMOD_SHIFT))
-                    continue
-
-                handled = (
-                    input_name.handle_event(event)
-                    or input_family.handle_event(event)
-                    or input_search.handle_event(event)
-                )
-                if handled:
-                    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                        handle_enter_action()
-                elif handle_global_clipboard_shortcuts(event):
-                    pass
-                elif event.key in (pygame.K_UP, pygame.K_DOWN) and not (
-                    input_name.active or input_family.active or input_search.active
-                ):
-                    handle_list_arrow(event.key)
-                elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                    handle_enter_action()
-                elif current_tool == "polygon":
-                    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
-                        editing_template = template_to_dict(
-                            input_name.get_text() or "polygon",
-                            input_family.get_text() or input_name.get_text() or "polygon",
-                            "polygon",
-                            polygon_points,
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_F11:
+                        is_fullscreen = not is_fullscreen
+                        screen = pygame.display.set_mode(
+                            (0, 0) if is_fullscreen else (SCREEN_WIDTH, SCREEN_HEIGHT),
+                            pygame.FULLSCREEN if is_fullscreen else pygame.RESIZABLE,
                         )
-                        editing_mode = "new"
-                        polygon_points = []
-                        draw_phase = "idle"
-                        preview_point = None
-                        selected_index = -1
-                        toast.show("多边形完成，可保存到列表")
-                    elif event.key == pygame.K_ESCAPE:
-                        polygon_points = []
-                        draw_phase = "idle"
-                        preview_point = None
-                elif event.key == pygame.K_s and event.mod & pygame.KMOD_CTRL:
-                    if not (input_name.active or input_family.active or input_search.active):
-                        save_to_list()
-                        write_templates_file()
+                    elif event.key == pygame.K_TAB:
+                        advance_focus(bool(event.mod & pygame.KMOD_SHIFT))
+                        continue
 
-            elif event.type == pygame.TEXTEDITING:
-                if input_name.active:
-                    input_name.handle_event(event)
-                elif input_family.active:
-                    input_family.handle_event(event)
-                elif input_search.active:
-                    input_search.handle_event(event)
+                    handled = (
+                        input_name.handle_event(event)
+                        or input_family.handle_event(event)
+                    )
+                    if handled:
+                        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            handle_enter_action()
+                    elif handle_global_clipboard_shortcuts(event):
+                        pass
+                    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        handle_enter_action()
+                    elif current_tool == "polygon":
+                        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
+                            editing_template = template_to_dict(
+                                input_name.get_text() or "polygon",
+                                input_family.get_text() or input_name.get_text() or "polygon",
+                                "polygon",
+                                polygon_points,
+                            )
+                            editing_mode = "new"
+                            polygon_points = []
+                            draw_phase = "idle"
+                            preview_point = None
+                            selected_index = -1
+                            toast.show("多边形完成，可保存到列表")
+                        elif event.key == pygame.K_ESCAPE:
+                            polygon_points = []
+                            draw_phase = "idle"
+                            preview_point = None
+                    elif event.key == pygame.K_s and event.mod & pygame.KMOD_CTRL:
+                        if not (input_name.active or input_family.active):
+                            save_to_list()
+                            write_templates_file()
 
-            elif event.type == pygame.TEXTINPUT:
-                if input_name.active:
-                    input_name.handle_event(event)
-                elif input_family.active:
-                    input_family.handle_event(event)
-                elif input_search.active:
-                    input_search.handle_event(event)
-                    template_browser.scroll_y = 0
+                elif event.type == pygame.TEXTEDITING:
+                    if input_name.active:
+                        input_name.handle_event(event)
+                    elif input_family.active:
+                        input_family.handle_event(event)
 
-        draw_canvas(screen)
-        draw_sidebar(tool_buttons, buttons, list_top)
-        tick_input_focus()
-        toast.draw(screen, SIDEBAR_WIDTH + (SCREEN_WIDTH - SIDEBAR_WIDTH) // 2)
+                elif event.type == pygame.TEXTINPUT:
+                    if input_name.active:
+                        input_name.handle_event(event)
+                    elif input_family.active:
+                        input_family.handle_event(event)
+
+        if app_screen == "gallery":
+            gallery_view.draw(screen, furniture_templates, selected_index)
+            tick_input_focus()
+            toast.draw(screen, screen.get_width() // 2)
+        else:
+            draw_canvas(screen)
+            draw_sidebar(tool_buttons, buttons)
+            tick_input_focus()
+            sw = screen.get_width()
+            toast.draw(screen, SIDEBAR_WIDTH + (sw - SIDEBAR_WIDTH) // 2)
         pygame.display.flip()
         clock.tick(60)
 
