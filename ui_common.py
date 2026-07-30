@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pygame
 
-__version__ = "12"
+__version__ = "13"
 
 # Input field colors — always high contrast
 INPUT_BG = (255, 255, 255)
