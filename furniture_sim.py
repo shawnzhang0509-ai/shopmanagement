@@ -108,6 +108,8 @@ mouse_pos = (0, 0)
 toast = ui.Toast()
 GRID_SNAP = 100  # 100mm = 10cm
 resizing_handle = None
+dragging_shape = False
+drag_shape_last_world = None
 
 # ── 工具与绘制 ──────────────────────────────────────────────
 TOOLS = [
@@ -483,6 +485,64 @@ def normalize_template_dict(data):
     return points
 
 
+def point_in_polygon(x, y, poly) -> bool:
+    if len(poly) < 3:
+        return False
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-9) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def hit_template_body(mx, my) -> bool:
+    if not editing_template or draw_phase != "idle":
+        return False
+    wx, wy = screen_to_world(mx, my)
+    return point_in_polygon(wx, wy, normalize_template_dict(editing_template))
+
+
+def _template_from_points(base: dict, points) -> dict:
+    return {
+        "id": base.get("id", ""),
+        "product_family": base.get("product_family", ""),
+        "type": "polygon",
+        "points": [[int(round(x)), int(round(y))] for x, y in points],
+        "roi": base.get("roi", 0),
+    }
+
+
+def translate_editing_template(dx, dy):
+    global editing_template
+    if not editing_template or (dx == 0 and dy == 0):
+        return
+    dx, dy = int(round(dx)), int(round(dy))
+    pts = normalize_template_dict(editing_template)
+    new_pts = [(x + dx, y + dy) for x, y in pts]
+    if editing_template.get("type") in ("rectangle", "circle"):
+        editing_template = _template_from_points(editing_template, new_pts)
+    elif editing_template.get("type") == "polygon":
+        for i, (x, y) in enumerate(new_pts):
+            editing_template["points"][i] = [int(round(x)), int(round(y))]
+    else:
+        editing_template = _template_from_points(editing_template, new_pts)
+
+
+def snap_template_to_grid():
+    if not editing_template:
+        return
+    pts = normalize_template_dict(editing_template)
+    min_x = min(p[0] for p in pts)
+    min_y = min(p[1] for p in pts)
+    snap_x = round(min_x / GRID_SNAP) * GRID_SNAP
+    snap_y = round(min_y / GRID_SNAP) * GRID_SNAP
+    translate_editing_template(snap_x - min_x, snap_y - min_y)
+
+
 def template_to_dict(name, product_family, tool, points):
     roi = lookup_roi(product_family)
     if tool == "rect":
@@ -663,7 +723,7 @@ def draw_canvas(surface):
         tip = "第二步: 点击 L 形内角位置"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif editing_template and draw_phase == "idle":
-        tip = "拖动橙色角点调整大小 | 自动对齐 10cm | Shift 自由定位"
+        tip = "左键拖动形状移动 | 橙色角点调整大小 | Shift 自由定位"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif draw_phase == "idle":
         tip = "自动对齐 10cm 网格 | 按住 Shift 自由绘制"
@@ -1071,6 +1131,7 @@ def handle_toolbar(action):
 def handle_canvas_mousedown(mx, my, button):
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template, selected_index
     global l_outer_corners, l_cut_preview, resizing_handle, editing_mode
+    global dragging_shape, drag_shape_last_world
     wx, wy = screen_to_world(mx, my)
     wx, wy = snap_grid(wx, wy)
 
@@ -1082,6 +1143,11 @@ def handle_canvas_mousedown(mx, my, button):
         if handle is not None:
             resizing_handle = handle
             return
+        if hit_template_body(mx, my):
+            dragging_shape = True
+            drag_shape_last_world = screen_to_world(mx, my)
+            return
+        return
 
     if current_tool == "polygon":
         if draw_phase == "idle":
@@ -1236,6 +1302,7 @@ def main():
     global screen, clock
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
     global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview, resizing_handle, editing_template
+    global dragging_shape, drag_shape_last_world
     global editing_template, selected_index, editing_mode, app_screen
 
     reload_roi_map()
@@ -1339,6 +1406,13 @@ def main():
                             if resizing_handle is not None:
                                 resizing_handle = None
                                 toast.show("尺寸已更新")
+                            elif dragging_shape:
+                                dragging_shape = False
+                                drag_shape_last_world = None
+                                keys = pygame.key.get_pressed()
+                                if not (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]):
+                                    snap_template_to_grid()
+                                toast.show("位置已更新")
                             else:
                                 handle_canvas_mouseup(*event.pos, 1)
 
@@ -1351,6 +1425,20 @@ def main():
                     if resizing_handle is not None:
                         wx, wy = screen_to_world(mx, my)
                         apply_resize(resizing_handle, wx, wy)
+                    elif dragging_shape and drag_shape_last_world is not None:
+                        wx, wy = screen_to_world(mx, my)
+                        dx = wx - drag_shape_last_world[0]
+                        dy = wy - drag_shape_last_world[1]
+                        if abs(dx) >= 1 or abs(dy) >= 1:
+                            keys = pygame.key.get_pressed()
+                            if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+                                translate_editing_template(dx, dy)
+                            else:
+                                translate_editing_template(
+                                    round(dx / GRID_SNAP) * GRID_SNAP,
+                                    round(dy / GRID_SNAP) * GRID_SNAP,
+                                )
+                            drag_shape_last_world = screen_to_world(mx, my)
                     elif dragging_view:
                         offset_x += (last_mouse_pos[0] - mx) / scale
                         offset_y += (last_mouse_pos[1] - my) / scale
