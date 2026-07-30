@@ -139,11 +139,12 @@ _last_input_click = {"box": None, "time": 0}
 
 FOCUS_ZONES = ("name", "family")
 focus_zone = "canvas"
-app_screen = "editor"  # editor | gallery
+app_screen = "gallery"  # editor | gallery
 _pending_input_focus = None
 _pending_focus_frames = 0
 _sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
 _last_list_pick = {"index": -1, "time": 0}
+_last_gallery_pick = {"index": -1, "time": 0}
 CLICK_MOVE_TOLERANCE = 10
 
 
@@ -225,7 +226,7 @@ class GalleryView:
         surface.fill((245, 247, 250))
         pygame.draw.rect(surface, C_SIDEBAR_DARK, (0, 0, sw, self.TOP_H))
         surface.blit(FONT_TITLE.render("产品模板总览", True, C_SIDEBAR_TEXT), (20, 12))
-        surface.blit(FONT_MARK.render("按 Product Family 浏览 · 点击卡片进入绘制", True, C_SIDEBAR_MUTED), (20, 34))
+        surface.blit(FONT_MARK.render("单击选中 · 双击编辑 · Ctrl+C/V 复制粘贴", True, C_SIDEBAR_MUTED), (20, 34))
 
         input_search.rect = pygame.Rect(300, 10, min(420, sw - 490), 32)
         input_search.draw(surface, None, on_dark=True)
@@ -903,9 +904,7 @@ def load_templates_file(path=TEMPLATES_FILE):
         family = tpl.get("product_family") or tpl.get("id", "")
         tpl["product_family"] = family
         tpl["roi"] = lookup_roi(family)
-    selected_index = 0 if furniture_templates else -1
-    if furniture_templates:
-        load_template_into_editor(0)
+    selected_index = -1
     toast.show(f"已加载 {len(furniture_templates)} 个模板")
 
 
@@ -962,38 +961,72 @@ def delete_selected():
     toast.show(f"已删除: {name}")
 
 
+def _suggest_copy_name(base: str) -> str:
+    candidate = f"{base}_copy"
+    n = 2
+    while _duplicate_id(candidate):
+        candidate = f"{base}_copy{n}"
+        n += 1
+    return candidate
+
+
 def _store_template_clipboard(tpl: dict) -> None:
     global _template_clipboard
     _template_clipboard = copy.deepcopy(tpl)
 
 
-def _begin_template_copy_from(src: dict, source_label: str | None = None) -> None:
-    """Create an unsaved draft copy — same behavior as the copy button."""
-    global editing_template, selected_index, draw_phase, editing_mode
-    label = source_label or src.get("id", "template")
+def _template_source() -> dict | None:
+    if selected_index >= 0 and selected_index < len(furniture_templates):
+        return furniture_templates[selected_index]
+    if editing_template:
+        return editing_template
+    return None
+
+
+def copy_template_to_clipboard(src: dict | None = None) -> bool:
+    tpl = src or _template_source()
+    if not tpl:
+        toast.show("请先选中要复制的模板")
+        return False
+    _store_template_clipboard(tpl)
+    toast.show(f"已复制: {tpl.get('id', 'template')}")
+    return True
+
+
+def paste_template_from_clipboard() -> bool:
+    """Ctrl+V：从剪贴板粘贴出新形状，进入绘制界面并重命名。"""
+    global editing_template, selected_index, draw_phase, editing_mode, app_screen
+    if not _template_clipboard:
+        toast.show("剪贴板为空，请先 Ctrl+C 复制")
+        return False
+
+    src = _template_clipboard
     new_tpl = copy.deepcopy(src)
-    new_name = f"{src['id']}_copy"
-    new_family = src.get("product_family", src["id"])
+    new_name = _suggest_copy_name(src.get("id", "template"))
+    new_family = src.get("product_family", src.get("id", new_name))
     new_tpl["id"] = new_name
     new_tpl["product_family"] = new_family
     new_tpl["roi"] = lookup_roi(new_family)
-    _store_template_clipboard(src)
+
     editing_template = new_tpl
     editing_mode = "copy"
     selected_index = -1
     draw_phase = "idle"
     input_name.set_text(new_name)
     input_family.set_text(new_family)
+
+    if app_screen == "gallery":
+        close_gallery()
     focus_input(input_name)
     input_name.select_all_text()
-    toast.show(f"已复制 {label} → 可直接输入新名称")
+    toast.show(f"已粘贴新形状，请修改名称后保存")
+    return True
 
 
 def copy_selected_template():
-    if selected_index < 0:
-        toast.show("请先选中要复制的模板")
+    if not copy_template_to_clipboard():
         return
-    _begin_template_copy_from(furniture_templates[selected_index])
+    paste_template_from_clipboard()
 
 
 def handle_toolbar(action):
@@ -1141,30 +1174,11 @@ def handle_global_clipboard_shortcuts(event):
         return False
 
     if ui.is_ctrl_key(event, "c"):
-        if selected_index >= 0:
-            copy_selected_template()
-            return True
-        if editing_template:
-            _begin_template_copy_from(editing_template)
-            return True
-        toast.show("请先选中要复制的模板")
+        copy_template_to_clipboard()
         return True
 
     if ui.is_ctrl_key(event, "v"):
-        if _is_new_entry_mode():
-            pasted = ui.clipboard_get()
-            if pasted:
-                focus_input(input_name)
-                input_name.set_text(pasted.replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0])
-                input_name.select_all_text()
-                toast.show("已粘贴名称，确认后点保存")
-                return True
-            toast.show("剪贴板为空")
-            return True
-        if _template_clipboard:
-            _begin_template_copy_from(_template_clipboard, source_label=_template_clipboard.get("id"))
-            return True
-        toast.show("请先 Ctrl+C 或点「复制选中模板」")
+        paste_template_from_clipboard()
         return True
 
     return False
@@ -1195,13 +1209,21 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons):
 
 
 def handle_gallery_click(mx, my):
+    global selected_index, _last_gallery_pick
     hit = gallery_view.handle_click(mx, my)
     if hit == "back":
         close_gallery()
         return True
     if hit is not None and isinstance(hit, int):
-        load_template_into_editor(hit)
-        close_gallery()
+        now = pygame.time.get_ticks()
+        is_double = hit == _last_gallery_pick["index"] and now - _last_gallery_pick["time"] < 400
+        _last_gallery_pick = {"index": hit, "time": now}
+        if is_double:
+            load_template_into_editor(hit)
+            close_gallery()
+        else:
+            selected_index = hit
+            toast.show(f"已选中: {furniture_templates[hit]['id']}")
         return True
     if input_search.contains((mx, my)):
         handle_input_click(input_search)
@@ -1233,6 +1255,7 @@ def main():
     global _sidebar_click_start
     _gallery_click_start = None
     is_fullscreen = False
+    open_gallery()
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
@@ -1264,6 +1287,8 @@ def main():
                             (0, 0) if is_fullscreen else (SCREEN_WIDTH, SCREEN_HEIGHT),
                             pygame.FULLSCREEN if is_fullscreen else pygame.RESIZABLE,
                         )
+                    elif handle_global_clipboard_shortcuts(event):
+                        pass
                     else:
                         handled = input_search.handle_event(event)
                         if handled and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
