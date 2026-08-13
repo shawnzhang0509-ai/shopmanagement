@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title 家具模板编辑器
 
 echo.
-echo ===== 家具模板编辑器 =====
+echo ===== 家具模板编辑器 / Display 大库 =====
 echo 目录: %CD%
 echo.
 
@@ -27,13 +27,33 @@ if not exist "furniture_sim.py" (
     exit /b 1
 )
 
+if not exist "display_lookup.py" (
+    echo [错误] 缺少 display_lookup.py，请 git pull 更新项目
+    pause
+    exit /b 1
+)
+
 python -c "import pygame" >nul 2>&1
 if errorlevel 1 (
     echo [提示] 正在安装 pygame-ce ...
     python -m pip install pygame-ce
 )
 
-echo 正在启动 ...
+python -c "import openpyxl" >nul 2>&1
+if errorlevel 1 (
+    echo [提示] 正在安装 openpyxl ...
+    python -m pip install openpyxl pandas
+)
+
+if not exist "display.xlsx" (
+    echo.
+    echo [提示] 未找到 display.xlsx
+    echo        请在 SSMS 执行 display.sql，导出 Excel 到本目录
+    echo        或运行 update_display.bat 查看步骤
+    echo.
+)
+
+echo 正在启动 Display 大库 ...
 python furniture_sim.py
 echo.
 if errorlevel 1 (

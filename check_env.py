@@ -66,6 +66,26 @@ def main() -> int:
             fail(f"furniture_templates.json 解析失败: {e}")
             errors += 1
 
+    print("\n--- Display 库 (模板编辑器) ---")
+    if os.path.isfile("display_lookup.py"):
+        ok("display_lookup.py")
+        try:
+            from display_lookup import load_from_excel, last_load_error
+            if os.path.isfile("display.xlsx"):
+                items = load_from_excel()
+                if items:
+                    ok(f"display.xlsx  共 {len(items)} 款 Display")
+                else:
+                    fail(last_load_error() or "display.xlsx 无有效数据")
+                    errors += 1
+            else:
+                print("  [提示] 未找到 display.xlsx — SSMS 执行 display.sql 后导出")
+        except Exception as e:
+            fail(f"display_lookup 异常: {e}")
+            errors += 1
+    if os.path.isfile("display.sql"):
+        ok("display.sql (可选)")
+
     print("\n--- 模块导入测试 ---")
     if errors == 0:
         try:
@@ -102,6 +122,8 @@ def main() -> int:
     print("全部通过！可以运行:")
     print("  python layout.py")
     print("  python furniture_sim.py")
+    print("  start_template.bat   (Display 大库)")
+    print("  update_display.bat   (更新 display.xlsx 说明)")
     return 0
 
 
