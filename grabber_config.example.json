@@ -6,6 +6,7 @@
   "sql_file": "sql/display.sql",
   "output_excel": "data/display.xlsx",
   "output_json": "data/display_cache.json",
+  "blacklist_file": "data/display_blacklist.xlsx",
   "schedule_interval": 30,
   "schedule_unit": "分钟",
   "minimize_to_tray": false

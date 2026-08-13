@@ -23,6 +23,8 @@ CACHE_FILE = os.path.join(SCRIPT_DIR, "display_cache.json")
 DEFAULT_EXCEL = os.path.join(SCRIPT_DIR, "data", "display.xlsx")
 LEGACY_EXCEL = os.path.join(SCRIPT_DIR, "display.xlsx")
 DEFAULT_SQL = os.path.join(SCRIPT_DIR, "sql", "display.sql")
+DEFAULT_BLACKLIST = os.path.join(SCRIPT_DIR, "data", "display_blacklist.xlsx")
+DEFAULT_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.example.csv")
 
 # 门店：按 Stock Details 里的 location 名称匹配
 SHOPS: list[dict[str, Any]] = [
@@ -41,6 +43,15 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
     "product_code": ("product_code", "productcode", "code", "sku", "product code", "item code"),
     "product_name": ("product_name", "productname", "product name", "title", "description"),
     "product_family": ("product_family", "productfamily", "family", "product family", "range", "collection"),
+    "sub_product_family": (
+        "sub_product_family",
+        "subproductfamily",
+        "sub product family",
+        "subfamily",
+        "sub family",
+        "product line",
+        "line",
+    ),
     "display_qty": ("display_qty", "displayqty", "display qty", "quantity", "qty"),
     "stock_details": ("stock_details", "stockdetails", "stock details", "stock", "display stock", "inventory"),
 }
@@ -63,7 +74,8 @@ class DisplayItem:
     product_code: str
     product_name: str
     product_family: str
-    stock_details: str
+    sub_product_family: str = ""
+    stock_details: str = ""
     displays: list[DisplaySlot] = field(default_factory=list)
 
     @property
@@ -188,11 +200,14 @@ def _row_to_item(row: dict) -> DisplayItem | None:
     code = str(row.get("product_code") or row.get("sku") or row.get("code") or "").strip()
     name = str(row.get("product_name") or row.get("name") or row.get("title") or "").strip()
     family = str(row.get("product_family") or row.get("family") or "").strip()
+    sub_family = str(row.get("sub_product_family") or row.get("subfamily") or "").strip()
     stock = str(row.get("stock_details") or row.get("stock") or row.get("Stock Details") or "").strip()
     if not name and not code:
         return None
     if not family:
         family = name.split(" ")[0] if name else code
+    if not sub_family:
+        sub_family = name or code
     displays = row.get("displays")
     if isinstance(displays, list) and displays:
         slots = [
@@ -209,7 +224,7 @@ def _row_to_item(row: dict) -> DisplayItem | None:
         slots = parse_stock_details(stock)
     if not slots:
         return None
-    return DisplayItem(code or name, name or code, family, stock, slots)
+    return DisplayItem(code or name, name or code, family, sub_family, stock, slots)
 
 
 def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
@@ -229,12 +244,16 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
         key = _normalize_key(code or name)
         if key not in groups:
             family = str(row.get("product_family") or "").strip()
+            sub_family = str(row.get("sub_product_family") or "").strip()
             if not family:
                 family = (name or code).split(" ")[0]
+            if not sub_family:
+                sub_family = name or code
             groups[key] = {
                 "product_code": code or name,
                 "product_name": name or code,
                 "product_family": family,
+                "sub_product_family": sub_family,
                 "slots": {},
             }
         sid = shop_id_for_location(warehouse)
@@ -261,13 +280,115 @@ def _rows_to_items(rows: list[dict], fmt: str | None = None) -> list[DisplayItem
     if fmt is None:
         fmt = _detect_format(canonical[0])
     if fmt == "warehouse":
-        return _aggregate_warehouse_rows(canonical)
-    items: list[DisplayItem] = []
-    for row in canonical:
-        item = _row_to_item(row)
-        if item:
-            items.append(item)
-    return items
+        items = _aggregate_warehouse_rows(canonical)
+    else:
+        items = []
+        for row in canonical:
+            item = _row_to_item(row)
+            if item:
+                items.append(item)
+    return filter_blacklisted(items)
+
+
+_BLACKLIST_ALIASES = {
+    "sku": ("sku", "product_code", "productcode", "code", "product code", "item code"),
+    "product_name": ("product_name", "productname", "name", "product name", "title"),
+}
+
+
+def resolve_blacklist_paths(cfg: dict | None = None) -> list[str]:
+    cfg = cfg or load_grabber_config()
+    paths: list[str] = []
+    if cfg.get("blacklist_file"):
+        paths.append(_resolve_path(cfg["blacklist_file"]))
+    paths.extend([DEFAULT_BLACKLIST, os.path.join(SCRIPT_DIR, "display_blacklist.xlsx")])
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def load_blacklist(cfg: dict | None = None) -> set[str]:
+    """读取黑名单 SKU / 产品名（小写归一化）。"""
+    blocked: set[str] = set()
+    for path in resolve_blacklist_paths(cfg):
+        if not os.path.isfile(path):
+            continue
+        if path.lower().endswith(".csv"):
+            import csv
+
+            with open(path, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    continue
+                headers = [_normalize_header(h) for h in reader.fieldnames]
+                sku_idx = name_idx = None
+                for i, h in enumerate(headers):
+                    if h in _BLACKLIST_ALIASES["sku"]:
+                        sku_idx = reader.fieldnames[i]
+                    if h in _BLACKLIST_ALIASES["product_name"]:
+                        name_idx = reader.fieldnames[i]
+                for row in reader:
+                    if sku_idx and row.get(sku_idx):
+                        blocked.add(_normalize_key(row[sku_idx]))
+                    if name_idx and row.get(name_idx):
+                        blocked.add(_normalize_key(row[name_idx]))
+            continue
+        try:
+            import pandas as pd
+
+            df = pd.read_excel(path)
+            df.columns = [_normalize_header(c) for c in df.columns]
+            for field, aliases in _BLACKLIST_ALIASES.items():
+                for alias in aliases:
+                    if alias in df.columns:
+                        for val in df[alias].dropna():
+                            key = _normalize_key(str(val))
+                            if key:
+                                blocked.add(key)
+                        break
+            continue
+        except ImportError:
+            pass
+        from openpyxl import load_workbook
+
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        raw = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if not raw:
+            continue
+        headers = [_normalize_header(h) for h in raw[0]]
+        sku_col = name_col = None
+        for i, h in enumerate(headers):
+            if h in _BLACKLIST_ALIASES["sku"]:
+                sku_col = i
+            if h in _BLACKLIST_ALIASES["product_name"]:
+                name_col = i
+        for line in raw[1:]:
+            if sku_col is not None and sku_col < len(line) and line[sku_col]:
+                blocked.add(_normalize_key(str(line[sku_col])))
+            if name_col is not None and name_col < len(line) and line[name_col]:
+                blocked.add(_normalize_key(str(line[name_col])))
+    return blocked
+
+
+def is_blacklisted(item: DisplayItem, blocked: set[str]) -> bool:
+    if not blocked:
+        return False
+    code = _normalize_key(item.product_code)
+    name = _normalize_key(item.product_name)
+    return code in blocked or name in blocked
+
+
+def filter_blacklisted(items: list[DisplayItem], cfg: dict | None = None) -> list[DisplayItem]:
+    blocked = load_blacklist(cfg)
+    if not blocked:
+        return items
+    return [it for it in items if not is_blacklisted(it, blocked)]
 
 
 def _load_excel_rows(path: str) -> tuple[str, list[dict]]:
@@ -565,6 +686,8 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
             "WarehouseName": row.get("warehouse_name", ""),
             "Sku": row.get("product_code", ""),
             "ProductName": row.get("product_name", ""),
+            "ProductFamily": row.get("product_family", ""),
+            "SubProductFamily": row.get("sub_product_family", ""),
             "DisplayQty": row.get("display_qty", 0),
         })
     try:
@@ -578,9 +701,16 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["WarehouseName", "Sku", "ProductName", "DisplayQty"])
+    ws.append(["WarehouseName", "Sku", "ProductName", "ProductFamily", "SubProductFamily", "DisplayQty"])
     for r in export:
-        ws.append([r["WarehouseName"], r["Sku"], r["ProductName"], r["DisplayQty"]])
+        ws.append([
+            r["WarehouseName"],
+            r["Sku"],
+            r["ProductName"],
+            r["ProductFamily"],
+            r["SubProductFamily"],
+            r["DisplayQty"],
+        ])
     wb.save(path)
 
 
@@ -624,6 +754,7 @@ def save_cache(items: list[DisplayItem], path: str | None = None) -> None:
                 "product_code": it.product_code,
                 "product_name": it.product_name,
                 "product_family": it.product_family,
+                "sub_product_family": it.sub_product_family,
                 "stock_details": it.stock_details,
                 "displays": [
                     {
@@ -704,11 +835,20 @@ def filter_items(items: list[DisplayItem], shop_id: str, query: str = "") -> lis
         if shop_id != "all" and it.display_qty_for_shop(shop_id) <= 0:
             continue
         if q:
-            blob = " ".join([it.product_code, it.product_name, it.product_family]).lower()
+            blob = " ".join([
+                it.product_code,
+                it.product_name,
+                it.product_family,
+                it.sub_product_family,
+            ]).lower()
             if q not in blob:
                 continue
         out.append(it)
-    out.sort(key=lambda x: (x.product_family.lower(), x.product_name.lower()))
+    out.sort(key=lambda x: (
+        x.product_family.lower(),
+        x.sub_product_family.lower(),
+        x.product_name.lower(),
+    ))
     return out
 
 
@@ -717,6 +857,22 @@ def group_by_family(items: list[DisplayItem]) -> list[tuple[str, list[DisplayIte
     for it in items:
         groups.setdefault(it.product_family or "未分类", []).append(it)
     return sorted(groups.items(), key=lambda x: x[0].lower())
+
+
+def group_by_family_hierarchy(
+    items: list[DisplayItem],
+) -> list[tuple[str, list[tuple[str, list[DisplayItem]]]]]:
+    """Product Family → Sub Product Family → items。"""
+    top: dict[str, dict[str, list[DisplayItem]]] = {}
+    for it in items:
+        fam = it.product_family or "未分类"
+        sub = it.sub_product_family or it.product_name or it.product_code or "未分类"
+        top.setdefault(fam, {}).setdefault(sub, []).append(it)
+    out: list[tuple[str, list[tuple[str, list[DisplayItem]]]]] = []
+    for fam in sorted(top.keys(), key=str.lower):
+        subs = sorted(top[fam].items(), key=lambda x: x[0].lower())
+        out.append((fam, subs))
+    return out
 
 
 def shop_stats(items: list[DisplayItem], templates: list[dict]) -> dict[str, dict[str, int]]:
@@ -733,12 +889,15 @@ def match_template_index(item: DisplayItem, templates: list[dict]) -> int:
     name = _normalize_key(item.product_name)
     code = _normalize_key(item.product_code)
     family = _normalize_key(item.product_family)
+    sub_family = _normalize_key(item.sub_product_family)
     for i, tpl in enumerate(templates):
         tid = _normalize_key(tpl.get("id", ""))
         tfam = _normalize_key(tpl.get("product_family", ""))
         if code and (code == tid or code == tfam):
             return i
         if name and (name == tid or name == tfam):
+            return i
+        if sub_family and (sub_family == tid or sub_family == tfam):
             return i
     for i, tpl in enumerate(templates):
         tid = _normalize_key(tpl.get("id", ""))
@@ -748,5 +907,7 @@ def match_template_index(item: DisplayItem, templates: list[dict]) -> int:
         if name and (name in tid or tid in name):
             return i
         if family and (family in tfam or tfam in family):
+            return i
+        if sub_family and (sub_family in tid or tid in sub_family or sub_family in tfam):
             return i
     return -1

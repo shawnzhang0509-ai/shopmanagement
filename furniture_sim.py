@@ -21,7 +21,7 @@ from roi_lookup import lookup_roi, reload_roi_map
 from display_lookup import (
     SHOPS,
     filter_items,
-    group_by_family,
+    group_by_family_hierarchy,
     last_load_error,
     last_load_source,
     load_display_items,
@@ -171,6 +171,7 @@ class GalleryView:
     TOP_H = 96
     SHOP_H = 36
     FAMILY_H = 40
+    SUB_FAMILY_H = 34
     CARD_W = 140
     CARD_H = 120
     CARD_GAP = 14
@@ -227,22 +228,32 @@ class GalleryView:
         self._cards = []
         y = self.PAD
         filtered = self._filtered_displays()
-        for family, items in group_by_family(filtered):
-            modeled = sum(1 for it in items if match_template_index(it, templates) >= 0)
-            self._layout.append(("family", family, len(items), modeled, y))
+        for family, sub_groups in group_by_family_hierarchy(filtered):
+            fam_total = sum(len(items) for _, items in sub_groups)
+            fam_modeled = sum(
+                1
+                for _, items in sub_groups
+                for it in items
+                if match_template_index(it, templates) >= 0
+            )
+            self._layout.append(("family", family, fam_total, fam_modeled, y))
             y += self.FAMILY_H
-            x = self.PAD
-            row_y = y
-            for item in items:
-                if x + self.CARD_W > screen_w - self.PAD:
-                    x = self.PAD
-                    row_y += self.CARD_H + self.CARD_GAP
-                rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
-                tpl_idx = match_template_index(item, templates)
-                self._layout.append(("card_disp", rect, item, tpl_idx))
-                self._cards.append((rect, "display", item.key))
-                x += self.CARD_W + self.CARD_GAP
-            y = row_y + self.CARD_H + self.FAMILY_GAP
+            for sub_family, items in sub_groups:
+                modeled = sum(1 for it in items if match_template_index(it, templates) >= 0)
+                self._layout.append(("sub_family", family, sub_family, len(items), modeled, y))
+                y += self.SUB_FAMILY_H
+                x = self.PAD + 20
+                row_y = y
+                for item in sorted(items, key=lambda it: it.product_name.lower()):
+                    if x + self.CARD_W > screen_w - self.PAD:
+                        x = self.PAD + 20
+                        row_y += self.CARD_H + self.CARD_GAP
+                    rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
+                    tpl_idx = match_template_index(item, templates)
+                    self._layout.append(("card_disp", rect, item, tpl_idx))
+                    self._cards.append((rect, "display", item.key))
+                    x += self.CARD_W + self.CARD_GAP
+                y = row_y + self.CARD_H + self.FAMILY_GAP
         return y + self.PAD
 
     def build_layout(self, templates, screen_w: int):
@@ -347,7 +358,7 @@ class GalleryView:
         title = "Display 大库" if gallery_mode == "display" else "已测绘模板"
         if gallery_mode == "display":
             surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
-            surface.blit(FONT_MARK.render("有模型点亮 · 双击测绘/编辑 · 单击选中", True, C_SIDEBAR_MUTED), (168, 62))
+            surface.blit(FONT_MARK.render("按 Sub Product Family 查看测绘 · 双击测绘/编辑", True, C_SIDEBAR_MUTED), (168, 62))
 
         self._draw_header_tabs(surface, sw, templates)
 
@@ -368,11 +379,23 @@ class GalleryView:
                 pygame.draw.rect(surface, C_SIDEBAR, bar, border_radius=6)
                 surface.blit(FONT_LABEL.render(family, True, (255, 255, 255)), (bar.x + 14, bar.y + 6))
                 if gallery_mode == "display":
-                    meta = f"{count} 款 Display  ·  已测绘 {extra}"
+                    meta = f"{count} 款 Display  ·  已测绘 {extra}/{count}"
                 else:
                     meta = f"{count} 款  ·  ROI {extra:.1f}"
                 meta_surf = FONT_SMALL.render(meta, True, C_SIDEBAR_MUTED)
                 surface.blit(meta_surf, (bar.right - meta_surf.get_width() - 14, bar.y + 12))
+            elif item[0] == "sub_family":
+                _, _family, sub_family, count, modeled, y = item
+                sy = self.TOP_H + y - self.scroll_y
+                if sy > sh or sy + self.SUB_FAMILY_H < self.TOP_H:
+                    continue
+                bar = pygame.Rect(self.PAD + 20, sy, sw - self.PAD * 2 - 20, self.SUB_FAMILY_H - 4)
+                pygame.draw.rect(surface, (52, 62, 74), bar, border_radius=5)
+                label = sub_family if len(sub_family) <= 48 else sub_family[:47] + "…"
+                surface.blit(FONT_SMALL.render(label, True, (230, 235, 240)), (bar.x + 12, bar.y + 8))
+                meta = f"{count} 款  ·  已测绘 {modeled}/{count}"
+                meta_surf = FONT_SMALL.render(meta, True, C_SIDEBAR_MUTED)
+                surface.blit(meta_surf, (bar.right - meta_surf.get_width() - 12, bar.y + 8))
             elif item[0] == "card_tpl":
                 _, rect, idx, tpl = item
                 screen_rect = rect.move(0, self.TOP_H - self.scroll_y)
