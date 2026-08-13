@@ -23,6 +23,7 @@ from display_lookup import (
     filter_items,
     group_by_family,
     last_load_error,
+    last_load_source,
     load_display_items,
     match_template_index,
     reload_display_items,
@@ -395,8 +396,11 @@ class GalleryView:
 
         err = last_load_error()
         if gallery_mode == "display" and err and not display_items:
-            banner = FONT_SMALL.render(f"⚠ {err[:80]}", True, (200, 80, 60))
+            banner = FONT_SMALL.render(f"⚠ {err[:90]}", True, (200, 80, 60))
             surface.blit(banner, (self.PAD, sh - 28))
+        elif gallery_mode == "display" and display_items and last_load_source():
+            src = last_load_source()
+            surface.blit(FONT_MARK.render(f"数据源: {src}", True, C_SIDEBAR_MUTED), (self.PAD, sh - 22))
 
 
 gallery_view = GalleryView()
@@ -900,7 +904,7 @@ def build_sidebar():
 
     half = (w - 8) // 2
     buttons = {
-        "gallery": Button((pad, y, w, 40), "产品总览 →", "gallery"),
+        "gallery": Button((pad, y, w, 40), "Display 总览 →", "gallery"),
         "apply": Button((pad, y + 48, w, 38), "保存", "apply", primary=True),
         "rename": Button((pad, y + 94, half, 34), "重命名", "rename"),
         "copy": Button((pad + half + 8, y + 94, half, 34), "复制", "copy"),
@@ -1450,17 +1454,14 @@ def begin_survey_display(item) -> None:
     toast.show(f"开始测绘: {item.product_name}")
 
 
-def refresh_display_data(prefer_db: bool = True) -> None:
+def refresh_display_data(prefer_db: bool = False) -> None:
     global display_items
     display_items = reload_display_items(prefer_db=prefer_db)
-    err = last_load_error()
+    src = last_load_source() or "display.xlsx"
     if display_items:
-        msg = f"Display 已加载 {len(display_items)} 款"
-        if prefer_db and err:
-            msg += f"（缓存模式）"
-        toast.show(msg)
+        toast.show(f"已刷新 {len(display_items)} 款（来自 {src}）")
     else:
-        toast.show(err or "Display 列表为空，请配置数据库或 display_cache.json")
+        toast.show(last_load_error() or "Display 列表为空，请导出 display.xlsx")
 
 
 def handle_gallery_click(mx, my):
@@ -1470,7 +1471,7 @@ def handle_gallery_click(mx, my):
         close_gallery()
         return True
     if hit == "refresh":
-        refresh_display_data(prefer_db=True)
+        refresh_display_data(prefer_db=False)
         return True
     if isinstance(hit, str) and hit.startswith("mode:"):
         gallery_mode = hit.split(":", 1)[1]

@@ -1,6 +1,6 @@
 {
+  "_comment": "推荐：用 display.sql 查完导出 display.xlsx，不需要配数据库。下面仅作可选直连用。",
+  "excel_file": "display.xlsx",
   "database_url": "mssql+pymssql://USER:PASSWORD@HOST:1433/nz_ierp_live?charset=utf8",
-  "load_from_database_on_startup": false,
-  "cache_file": "display_cache.json",
-  "query": "SELECT ProductCode AS product_code, ProductName AS product_name, ProductFamily AS product_family, StockDetails AS stock_details FROM YourDisplayView WHERE StockDetails LIKE '%Display%'"
+  "query": "见 display.sql"
 }
