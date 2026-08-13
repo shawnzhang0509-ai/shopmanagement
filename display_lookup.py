@@ -97,6 +97,21 @@ def _normalize_header(value) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _cell_value(val) -> str:
+    """Excel/SQL 单元格 → 字符串；None / NaN / 'nan' 视为空。"""
+    if val is None:
+        return ""
+    if isinstance(val, float):
+        import math
+
+        if math.isnan(val):
+            return ""
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", "null", "#n/a", "n/a"):
+        return ""
+    return s
+
+
 def _canonicalize_row(raw: dict) -> dict:
     """把 Excel / SQL 任意列名映射到标准字段名。"""
     normalized = {_normalize_header(k): v for k, v in raw.items()}
@@ -104,7 +119,7 @@ def _canonicalize_row(raw: dict) -> dict:
     for field, aliases in _COL_ALIASES.items():
         for alias in aliases:
             if alias in normalized:
-                out[field] = normalized[alias]
+                out[field] = _cell_value(normalized[alias])
                 break
     return out
 
@@ -135,6 +150,12 @@ def _resolve_columns(headers: list[str]) -> tuple[str, dict[str, int]] | None:
             if h in aliases:
                 mapping[field] = i
                 break
+    # 宽松匹配：列名含 family 时也能识别（如 MainProductFamily）
+    for i, h in enumerate(headers):
+        if "sub_product_family" not in mapping and "sub" in h and "family" in h:
+            mapping["sub_product_family"] = i
+        elif "product_family" not in mapping and "family" in h and "sub" not in h:
+            mapping["product_family"] = i
     return fmt, mapping
 
 
@@ -188,18 +209,15 @@ def parse_stock_details(text: str) -> list[DisplaySlot]:
 def _cell_str(row: tuple, idx: int | None) -> str:
     if idx is None or idx >= len(row):
         return ""
-    val = row[idx]
-    if val is None:
-        return ""
-    return str(val).strip()
+    return _cell_value(row[idx])
 
 
 def _row_to_item(row: dict) -> DisplayItem | None:
-    code = str(row.get("product_code") or row.get("sku") or row.get("code") or "").strip()
-    name = str(row.get("product_name") or row.get("name") or row.get("title") or "").strip()
-    family = str(row.get("product_family") or row.get("family") or "").strip()
-    sub_family = str(row.get("sub_product_family") or row.get("subfamily") or "").strip()
-    stock = str(row.get("stock_details") or row.get("stock") or row.get("Stock Details") or "").strip()
+    code = _cell_value(row.get("product_code") or row.get("sku") or row.get("code"))
+    name = _cell_value(row.get("product_name") or row.get("name") or row.get("title"))
+    family = _cell_value(row.get("product_family") or row.get("family"))
+    sub_family = _cell_value(row.get("sub_product_family") or row.get("subfamily"))
+    stock = _cell_value(row.get("stock_details") or row.get("stock") or row.get("Stock Details"))
     if not name and not code:
         return None
     if not family:
@@ -230,9 +248,9 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
     groups: dict[str, dict] = {}
     for raw in rows:
         row = raw if "warehouse_name" in raw else _canonicalize_row(raw)
-        code = str(row.get("product_code") or "").strip()
-        name = str(row.get("product_name") or "").strip()
-        warehouse = str(row.get("warehouse_name") or "").strip()
+        code = _cell_value(row.get("product_code"))
+        name = _cell_value(row.get("product_name"))
+        warehouse = _cell_value(row.get("warehouse_name"))
         try:
             qty = int(float(row.get("display_qty") or 0))
         except (TypeError, ValueError):
@@ -240,9 +258,9 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
         if not warehouse or qty <= 0 or (not code and not name):
             continue
         key = _normalize_key(code or name)
+        family = _cell_value(row.get("product_family"))
+        sub_family = _cell_value(row.get("sub_product_family"))
         if key not in groups:
-            family = str(row.get("product_family") or "").strip()
-            sub_family = str(row.get("sub_product_family") or "").strip()
             if not family:
                 family = (name or code).split(" ")[0]
             if not sub_family:
@@ -254,6 +272,15 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 "sub_product_family": sub_family,
                 "slots": {},
             }
+        else:
+            if family and not groups[key]["product_family"]:
+                groups[key]["product_family"] = family
+            if sub_family and groups[key]["sub_product_family"] in (
+                groups[key]["product_name"],
+                groups[key]["product_code"],
+                "",
+            ):
+                groups[key]["sub_product_family"] = sub_family
         sid = shop_id_for_location(warehouse)
         slot_key = (sid, warehouse)
         groups[key]["slots"][slot_key] = groups[key]["slots"].get(slot_key, 0) + qty
@@ -405,9 +432,13 @@ def _load_excel_rows(path: str) -> tuple[str, list[dict]]:
                 "或 stock_details + product_name"
             )
         fmt, colmap = resolved
+        col_names = list(df.columns)
         rows: list[dict] = []
         for _, series in df.iterrows():
-            row = {field: series.iloc[idx] if idx < len(series) else "" for field, idx in colmap.items()}
+            row = {
+                field: _cell_value(series.iloc[idx] if idx < len(series) else None)
+                for field, idx in colmap.items()
+            }
             rows.append(row)
         return fmt, rows
     except ImportError:
