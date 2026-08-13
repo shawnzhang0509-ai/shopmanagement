@@ -352,6 +352,43 @@ def load_grabber_config() -> dict:
     return {}
 
 
+def save_grabber_config(cfg: dict) -> None:
+    path = GRABBER_CONFIG
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def _resolve_path(path: str) -> str:
+    if not path:
+        return SCRIPT_DIR
+    return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
+
+
+def build_runtime_config(cfg: dict | None = None) -> dict:
+    """合并配置并解析 sql / 输出路径。"""
+    base = dict(cfg or load_grabber_config())
+    sql_folder = base.get("sql_folder") or "sql"
+    sql_folder_abs = _resolve_path(sql_folder)
+    sql_file = base.get("sql_file")
+    if not sql_file:
+        sql_file = os.path.join(sql_folder_abs, "display.sql")
+    else:
+        sql_file = _resolve_path(sql_file)
+    base["sql_file"] = sql_file
+
+    output_folder = base.get("output_folder") or "data"
+    output_folder_abs = _resolve_path(output_folder)
+    if not base.get("output_excel"):
+        base["output_excel"] = os.path.join(output_folder_abs, "display.xlsx")
+    else:
+        base["output_excel"] = _resolve_path(base["output_excel"])
+    if not base.get("output_json"):
+        base["output_json"] = os.path.join(output_folder_abs, "display_cache.json")
+    else:
+        base["output_json"] = _resolve_path(base["output_json"])
+    return base
+
+
 def resolve_display_excel_paths() -> list[str]:
     cfg = load_grabber_config()
     paths: list[str] = []
@@ -378,14 +415,10 @@ def resolve_cache_path() -> str:
 
 
 def load_sql_query(cfg: dict | None = None) -> str:
-    cfg = cfg or load_grabber_config()
-    sql_file = cfg.get("sql_file") or "sql/display.sql"
-    path = sql_file if os.path.isabs(sql_file) else os.path.join(SCRIPT_DIR, sql_file)
+    cfg = build_runtime_config(cfg)
+    path = cfg["sql_file"]
     if not os.path.isfile(path):
-        legacy = os.path.join(SCRIPT_DIR, "display.sql")
-        path = legacy if os.path.isfile(legacy) else path
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"找不到 SQL 文件: {sql_file}")
+        raise FileNotFoundError(f"找不到 SQL 文件: {path}")
     with open(path, "r", encoding="utf-8") as f:
         lines = [ln for ln in f.readlines() if not ln.strip().startswith("--")]
     query = "\n".join(lines).strip()
@@ -451,15 +484,15 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
     wb.save(path)
 
 
-def grab_and_save() -> tuple[list["DisplayItem"], str]:
+def grab_and_save(cfg: dict | None = None) -> tuple[list["DisplayItem"], str]:
     """Main 抓取：SQL → data/display.xlsx + JSON 缓存。"""
     global _display_cache, _last_load_error, _last_load_source
-    cfg = load_grabber_config()
-    rows = _fetch_raw_rows(cfg)
-    excel_path = resolve_display_excel_paths()[0]
+    runtime = build_runtime_config(cfg)
+    rows = _fetch_raw_rows(runtime)
+    excel_path = runtime["output_excel"]
     export_rows_to_excel(rows, excel_path)
     items = _rows_to_items(rows, "warehouse")
-    save_cache(items, resolve_cache_path())
+    save_cache(items, runtime["output_json"])
     _display_cache = items
     _last_load_error = None
     _last_load_source = os.path.basename(excel_path)
