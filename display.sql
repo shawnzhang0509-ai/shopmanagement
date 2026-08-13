@@ -1,24 +1,26 @@
 -- ============================================================
--- Display 库 SQL 模板
--- 用法：在 SSMS / Azure Data Studio 里跑这条 SQL，
---       结果导出为 display.xlsx，放到项目根目录即可。
---       程序启动时自动读取，和 roi.xlsx 一样。
+-- Display 库 SQL（iERP nz_ierp_live）
+-- 用法：SSMS 执行 → 结果导出为 display.xlsx → 放到项目根目录
 -- ============================================================
 
--- 按你们实际表名改 FROM / JOIN；下面只是示例结构。
 SELECT
-    p.ProductCode   AS product_code,
-    p.ProductName   AS product_name,
-    p.ProductFamily AS product_family,
-    s.StockDetails  AS stock_details
-FROM dbo.YourProductTable AS p
-INNER JOIN dbo.YourStockView AS s ON s.ProductCode = p.ProductCode
-WHERE s.StockDetails LIKE '%Display%'
-  AND s.StockDetails NOT LIKE '%No longer available%'
-ORDER BY p.ProductFamily, p.ProductName;
+    w.Name AS WarehouseName,
+    p.Sku,
+    p.Name AS ProductName,
+    SUM(s.Quantity) AS DisplayQty
+FROM Stocks s
+JOIN Warehouses w ON s.WarehouseId = w.Id
+JOIN Products p ON s.ProductId = p.Id
+WHERE w.Name LIKE '%Display%'
+  AND p.IsDiscontinued = 0
+GROUP BY w.Name, p.Sku, p.Name
+HAVING SUM(s.Quantity) > 0
+ORDER BY w.Name, DisplayQty DESC;
 
--- Excel 列名（第一行表头）支持以下任意写法，程序会自动识别：
---   product_code / code / sku
---   product_name / name
---   product_family / family
---   stock_details / stock / Stock Details
+-- Excel 表头（程序自动识别）：
+--   WarehouseName  → 门店 Display 仓库名
+--   Sku            → 产品编码
+--   ProductName    → 产品名称
+--   DisplayQty     → Display 数量
+--
+-- 程序会按 Sku 合并多行，并按仓库名归类到 Onehunga / Westgate / Hamilton / CHCH 等 Tab

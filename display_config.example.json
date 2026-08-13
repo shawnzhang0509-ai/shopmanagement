@@ -1,6 +1,6 @@
 {
-  "_comment": "推荐：用 display.sql 查完导出 display.xlsx，不需要配数据库。下面仅作可选直连用。",
+  "_comment": "推荐：SSMS 跑 display.sql → 导出 display.xlsx。下面仅作可选直连数据库用。",
   "excel_file": "display.xlsx",
-  "database_url": "mssql+pymssql://USER:PASSWORD@HOST:1433/nz_ierp_live?charset=utf8",
-  "query": "见 display.sql"
+  "database_url": "mssql+pymssql://USER:PASSWORD@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
+  "query": "SELECT w.Name AS WarehouseName, p.Sku, p.Name AS ProductName, SUM(s.Quantity) AS DisplayQty FROM Stocks s JOIN Warehouses w ON s.WarehouseId = w.Id JOIN Products p ON s.ProductId = p.Id WHERE w.Name LIKE '%Display%' AND p.IsDiscontinued = 0 GROUP BY w.Name, p.Sku, p.Name HAVING SUM(s.Quantity) > 0 ORDER BY w.Name, DisplayQty DESC"
 }

@@ -33,12 +33,14 @@ SHOPS: list[dict[str, Any]] = [
     {"id": "other", "label": "其他", "patterns": []},
 ]
 
-# Excel 列名别名（不区分大小写）
+# Excel / SQL 列名别名（不区分大小写，空格会折叠）
 _COL_ALIASES: dict[str, tuple[str, ...]] = {
-    "product_code": ("product_code", "code", "sku", "product code", "item code"),
-    "product_name": ("product_name", "name", "product name", "title", "description"),
-    "product_family": ("product_family", "family", "product family", "range", "collection"),
-    "stock_details": ("stock_details", "stock details", "stock", "display stock", "inventory"),
+    "warehouse_name": ("warehouse_name", "warehousename", "warehouse name", "warehouse"),
+    "product_code": ("product_code", "productcode", "code", "sku", "product code", "item code"),
+    "product_name": ("product_name", "productname", "product name", "title", "description"),
+    "product_family": ("product_family", "productfamily", "family", "product family", "range", "collection"),
+    "display_qty": ("display_qty", "displayqty", "display qty", "quantity", "qty"),
+    "stock_details": ("stock_details", "stockdetails", "stock details", "stock", "display stock", "inventory"),
 }
 
 _display_cache: list["DisplayItem"] | None = None
@@ -80,21 +82,48 @@ def _normalize_key(value: str) -> str:
 
 
 def _normalize_header(value) -> str:
-    return _normalize_key(str(value or ""))
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
-def _resolve_columns(headers: list[str]) -> dict[str, int] | None:
+def _canonicalize_row(raw: dict) -> dict:
+    """把 Excel / SQL 任意列名映射到标准字段名。"""
+    normalized = {_normalize_header(k): v for k, v in raw.items()}
+    out: dict = {}
+    for field, aliases in _COL_ALIASES.items():
+        for alias in aliases:
+            if alias in normalized:
+                out[field] = normalized[alias]
+                break
+    return out
+
+
+def _detect_format(fields: dict) -> str | None:
+    keys = set(fields)
+    has_product = "product_code" in keys or "product_name" in keys
+    if "warehouse_name" in keys and "display_qty" in keys and has_product:
+        return "warehouse"
+    if "stock_details" in keys and has_product:
+        return "stock"
+    return None
+
+
+def _resolve_columns(headers: list[str]) -> tuple[str, dict[str, int]] | None:
+    sample = {}
+    for field, aliases in _COL_ALIASES.items():
+        for i, h in enumerate(headers):
+            if h in aliases:
+                sample[field] = True
+                break
+    fmt = _detect_format(sample)
+    if not fmt:
+        return None
     mapping: dict[str, int] = {}
     for field, aliases in _COL_ALIASES.items():
         for i, h in enumerate(headers):
             if h in aliases:
                 mapping[field] = i
                 break
-    if "stock_details" not in mapping:
-        return None
-    if "product_name" not in mapping and "product_code" not in mapping:
-        return None
-    return mapping
+    return fmt, mapping
 
 
 def is_display_location(location: str) -> bool:
@@ -181,33 +210,86 @@ def _row_to_item(row: dict) -> DisplayItem | None:
     return DisplayItem(code or name, name or code, family, stock, slots)
 
 
-def _rows_to_items(rows: list[dict]) -> list[DisplayItem]:
+def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
+    """多行（每行一个仓库+产品）合并为 DisplayItem。"""
+    groups: dict[str, dict] = {}
+    for raw in rows:
+        row = raw if "warehouse_name" in raw else _canonicalize_row(raw)
+        code = str(row.get("product_code") or "").strip()
+        name = str(row.get("product_name") or "").strip()
+        warehouse = str(row.get("warehouse_name") or "").strip()
+        try:
+            qty = int(float(row.get("display_qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0
+        if not warehouse or qty <= 0 or (not code and not name):
+            continue
+        key = _normalize_key(code or name)
+        if key not in groups:
+            family = str(row.get("product_family") or "").strip()
+            if not family:
+                family = (name or code).split(" ")[0]
+            groups[key] = {
+                "product_code": code or name,
+                "product_name": name or code,
+                "product_family": family,
+                "slots": {},
+            }
+        sid = shop_id_for_location(warehouse)
+        slot_key = (sid, warehouse)
+        groups[key]["slots"][slot_key] = groups[key]["slots"].get(slot_key, 0) + qty
+
     items: list[DisplayItem] = []
-    for row in rows:
+    for g in groups.values():
+        displays = [
+            {"shop_id": sid, "shop_label": shop_label(sid), "location": loc, "qty": q}
+            for (sid, loc), q in g["slots"].items()
+        ]
+        stock = ";".join(f"{d['location']}:{d['qty']}" for d in displays)
+        item = _row_to_item({**g, "displays": displays, "stock_details": stock})
+        if item:
+            items.append(item)
+    return items
+
+
+def _rows_to_items(rows: list[dict], fmt: str | None = None) -> list[DisplayItem]:
+    if not rows:
+        return []
+    canonical = [_canonicalize_row(r) for r in rows]
+    if fmt is None:
+        fmt = _detect_format(canonical[0])
+    if fmt == "warehouse":
+        return _aggregate_warehouse_rows(canonical)
+    items: list[DisplayItem] = []
+    for row in canonical:
         item = _row_to_item(row)
         if item:
             items.append(item)
     return items
 
 
-def _load_excel_rows(path: str | None = None) -> list[dict]:
+def _load_excel_rows(path: str | None = None) -> tuple[str, list[dict]]:
     path = path or DISPLAY_FILE
     if not os.path.isfile(path):
-        return []
+        return "warehouse", []
 
     try:
         import pandas as pd
 
         df = pd.read_excel(path)
         df.columns = [_normalize_header(c) for c in df.columns]
-        colmap = _resolve_columns(list(df.columns))
-        if not colmap:
-            raise ValueError(f"{os.path.basename(path)} 缺少必要列（需要 stock_details + product_name/code）")
+        resolved = _resolve_columns(list(df.columns))
+        if not resolved:
+            raise ValueError(
+                f"{os.path.basename(path)} 列不匹配。需要 WarehouseName+Sku+ProductName+DisplayQty，"
+                "或 stock_details + product_name"
+            )
+        fmt, colmap = resolved
         rows: list[dict] = []
         for _, series in df.iterrows():
             row = {field: series.iloc[idx] if idx < len(series) else "" for field, idx in colmap.items()}
             rows.append(row)
-        return rows
+        return fmt, rows
     except ImportError:
         pass
 
@@ -218,18 +300,22 @@ def _load_excel_rows(path: str | None = None) -> list[dict]:
     raw = list(ws.iter_rows(values_only=True))
     wb.close()
     if not raw:
-        return []
+        return "warehouse", []
     headers = [_normalize_header(h) for h in raw[0]]
-    colmap = _resolve_columns(headers)
-    if not colmap:
-        raise ValueError(f"{os.path.basename(path)} 缺少必要列（需要 stock_details + product_name/code）")
+    resolved = _resolve_columns(headers)
+    if not resolved:
+        raise ValueError(
+            f"{os.path.basename(path)} 列不匹配。需要 WarehouseName+Sku+ProductName+DisplayQty，"
+            "或 stock_details + product_name"
+        )
+    fmt, colmap = resolved
     rows: list[dict] = []
     for line in raw[1:]:
         if not line:
             continue
         row = {field: _cell_str(line, idx) for field, idx in colmap.items()}
         rows.append(row)
-    return rows
+    return fmt, rows
 
 
 def load_from_excel(path: str | None = None) -> list[DisplayItem]:
@@ -240,7 +326,8 @@ def load_from_excel(path: str | None = None) -> list[DisplayItem]:
         _last_load_source = None
         return []
     try:
-        items = _rows_to_items(_load_excel_rows(path))
+        fmt, rows = _load_excel_rows(path)
+        items = _rows_to_items(rows, fmt)
         _last_load_error = None if items else f"{os.path.basename(path)} 中没有 Display 数据"
         _last_load_source = os.path.basename(path)
         return items
@@ -281,8 +368,10 @@ def _fetch_from_database(cfg: dict) -> list[DisplayItem]:
         result = conn.execute(text(query))
         keys = list(result.keys())
         for row in result:
-            rows.append({keys[i]: row[i] for i in range(len(keys))})
-    return _rows_to_items(rows)
+            raw = {keys[i]: row[i] for i in range(len(keys))}
+            rows.append(_canonicalize_row(raw))
+    fmt = _detect_format(rows[0]) if rows else "warehouse"
+    return _rows_to_items(rows, fmt)
 
 
 def _load_cache_file(path: str | None = None) -> list[DisplayItem]:
