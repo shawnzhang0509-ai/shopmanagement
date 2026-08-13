@@ -3,7 +3,7 @@
 
 和库存项目一样：
   grab_display.bat  → 抓数据（本脚本）
-  start_template.bat → 可视化（furniture_sim.py 读 data/display.xlsx）
+  start_furniture_sim.bat → 可视化（furniture_sim.py 读 data/display.xlsx）
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def main() -> int:
             continue
         if s["total"]:
             print(f"  {sid}: {s['total']} 款")
-    print("\n下一步: 运行 start_template.bat 打开 Display 大库")
+    print("\n下一步: 运行 start_furniture_sim.bat 打开 Display 大库")
     return 0
 
 
