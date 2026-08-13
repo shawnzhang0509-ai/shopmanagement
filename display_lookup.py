@@ -466,10 +466,14 @@ def normalize_db_config(cfg: dict) -> dict:
 
 
 def build_database_url(cfg: dict) -> str | None:
-    """生成分项或完整连接字符串；密码中的特殊字符会自动 URL 编码。"""
+    """优先使用 database_url（与 main_gui 一致）；分项字段仅作备用。"""
     env = os.environ.get("DISPLAY_DB_URL", "").strip()
     if env:
         return env
+
+    url = (cfg.get("database_url") or "").strip()
+    if url:
+        return url
 
     merged = normalize_db_config(cfg)
     server = (merged.get("db_server") or "").strip()
@@ -483,9 +487,16 @@ def build_database_url(cfg: dict) -> str | None:
         return (
             f"mssql+pymssql://{enc_user}:{enc_pass}@{server}:{port}/{db_name}?charset=utf8"
         )
+    return None
 
-    url = (merged.get("database_url") or "").strip()
-    return url or None
+
+def resolve_database_url(cfg: dict) -> str:
+    """供界面显示：优先 database_url，否则由分项拼出。"""
+    url = (cfg.get("database_url") or "").strip()
+    if url:
+        return url
+    built = build_database_url(cfg)
+    return built or ""
 
 
 def format_db_error(exc: Exception) -> str:
@@ -494,8 +505,8 @@ def format_db_error(exc: Exception) -> str:
         return "请在 grabber_config.json 或界面中填写真实数据库密码（不要用 YOUR_PASSWORD 占位符）。"
     if "18456" in msg or "Login failed" in msg:
         return (
-            "数据库登录失败：用户名或密码不正确。"
-            "若密码含 @ ^ ! 等符号，请用界面上的「密码」框填写，不要手动拼连接字符串。"
+            "数据库登录失败：请从 main_gui 复制完整 database_url 连接串粘贴到此处。"
+            "密码中的 @ ^ ! 必须写成 %40 %5E %21 等形式，不能直接写明文。"
         )
     if "40615" in msg or "not allowed to access the server" in msg.lower():
         return "无法连接 Azure SQL：请在防火墙中添加当前公网 IP 后重试。"
@@ -506,7 +517,7 @@ def test_database_connection(cfg: dict | None = None) -> tuple[bool, str]:
     runtime = build_runtime_config(cfg or {})
     url = build_database_url(runtime)
     if not url:
-        return False, "未配置数据库：请填写服务器、用户名、密码和数据库名。"
+        return False, "未配置 database_url 连接串。"
     try:
         from sqlalchemy import create_engine, text
 
@@ -526,8 +537,7 @@ def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
     url = _database_url(cfg)
     if not url:
         raise RuntimeError(
-            "未配置数据库连接（grabber_config.json 中的 db_server/db_user/db_password/db_name，"
-            "或环境变量 DISPLAY_DB_URL）"
+            "未配置 database_url（grabber_config.json 或环境变量 DISPLAY_DB_URL）"
         )
     query = (query or cfg.get("query") or "").strip() or load_sql_query(cfg)
 

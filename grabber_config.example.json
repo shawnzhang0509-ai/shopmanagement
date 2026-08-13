@@ -1,10 +1,6 @@
 {
-  "_comment": "复制为 grabber_config.json 并填入数据库密码。密码含 @ ^ ! 等符号时直接写在 db_password，程序会自动编码。",
-  "db_server": "if-akl-live.database.windows.net",
-  "db_port": 1433,
-  "db_user": "nzlivepooluser",
-  "db_password": "YOUR_PASSWORD",
-  "db_name": "nz_ierp_live",
+  "_comment": "复制为 grabber_config.json。database_url 直接从 main_gui 的 grabber_config.json 复制即可。",
+  "database_url": "mssql+pymssql://nzlivepooluser:iFur3RP%405sc%5El%5Et3%21@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
   "sql_folder": "sql",
   "output_folder": "data",
   "sql_file": "sql/display.sql",
