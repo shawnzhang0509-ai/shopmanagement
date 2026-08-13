@@ -403,7 +403,7 @@ def _load_excel_rows(path: str) -> tuple[str, list[dict]]:
         resolved = _resolve_columns(list(df.columns))
         if not resolved:
             raise ValueError(
-                f"{os.path.basename(path)} 列不匹配。需要 WarehouseName+Sku+ProductName+DisplayQty，"
+                f"{os.path.basename(path)} 列不匹配。需要 WarehouseName+Sku+ProductName+DisplayQty（可选 ProductFamily/SubProductFamily），"
                 "或 stock_details + product_name"
             )
         fmt, colmap = resolved
