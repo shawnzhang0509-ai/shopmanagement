@@ -16,24 +16,21 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 
-from display_lookup import CACHE_FILE, last_load_error, refresh_from_database, shop_stats
+from display_lookup import grab_and_save, last_load_error, shop_stats
 
 
 def main() -> int:
     try:
-        items = refresh_from_database()
+        items, excel_path = grab_and_save()
     except Exception as exc:
         print(f"同步失败: {exc}")
         if last_load_error():
             print(last_load_error())
-        print("\n推荐改用 Excel 工作流：")
-        print("  1. SSMS 运行 display.sql")
-        print("  2. 导出为 display.xlsx")
-        print("  3. 放到项目根目录")
+        print("\n请配置 grabber_config.json 并运行 grab_display.bat")
         return 1
 
     stats = shop_stats(items, [])
-    print(f"已写入 {CACHE_FILE}，共 {len(items)} 个 Display 产品")
+    print(f"已写入 {excel_path}，共 {len(items)} 个 Display 产品")
     for sid, s in stats.items():
         if sid == "all":
             continue

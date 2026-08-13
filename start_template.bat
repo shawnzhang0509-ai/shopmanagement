@@ -1,11 +1,13 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title 家具模板编辑器
+title 家具模板编辑器 / Display 可视化
 
 echo.
-echo ===== 家具模板编辑器 / Display 大库 =====
+echo ===== Display 可视化 (Viewer) =====
 echo 目录: %CD%
+echo.
+echo [架构] grab_display.bat 抓数据 ^| start_template.bat 看 Display 大库
 echo.
 
 python --version >nul 2>&1
@@ -27,12 +29,6 @@ if not exist "furniture_sim.py" (
     exit /b 1
 )
 
-if not exist "display_lookup.py" (
-    echo [错误] 缺少 display_lookup.py，请 git pull 更新项目
-    pause
-    exit /b 1
-)
-
 python -c "import pygame" >nul 2>&1
 if errorlevel 1 (
     echo [提示] 正在安装 pygame-ce ...
@@ -45,12 +41,13 @@ if errorlevel 1 (
     python -m pip install openpyxl pandas
 )
 
-if not exist "display.xlsx" (
-    echo.
-    echo [提示] 未找到 display.xlsx
-    echo        请在 SSMS 执行 display.sql，导出 Excel 到本目录
-    echo        或运行 update_display.bat 查看步骤
-    echo.
+if not exist "data\display.xlsx" (
+    if not exist "display.xlsx" (
+        echo.
+        echo [提示] 未找到 Display 数据
+        echo        请先运行 grab_display.bat 抓取数据
+        echo.
+    )
 )
 
 echo 正在启动 Display 大库 ...

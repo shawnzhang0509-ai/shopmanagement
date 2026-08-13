@@ -1454,14 +1454,22 @@ def begin_survey_display(item) -> None:
     toast.show(f"开始测绘: {item.product_name}")
 
 
-def refresh_display_data(prefer_db: bool = False) -> None:
+def refresh_display_data(prefer_db: bool = True) -> None:
     global display_items
-    display_items = reload_display_items(prefer_db=prefer_db)
+    try:
+        if prefer_db:
+            from display_lookup import grab_and_save
+            display_items, excel_path = grab_and_save()
+            toast.show(f"已抓取 {len(display_items)} 款 → {os.path.basename(excel_path)}")
+            return
+    except Exception:
+        pass
+    display_items = reload_display_items(prefer_db=False)
     src = last_load_source() or "display.xlsx"
     if display_items:
         toast.show(f"已刷新 {len(display_items)} 款（来自 {src}）")
     else:
-        toast.show(last_load_error() or "Display 列表为空，请导出 display.xlsx")
+        toast.show(last_load_error() or "请先运行 grab_display.bat")
 
 
 def handle_gallery_click(mx, my):
@@ -1471,7 +1479,7 @@ def handle_gallery_click(mx, my):
         close_gallery()
         return True
     if hit == "refresh":
-        refresh_display_data(prefer_db=False)
+        refresh_display_data(prefer_db=True)
         return True
     if isinstance(hit, str) and hit.startswith("mode:"):
         gallery_mode = hit.split(":", 1)[1]

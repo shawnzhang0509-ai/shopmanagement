@@ -1,11 +1,8 @@
-"""从 display.xlsx（推荐）或 JSON 缓存加载门店 Display 库存，并与模板库匹配。
+"""Display 库数据层：抓取程序写 data/display.xlsx，模板编辑器只读可视化。
 
-推荐工作流（和 roi.xlsx 一样）：
-  1. 在 SSMS 里写好 SQL（见 display.sql）
-  2. 结果导出为 display.xlsx，放到项目根目录
-  3. 启动 start_template → Display 库自动读取
-
-可选：配置 display_config.json 直连 MSSQL（需 Azure 防火墙放行）。
+架构（和库存 main_gui 项目一样）：
+  grab_display.bat   → Main：SQL 抓数据 → data/display.xlsx
+  start_template.bat → 可视化：furniture_sim 读 Excel 显示 Display 大库
 """
 from __future__ import annotations
 
@@ -17,10 +14,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DISPLAY_FILE = os.path.join(SCRIPT_DIR, "display.xlsx")
+GRABBER_CONFIG = os.path.join(SCRIPT_DIR, "grabber_config.json")
+GRABBER_CONFIG_EXAMPLE = os.path.join(SCRIPT_DIR, "grabber_config.example.json")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "display_config.json")
 CONFIG_EXAMPLE = os.path.join(SCRIPT_DIR, "display_config.example.json")
 CACHE_FILE = os.path.join(SCRIPT_DIR, "display_cache.json")
+DEFAULT_EXCEL = os.path.join(SCRIPT_DIR, "data", "display.xlsx")
+LEGACY_EXCEL = os.path.join(SCRIPT_DIR, "display.xlsx")
+DEFAULT_SQL = os.path.join(SCRIPT_DIR, "sql", "display.sql")
 
 # 门店：按 Stock Details 里的 location 名称匹配
 SHOPS: list[dict[str, Any]] = [
@@ -268,8 +269,7 @@ def _rows_to_items(rows: list[dict], fmt: str | None = None) -> list[DisplayItem
     return items
 
 
-def _load_excel_rows(path: str | None = None) -> tuple[str, list[dict]]:
-    path = path or DISPLAY_FILE
+def _load_excel_rows(path: str) -> tuple[str, list[dict]]:
     if not os.path.isfile(path):
         return "warehouse", []
 
@@ -320,29 +320,82 @@ def _load_excel_rows(path: str | None = None) -> tuple[str, list[dict]]:
 
 def load_from_excel(path: str | None = None) -> list[DisplayItem]:
     global _last_load_error, _last_load_source
-    path = path or DISPLAY_FILE
+    candidates = [path] if path else resolve_display_excel_paths()
+    last_exc = None
+    for candidate in candidates:
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        try:
+            fmt, rows = _load_excel_rows(candidate)
+            items = _rows_to_items(rows, fmt)
+            if items:
+                _last_load_error = None
+                _last_load_source = os.path.basename(candidate)
+                return items
+            _last_load_error = f"{os.path.basename(candidate)} 中没有 Display 数据"
+        except Exception as exc:
+            last_exc = exc
+            _last_load_error = f"读取 {os.path.basename(candidate)} 失败: {exc}"
+    if not candidates or not any(os.path.isfile(p) for p in candidates if p):
+        _last_load_error = "未找到 display.xlsx，请先运行 grab_display.bat 抓取数据"
+    elif last_exc:
+        _last_load_error = str(last_exc)
+    _last_load_source = None
+    return []
+
+
+def load_grabber_config() -> dict:
+    for path in (GRABBER_CONFIG, GRABBER_CONFIG_EXAMPLE, CONFIG_FILE, CONFIG_EXAMPLE):
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    return {}
+
+
+def resolve_display_excel_paths() -> list[str]:
+    cfg = load_grabber_config()
+    paths: list[str] = []
+    if cfg.get("output_excel"):
+        paths.append(os.path.join(SCRIPT_DIR, cfg["output_excel"]))
+    paths.extend([DEFAULT_EXCEL, LEGACY_EXCEL])
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def resolve_cache_path() -> str:
+    cfg = load_grabber_config()
+    if cfg.get("output_json"):
+        return os.path.join(SCRIPT_DIR, cfg["output_json"])
+    data_json = os.path.join(SCRIPT_DIR, "data", "display_cache.json")
+    if os.path.isfile(data_json):
+        return data_json
+    return CACHE_FILE
+
+
+def load_sql_query(cfg: dict | None = None) -> str:
+    cfg = cfg or load_grabber_config()
+    sql_file = cfg.get("sql_file") or "sql/display.sql"
+    path = sql_file if os.path.isabs(sql_file) else os.path.join(SCRIPT_DIR, sql_file)
     if not os.path.isfile(path):
-        _last_load_error = f"未找到 {os.path.basename(path)}，请从 SQL 导出 Excel 放到项目目录"
-        _last_load_source = None
-        return []
-    try:
-        fmt, rows = _load_excel_rows(path)
-        items = _rows_to_items(rows, fmt)
-        _last_load_error = None if items else f"{os.path.basename(path)} 中没有 Display 数据"
-        _last_load_source = os.path.basename(path)
-        return items
-    except Exception as exc:
-        _last_load_error = f"读取 {os.path.basename(path)} 失败: {exc}"
-        _last_load_source = None
-        return []
+        legacy = os.path.join(SCRIPT_DIR, "display.sql")
+        path = legacy if os.path.isfile(legacy) else path
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"找不到 SQL 文件: {sql_file}")
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [ln for ln in f.readlines() if not ln.strip().startswith("--")]
+    query = "\n".join(lines).strip()
+    if not query:
+        raise ValueError(f"SQL 文件为空: {path}")
+    return query
 
 
 def _load_config() -> dict:
-    path = CONFIG_FILE if os.path.isfile(CONFIG_FILE) else CONFIG_EXAMPLE
-    if not os.path.isfile(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return load_grabber_config()
 
 
 def _database_url(cfg: dict) -> str | None:
@@ -352,13 +405,11 @@ def _database_url(cfg: dict) -> str | None:
     return (cfg.get("database_url") or "").strip() or None
 
 
-def _fetch_from_database(cfg: dict) -> list[DisplayItem]:
+def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
     url = _database_url(cfg)
     if not url:
-        raise RuntimeError("未配置数据库连接（DISPLAY_DB_URL 或 display_config.json）")
-    query = (cfg.get("query") or "").strip()
-    if not query:
-        raise RuntimeError("display_config.json 中缺少 query")
+        raise RuntimeError("未配置 database_url（grabber_config.json 或环境变量 DISPLAY_DB_URL）")
+    query = (query or cfg.get("query") or "").strip() or load_sql_query(cfg)
 
     from sqlalchemy import create_engine, text
 
@@ -370,6 +421,53 @@ def _fetch_from_database(cfg: dict) -> list[DisplayItem]:
         for row in result:
             raw = {keys[i]: row[i] for i in range(len(keys))}
             rows.append(_canonicalize_row(raw))
+    return rows
+
+
+def export_rows_to_excel(rows: list[dict], path: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    export = []
+    for row in rows:
+        export.append({
+            "WarehouseName": row.get("warehouse_name", ""),
+            "Sku": row.get("product_code", ""),
+            "ProductName": row.get("product_name", ""),
+            "DisplayQty": row.get("display_qty", 0),
+        })
+    try:
+        import pandas as pd
+
+        pd.DataFrame(export).to_excel(path, index=False)
+        return
+    except ImportError:
+        pass
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["WarehouseName", "Sku", "ProductName", "DisplayQty"])
+    for r in export:
+        ws.append([r["WarehouseName"], r["Sku"], r["ProductName"], r["DisplayQty"]])
+    wb.save(path)
+
+
+def grab_and_save() -> tuple[list["DisplayItem"], str]:
+    """Main 抓取：SQL → data/display.xlsx + JSON 缓存。"""
+    global _display_cache, _last_load_error, _last_load_source
+    cfg = load_grabber_config()
+    rows = _fetch_raw_rows(cfg)
+    excel_path = resolve_display_excel_paths()[0]
+    export_rows_to_excel(rows, excel_path)
+    items = _rows_to_items(rows, "warehouse")
+    save_cache(items, resolve_cache_path())
+    _display_cache = items
+    _last_load_error = None
+    _last_load_source = os.path.basename(excel_path)
+    return items, excel_path
+
+
+def _fetch_from_database(cfg: dict) -> list[DisplayItem]:
+    rows = _fetch_raw_rows(cfg)
     fmt = _detect_format(rows[0]) if rows else "warehouse"
     return _rows_to_items(rows, fmt)
 
@@ -423,35 +521,32 @@ def refresh_from_database() -> list[DisplayItem]:
 
 
 def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
-    """优先读 display.xlsx，其次 display_cache.json，可选直连数据库。"""
+    """可视化程序读取：优先 data/display.xlsx，可选尝试数据库抓取。"""
     global _display_cache, _last_load_error, _last_load_source
     if _display_cache is not None and not prefer_db:
         return _display_cache
 
     if prefer_db:
-        cfg = _load_config()
-        if _database_url(cfg) and (cfg.get("query") or "").strip():
-            try:
-                return refresh_from_database()
-            except Exception as exc:
-                _last_load_error = str(exc)
-                print(f"Display 数据库加载失败: {exc}")
+        try:
+            items, _ = grab_and_save()
+            return items
+        except Exception as exc:
+            _last_load_error = str(exc)
+            print(f"Display 抓取失败，尝试读本地 Excel: {exc}")
 
     items = load_from_excel()
     if items:
         _display_cache = items
         return items
 
-    items = _load_cache_file()
+    items = _load_cache_file(resolve_cache_path())
     _display_cache = items
     if items:
-        _last_load_source = "display_cache.json"
+        _last_load_source = os.path.basename(resolve_cache_path())
         return items
 
     if _last_load_error is None:
-        _last_load_error = (
-            "请把 SQL 结果导出为 display.xlsx 放到项目目录（参考 display.sql）"
-        )
+        _last_load_error = "请先运行 grab_display.bat 抓取数据"
     return items
 
 

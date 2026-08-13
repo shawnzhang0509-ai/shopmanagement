@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
-display_config.json
+grabber_config.json
+data/*.xlsx
+data/*.json
+!data/.gitkeep

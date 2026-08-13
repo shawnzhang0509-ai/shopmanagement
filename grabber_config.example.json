@@ -1,0 +1,7 @@
+{
+  "_comment": "复制为 grabber_config.json 并填入数据库密码。grab_display.bat 抓数据，start_template.bat 做可视化。",
+  "database_url": "mssql+pymssql://nzlivepooluser:YOUR_PASSWORD@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
+  "sql_file": "sql/display.sql",
+  "output_excel": "data/display.xlsx",
+  "output_json": "data/display_cache.json"
+}

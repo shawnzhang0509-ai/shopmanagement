@@ -70,21 +70,27 @@ def main() -> int:
     if os.path.isfile("display_lookup.py"):
         ok("display_lookup.py")
         try:
-            from display_lookup import load_from_excel, last_load_error
-            if os.path.isfile("display.xlsx"):
+            from display_lookup import load_from_excel, last_load_error, resolve_display_excel_paths
+            paths = resolve_display_excel_paths()
+            found = next((p for p in paths if os.path.isfile(p)), None)
+            if found:
                 items = load_from_excel()
                 if items:
-                    ok(f"display.xlsx  共 {len(items)} 款 Display")
+                    ok(f"{os.path.basename(found)}  共 {len(items)} 款 Display")
                 else:
                     fail(last_load_error() or "display.xlsx 无有效数据")
                     errors += 1
             else:
-                print("  [提示] 未找到 display.xlsx — SSMS 执行 display.sql 后导出")
+                print("  [提示] 未找到 Display 数据 — 先运行 grab_display.bat")
         except Exception as e:
             fail(f"display_lookup 异常: {e}")
             errors += 1
-    if os.path.isfile("display.sql"):
-        ok("display.sql (可选)")
+    if os.path.isfile("sql/display.sql"):
+        ok("sql/display.sql")
+    if os.path.isfile("grabber_config.json"):
+        ok("grabber_config.json")
+    elif os.path.isfile("grabber_config.example.json"):
+        print("  [提示] 复制 grabber_config.example.json → grabber_config.json")
 
     print("\n--- 模块导入测试 ---")
     if errors == 0:
@@ -122,8 +128,8 @@ def main() -> int:
     print("全部通过！可以运行:")
     print("  python layout.py")
     print("  python furniture_sim.py")
-    print("  start_template.bat   (Display 大库)")
-    print("  update_display.bat   (更新 display.xlsx 说明)")
+    print("  start_template.bat   (Display 可视化)")
+    print("  grab_display.bat     (Display 抓数据)")
     return 0
 
 
