@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""从 MSSQL 拉取 Display 库存并写入 display_cache.json。"""
+"""可选：从 MSSQL 直连拉取 Display 并写入 display_cache.json。
+
+推荐工作流（更简单）：
+  1. 在 SSMS 运行 display.sql
+  2. 结果 → 另存为 display.xlsx
+  3. 启动 start_template，程序自动读 Excel
+
+本脚本仅在你想跳过 Excel、程序直连数据库时用。
+"""
 from __future__ import annotations
 
 import os
@@ -18,8 +26,10 @@ def main() -> int:
         print(f"同步失败: {exc}")
         if last_load_error():
             print(last_load_error())
-        print("\n请配置 display_config.json（可复制 display_config.example.json）")
-        print("或设置环境变量 DISPLAY_DB_URL")
+        print("\n推荐改用 Excel 工作流：")
+        print("  1. SSMS 运行 display.sql")
+        print("  2. 导出为 display.xlsx")
+        print("  3. 放到项目根目录")
         return 1
 
     stats = shop_stats(items, [])
