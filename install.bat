@@ -1,9 +1,15 @@
 @echo off
+chcp 65001 >nul
 cd /d "%~dp0"
+echo.
+echo ===== 安装依赖 =====
 python -m pip install --upgrade pip
 python -m pip uninstall pygame -y 2>nul
 python -m pip install -r requirements.txt
 python -c "import pygame; print('pygame-ce OK:', pygame.version.ver)"
 echo.
-echo 启动主程序: python layout.py
+echo 安装完成。启动方式:
+echo   start_furniture_sim.bat   家具模板 / Display 大库
+echo   grab_display.bat          抓取 Display 数据
+echo   start.bat                 坪效布局编辑器 (layout.py, 旧版)
 pause

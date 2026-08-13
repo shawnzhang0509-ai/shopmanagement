@@ -1,6 +1,14 @@
-import json
+#!/usr/bin/env python3
+"""从 roi.xlsx 同步 ROI 到 furniture_templates.json。运行: python scripts/update_roi.py"""
+from __future__ import annotations
 
-import pandas as pd
+import json
+import os
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(SCRIPT_DIR)
+sys.path.insert(0, SCRIPT_DIR)
 
 from roi_lookup import lookup_roi, reload_roi_map
 

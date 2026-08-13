@@ -1,8 +1,8 @@
 """Display 库数据层：抓取程序写 data/display.xlsx，模板编辑器只读可视化。
 
 架构（和库存 main_gui 项目一样）：
-  grab_display.bat   → Main：SQL 抓数据 → data/display.xlsx
-  start_template.bat → 可视化：furniture_sim 读 Excel 显示 Display 大库
+  grab_display.bat        → Main：SQL 抓数据 → data/display.xlsx
+  start_furniture_sim.bat → 可视化：furniture_sim 读 Excel 显示 Display 大库
 """
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ from typing import Any
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GRABBER_CONFIG = os.path.join(SCRIPT_DIR, "grabber_config.json")
 GRABBER_CONFIG_EXAMPLE = os.path.join(SCRIPT_DIR, "grabber_config.example.json")
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "display_config.json")
-CONFIG_EXAMPLE = os.path.join(SCRIPT_DIR, "display_config.example.json")
 CACHE_FILE = os.path.join(SCRIPT_DIR, "display_cache.json")
 DEFAULT_EXCEL = os.path.join(SCRIPT_DIR, "data", "display.xlsx")
 LEGACY_EXCEL = os.path.join(SCRIPT_DIR, "display.xlsx")
@@ -467,7 +465,7 @@ def load_from_excel(path: str | None = None) -> list[DisplayItem]:
 
 
 def load_grabber_config() -> dict:
-    for path in (GRABBER_CONFIG, GRABBER_CONFIG_EXAMPLE, CONFIG_FILE, CONFIG_EXAMPLE):
+    for path in (GRABBER_CONFIG, GRABBER_CONFIG_EXAMPLE):
         if os.path.isfile(path):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)

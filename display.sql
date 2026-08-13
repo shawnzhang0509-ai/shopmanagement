@@ -1,2 +1,0 @@
--- 已迁移到 sql/display.sql
--- 请编辑 sql/display.sql，由 grab_display.bat 自动执行
