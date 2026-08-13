@@ -18,6 +18,16 @@ except ModuleNotFoundError:
     raise SystemExit(1) from None
 
 from roi_lookup import lookup_roi, reload_roi_map
+from display_lookup import (
+    SHOPS,
+    filter_items,
+    group_by_family,
+    last_load_error,
+    load_display_items,
+    match_template_index,
+    reload_display_items,
+    shop_stats,
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
@@ -108,6 +118,8 @@ mouse_pos = (0, 0)
 toast = ui.Toast()
 GRID_SNAP = 100  # 100mm = 10cm
 resizing_handle = None
+dragging_shape = False
+drag_shape_last_world = None
 
 # ── 工具与绘制 ──────────────────────────────────────────────
 TOOLS = [
@@ -140,6 +152,10 @@ _last_input_click = {"box": None, "time": 0}
 FOCUS_ZONES = ("name", "family")
 focus_zone = "canvas"
 app_screen = "gallery"  # editor | gallery
+gallery_mode = "display"  # display | templates
+display_shop = "all"
+selected_display_key = None
+display_items = []
 _pending_input_focus = None
 _pending_focus_frames = 0
 _sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
@@ -149,9 +165,10 @@ CLICK_MOVE_TOLERANCE = 10
 
 
 class GalleryView:
-    """全屏产品总览：每个 Product Family 一行，卡片展示形状缩略图。"""
+    """全屏总览：Display 大库（按门店）+ 已测绘模板库。"""
 
-    TOP_H = 52
+    TOP_H = 96
+    SHOP_H = 36
     FAMILY_H = 40
     CARD_W = 140
     CARD_H = 120
@@ -162,8 +179,11 @@ class GalleryView:
     def __init__(self):
         self.scroll_y = 0
         self.back_btn = Button((0, 0, 0, 0), "← 返回绘制", "gallery_back")
+        self.refresh_btn = Button((0, 0, 0, 0), "刷新", "display_refresh")
         self._layout = []
-        self._cards = []
+        self._cards = []  # (rect, kind, data) kind: template|display
+        self._shop_tabs: list[tuple[pygame.Rect, str]] = []
+        self._mode_tabs: list[tuple[pygame.Rect, str]] = []
 
     def group_templates(self, templates):
         query = input_search.get_text().lower().strip()
@@ -176,7 +196,10 @@ class GalleryView:
             groups.setdefault(family, []).append((i, tpl))
         return sorted(groups.items(), key=lambda item: item[0].lower())
 
-    def build_layout(self, templates, screen_w: int):
+    def _filtered_displays(self):
+        return filter_items(display_items, display_shop, input_search.get_text())
+
+    def build_layout_templates(self, templates, screen_w: int):
         self._layout = []
         self._cards = []
         y = self.PAD
@@ -192,11 +215,39 @@ class GalleryView:
                     x = self.PAD
                     row_y += self.CARD_H + self.CARD_GAP
                 rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
-                self._layout.append(("card", rect, idx, tpl))
-                self._cards.append((rect, idx))
+                self._layout.append(("card_tpl", rect, idx, tpl))
+                self._cards.append((rect, "template", idx))
                 x += self.CARD_W + self.CARD_GAP
             y = row_y + self.CARD_H + self.FAMILY_GAP
         return y + self.PAD
+
+    def build_layout_display(self, templates, screen_w: int):
+        self._layout = []
+        self._cards = []
+        y = self.PAD
+        filtered = self._filtered_displays()
+        for family, items in group_by_family(filtered):
+            modeled = sum(1 for it in items if match_template_index(it, templates) >= 0)
+            self._layout.append(("family", family, len(items), modeled, y))
+            y += self.FAMILY_H
+            x = self.PAD
+            row_y = y
+            for item in items:
+                if x + self.CARD_W > screen_w - self.PAD:
+                    x = self.PAD
+                    row_y += self.CARD_H + self.CARD_GAP
+                rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
+                tpl_idx = match_template_index(item, templates)
+                self._layout.append(("card_disp", rect, item, tpl_idx))
+                self._cards.append((rect, "display", item.key))
+                x += self.CARD_W + self.CARD_GAP
+            y = row_y + self.CARD_H + self.FAMILY_GAP
+        return y + self.PAD
+
+    def build_layout(self, templates, screen_w: int):
+        if gallery_mode == "display":
+            return self.build_layout_display(templates, screen_w)
+        return self.build_layout_templates(templates, screen_w)
 
     def scroll(self, delta: int):
         self.scroll_y = max(0, self.scroll_y + delta)
@@ -208,36 +259,96 @@ class GalleryView:
     def content_y(self, my: int) -> int:
         return my - self.TOP_H + self.scroll_y
 
-    def handle_click(self, mx: int, my: int) -> str | int | None:
+    def handle_click(self, mx: int, my: int):
         if self.back_btn.contains((mx, my)):
             return "back"
+        if self.refresh_btn.contains((mx, my)):
+            return "refresh"
+        for rect, mode in self._mode_tabs:
+            if rect.collidepoint(mx, my):
+                return f"mode:{mode}"
+        for rect, shop_id in self._shop_tabs:
+            if rect.collidepoint(mx, my):
+                return f"shop:{shop_id}"
         if input_search.contains((mx, my)):
             return None
         if my < self.TOP_H:
             return None
         cy = self.content_y(my)
-        for rect, idx in self._cards:
+        for rect, kind, data in self._cards:
             if rect.collidepoint(mx, cy):
-                return idx
+                if kind == "template":
+                    return data
+                return ("display", data)
         return None
+
+    def _draw_header_tabs(self, surface, sw: int, templates):
+        self._mode_tabs = []
+        self._shop_tabs = []
+        x = 20
+        y = 10
+        for mode, label in (("display", "Display 库"), ("templates", "已测绘")):
+            w = 108
+            rect = pygame.Rect(x, y, w, 28)
+            active = gallery_mode == mode
+            bg = C_SIDEBAR_ACTIVE if active else C_SIDEBAR_HOVER
+            pygame.draw.rect(surface, bg, rect, border_radius=6)
+            surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 12, rect.y + 7))
+            self._mode_tabs.append((rect, mode))
+            x += w + 8
+
+        input_search.rect = pygame.Rect(250, 10, min(360, sw - 560), 28)
+        input_search.draw(surface, None, on_dark=True)
+
+        stats = shop_stats(display_items, templates) if display_items else {}
+        if gallery_mode == "display" and stats.get("all"):
+            s = stats["all"]
+            label = f"已测绘 {s['modeled']}/{s['total']}"
+        else:
+            label = f"共 {len(templates)} 个"
+        surface.blit(FONT_SMALL.render(label, True, C_SIDEBAR_MUTED), (input_search.rect.right + 10, 16))
+
+        self.refresh_btn.rect = pygame.Rect(sw - 248, 10, 72, 28)
+        self.refresh_btn.draw(surface, mouse_pos, on_dark=True)
+        self.back_btn.rect = pygame.Rect(sw - 148, 10, 128, 28)
+        self.back_btn.draw(surface, mouse_pos, on_dark=True)
+
+        if gallery_mode == "display":
+            x = 20
+            y = 52
+            for shop in SHOPS:
+                sid = shop["id"]
+                if sid == "other":
+                    continue
+                st = stats.get(sid, {"total": 0, "modeled": 0})
+                if sid != "all" and st["total"] == 0:
+                    continue
+                if sid == "all":
+                    text = f"全部 {st['total']}"
+                else:
+                    text = f"{shop['label']} {st['modeled']}/{st['total']}"
+                w = max(88, FONT_SMALL.size(text)[0] + 20)
+                rect = pygame.Rect(x, y, w, self.SHOP_H - 4)
+                active = display_shop == sid
+                bg = C_ACCENT if active else C_SIDEBAR
+                pygame.draw.rect(surface, bg, rect, border_radius=6)
+                surface.blit(FONT_SMALL.render(text, True, (255, 255, 255)), (rect.x + 10, rect.y + 8))
+                self._shop_tabs.append((rect, sid))
+                x += w + 8
+                if x > sw - 40:
+                    break
 
     def draw(self, surface, templates, selected_index: int):
         sw, sh = surface.get_width(), surface.get_height()
         surface.fill((245, 247, 250))
         pygame.draw.rect(surface, C_SIDEBAR_DARK, (0, 0, sw, self.TOP_H))
-        surface.blit(FONT_TITLE.render("产品模板总览", True, C_SIDEBAR_TEXT), (20, 12))
-        surface.blit(FONT_MARK.render("单击选中 · 双击编辑 · Ctrl+C/V 复制粘贴", True, C_SIDEBAR_MUTED), (20, 34))
 
-        input_search.rect = pygame.Rect(300, 10, min(420, sw - 490), 32)
-        input_search.draw(surface, None, on_dark=True)
+        title = "Display 大库" if gallery_mode == "display" else "已测绘模板"
+        if gallery_mode == "display":
+            surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
+            surface.blit(FONT_MARK.render("有模型点亮 · 双击测绘/编辑 · 单击选中", True, C_SIDEBAR_MUTED), (168, 62))
 
-        total = len(templates)
-        shown = len(self._cards)
-        label = f"共 {total} 个" if shown == total else f"显示 {shown} / {total}"
-        surface.blit(FONT_SMALL.render(label, True, C_SIDEBAR_MUTED), (input_search.rect.right + 12, 18))
-
-        self.back_btn.rect = pygame.Rect(sw - 148, 10, 128, 32)
-        self.back_btn.draw(surface, mouse_pos, on_dark=True)
+        self._draw_header_tabs(surface, sw, templates)
 
         content_h = self.build_layout(templates, sw)
         self.clamp_scroll(content_h, sh)
@@ -248,17 +359,20 @@ class GalleryView:
 
         for item in self._layout:
             if item[0] == "family":
-                _, family, count, avg_roi, y = item
+                _, family, count, extra, y = item
                 sy = self.TOP_H + y - self.scroll_y
                 if sy > sh or sy + self.FAMILY_H < self.TOP_H:
                     continue
                 bar = pygame.Rect(self.PAD, sy, sw - self.PAD * 2, self.FAMILY_H - 4)
                 pygame.draw.rect(surface, C_SIDEBAR, bar, border_radius=6)
                 surface.blit(FONT_LABEL.render(family, True, (255, 255, 255)), (bar.x + 14, bar.y + 6))
-                meta = f"{count} 款  ·  ROI {avg_roi:.1f}"
+                if gallery_mode == "display":
+                    meta = f"{count} 款 Display  ·  已测绘 {extra}"
+                else:
+                    meta = f"{count} 款  ·  ROI {extra:.1f}"
                 meta_surf = FONT_SMALL.render(meta, True, C_SIDEBAR_MUTED)
                 surface.blit(meta_surf, (bar.right - meta_surf.get_width() - 14, bar.y + 12))
-            else:
+            elif item[0] == "card_tpl":
                 _, rect, idx, tpl = item
                 screen_rect = rect.move(0, self.TOP_H - self.scroll_y)
                 if screen_rect.bottom < self.TOP_H or screen_rect.top > sh:
@@ -268,11 +382,50 @@ class GalleryView:
                 name = tpl.get("id", "")
                 name_surf = FONT_SMALL.render(name, True, INPUT_TEXT if not selected else (255, 255, 255))
                 surface.blit(name_surf, (screen_rect.x + 8, screen_rect.bottom - 20))
+            elif item[0] == "card_disp":
+                _, rect, disp_item, tpl_idx = item
+                screen_rect = rect.move(0, self.TOP_H - self.scroll_y)
+                if screen_rect.bottom < self.TOP_H or screen_rect.top > sh:
+                    continue
+                tpl = templates[tpl_idx] if tpl_idx >= 0 else None
+                selected = disp_item.key == selected_display_key
+                draw_display_card(surface, disp_item, tpl, screen_rect, selected, display_shop)
 
         surface.set_clip(clip)
 
+        err = last_load_error()
+        if gallery_mode == "display" and err and not display_items:
+            banner = FONT_SMALL.render(f"⚠ {err[:80]}", True, (200, 80, 60))
+            surface.blit(banner, (self.PAD, sh - 28))
+
 
 gallery_view = GalleryView()
+
+
+def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
+    has_model = tpl is not None
+    if has_model:
+        draw_template_card(surface, tpl, rect, selected)
+        pygame.draw.circle(surface, C_SUCCESS, (rect.right - 14, rect.top + 14), 7)
+        pygame.draw.circle(surface, (255, 255, 255), (rect.right - 14, rect.top + 14), 7, 2)
+    else:
+        bg = (235, 238, 242) if not selected else (220, 228, 238)
+        border = (190, 198, 208) if not selected else C_ACCENT
+        pygame.draw.rect(surface, bg, rect, border_radius=8)
+        pygame.draw.rect(surface, border, rect, 2 if selected else 1, border_radius=8)
+        inner = rect.inflate(-28, -40)
+        pygame.draw.rect(surface, (210, 218, 226), inner, 2, border_radius=4)
+        wait = FONT_MARK.render("待测绘", True, C_MUTED)
+        surface.blit(wait, wait.get_rect(center=inner.center))
+
+    name = item.product_name
+    if len(name) > 16:
+        name = name[:15] + "…"
+    name_surf = FONT_SMALL.render(name, True, INPUT_TEXT if not selected else (255, 255, 255))
+    surface.blit(name_surf, (rect.x + 8, rect.bottom - 34))
+    qty = item.display_qty_for_shop(shop_id)
+    qty_surf = FONT_MARK.render(f"Display ×{qty}", True, C_SUCCESS if has_model else C_MUTED)
+    surface.blit(qty_surf, (rect.x + 8, rect.bottom - 18))
 
 
 def draw_template_card(surface, tpl, rect, selected=False):
@@ -397,10 +550,11 @@ def handle_enter_action():
 
 
 def open_gallery():
-    global app_screen
+    global app_screen, display_items
     blur_inputs()
     app_screen = "gallery"
     gallery_view.scroll_y = 0
+    display_items = load_display_items()
 
 
 def close_gallery():
@@ -481,6 +635,64 @@ def normalize_template_dict(data):
     else:
         points = [tuple(p) for p in data.get("points", [])]
     return points
+
+
+def point_in_polygon(x, y, poly) -> bool:
+    if len(poly) < 3:
+        return False
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-9) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def hit_template_body(mx, my) -> bool:
+    if not editing_template or draw_phase != "idle":
+        return False
+    wx, wy = screen_to_world(mx, my)
+    return point_in_polygon(wx, wy, normalize_template_dict(editing_template))
+
+
+def _template_from_points(base: dict, points) -> dict:
+    return {
+        "id": base.get("id", ""),
+        "product_family": base.get("product_family", ""),
+        "type": "polygon",
+        "points": [[int(round(x)), int(round(y))] for x, y in points],
+        "roi": base.get("roi", 0),
+    }
+
+
+def translate_editing_template(dx, dy):
+    global editing_template
+    if not editing_template or (dx == 0 and dy == 0):
+        return
+    dx, dy = int(round(dx)), int(round(dy))
+    pts = normalize_template_dict(editing_template)
+    new_pts = [(x + dx, y + dy) for x, y in pts]
+    if editing_template.get("type") in ("rectangle", "circle"):
+        editing_template = _template_from_points(editing_template, new_pts)
+    elif editing_template.get("type") == "polygon":
+        for i, (x, y) in enumerate(new_pts):
+            editing_template["points"][i] = [int(round(x)), int(round(y))]
+    else:
+        editing_template = _template_from_points(editing_template, new_pts)
+
+
+def snap_template_to_grid():
+    if not editing_template:
+        return
+    pts = normalize_template_dict(editing_template)
+    min_x = min(p[0] for p in pts)
+    min_y = min(p[1] for p in pts)
+    snap_x = round(min_x / GRID_SNAP) * GRID_SNAP
+    snap_y = round(min_y / GRID_SNAP) * GRID_SNAP
+    translate_editing_template(snap_x - min_x, snap_y - min_y)
 
 
 def template_to_dict(name, product_family, tool, points):
@@ -663,7 +875,7 @@ def draw_canvas(surface):
         tip = "第二步: 点击 L 形内角位置"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif editing_template and draw_phase == "idle":
-        tip = "拖动橙色角点调整大小 | 自动对齐 10cm | Shift 自由定位"
+        tip = "左键拖动形状移动 | 橙色角点调整大小 | Shift 自由定位"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif draw_phase == "idle":
         tip = "自动对齐 10cm 网格 | 按住 Shift 自由绘制"
@@ -1071,6 +1283,7 @@ def handle_toolbar(action):
 def handle_canvas_mousedown(mx, my, button):
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template, selected_index
     global l_outer_corners, l_cut_preview, resizing_handle, editing_mode
+    global dragging_shape, drag_shape_last_world
     wx, wy = screen_to_world(mx, my)
     wx, wy = snap_grid(wx, wy)
 
@@ -1082,6 +1295,11 @@ def handle_canvas_mousedown(mx, my, button):
         if handle is not None:
             resizing_handle = handle
             return
+        if hit_template_body(mx, my):
+            dragging_shape = True
+            drag_shape_last_world = screen_to_world(mx, my)
+            return
+        return
 
     if current_tool == "polygon":
         if draw_phase == "idle":
@@ -1208,11 +1426,81 @@ def handle_sidebar_click(mx, my, tool_buttons, buttons):
     return False
 
 
+_last_gallery_display_pick = {"key": None, "time": 0}
+
+
+def _find_display_item(key: str):
+    for it in display_items:
+        if it.key == key:
+            return it
+    return None
+
+
+def begin_survey_display(item) -> None:
+    """无模型时进入绘制界面开始测绘。"""
+    global editing_template, editing_mode, selected_index, selected_display_key
+    reset_draw_state()
+    selected_display_key = item.key
+    input_name.set_text(item.product_name)
+    input_family.set_text(item.product_family)
+    editing_mode = "new"
+    selected_index = -1
+    close_gallery()
+    focus_input(input_name)
+    toast.show(f"开始测绘: {item.product_name}")
+
+
+def refresh_display_data(prefer_db: bool = True) -> None:
+    global display_items
+    display_items = reload_display_items(prefer_db=prefer_db)
+    err = last_load_error()
+    if display_items:
+        msg = f"Display 已加载 {len(display_items)} 款"
+        if prefer_db and err:
+            msg += f"（缓存模式）"
+        toast.show(msg)
+    else:
+        toast.show(err or "Display 列表为空，请配置数据库或 display_cache.json")
+
+
 def handle_gallery_click(mx, my):
-    global selected_index, _last_gallery_pick
+    global selected_index, selected_display_key, gallery_mode, display_shop, _last_gallery_pick, _last_gallery_display_pick
     hit = gallery_view.handle_click(mx, my)
     if hit == "back":
         close_gallery()
+        return True
+    if hit == "refresh":
+        refresh_display_data(prefer_db=True)
+        return True
+    if isinstance(hit, str) and hit.startswith("mode:"):
+        gallery_mode = hit.split(":", 1)[1]
+        gallery_view.scroll_y = 0
+        return True
+    if isinstance(hit, str) and hit.startswith("shop:"):
+        display_shop = hit.split(":", 1)[1]
+        gallery_view.scroll_y = 0
+        return True
+    if isinstance(hit, tuple) and hit[0] == "display":
+        key = hit[1]
+        item = _find_display_item(key)
+        if not item:
+            return True
+        now = pygame.time.get_ticks()
+        is_double = key == _last_gallery_display_pick["key"] and now - _last_gallery_display_pick["time"] < 400
+        _last_gallery_display_pick = {"key": key, "time": now}
+        tpl_idx = match_template_index(item, furniture_templates)
+        if is_double:
+            if tpl_idx >= 0:
+                load_template_into_editor(tpl_idx)
+                close_gallery()
+            else:
+                begin_survey_display(item)
+        else:
+            selected_display_key = key
+            if tpl_idx >= 0:
+                toast.show(f"已选中: {item.product_name}（已有模型 · 双击编辑）")
+            else:
+                toast.show(f"已选中: {item.product_name}（待测绘 · 双击开始）")
         return True
     if hit is not None and isinstance(hit, int):
         now = pygame.time.get_ticks()
@@ -1236,9 +1524,11 @@ def main():
     global screen, clock
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos, mouse_pos
     global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview, resizing_handle, editing_template
-    global editing_template, selected_index, editing_mode, app_screen
+    global dragging_shape, drag_shape_last_world
+    global editing_template, selected_index, editing_mode, app_screen, display_items
 
     reload_roi_map()
+    display_items = load_display_items()
 
     if os.path.isfile(TEMPLATES_FILE):
         try:
@@ -1339,6 +1629,13 @@ def main():
                             if resizing_handle is not None:
                                 resizing_handle = None
                                 toast.show("尺寸已更新")
+                            elif dragging_shape:
+                                dragging_shape = False
+                                drag_shape_last_world = None
+                                keys = pygame.key.get_pressed()
+                                if not (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]):
+                                    snap_template_to_grid()
+                                toast.show("位置已更新")
                             else:
                                 handle_canvas_mouseup(*event.pos, 1)
 
@@ -1351,6 +1648,20 @@ def main():
                     if resizing_handle is not None:
                         wx, wy = screen_to_world(mx, my)
                         apply_resize(resizing_handle, wx, wy)
+                    elif dragging_shape and drag_shape_last_world is not None:
+                        wx, wy = screen_to_world(mx, my)
+                        dx = wx - drag_shape_last_world[0]
+                        dy = wy - drag_shape_last_world[1]
+                        if abs(dx) >= 1 or abs(dy) >= 1:
+                            keys = pygame.key.get_pressed()
+                            if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+                                translate_editing_template(dx, dy)
+                            else:
+                                translate_editing_template(
+                                    round(dx / GRID_SNAP) * GRID_SNAP,
+                                    round(dy / GRID_SNAP) * GRID_SNAP,
+                                )
+                            drag_shape_last_world = screen_to_world(mx, my)
                     elif dragging_view:
                         offset_x += (last_mouse_pos[0] - mx) / scale
                         offset_y += (last_mouse_pos[1] - my) / scale
