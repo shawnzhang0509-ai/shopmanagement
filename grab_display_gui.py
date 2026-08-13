@@ -21,8 +21,10 @@ from display_lookup import (
     build_runtime_config,
     grab_and_save,
     load_grabber_config,
+    normalize_db_config,
     save_grabber_config,
     shop_stats,
+    test_database_connection,
 )
 
 ACCENT = "#3498db"
@@ -36,8 +38,8 @@ class DisplayGrabberApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Display 数据自动抓取工具")
-        self.root.geometry("820x640")
-        self.root.minsize(720, 560)
+        self.root.geometry("820x720")
+        self.root.minsize(720, 640)
         self.root.configure(bg=BG)
 
         self._running = False
@@ -64,9 +66,42 @@ class DisplayGrabberApp:
         cfg_frame.pack(fill="x", padx=12, pady=(12, 6))
 
         ttk.Label(cfg_frame, text="数据库连接").grid(row=0, column=0, sticky="nw", **pad)
-        self.db_var = tk.StringVar()
-        self.db_entry = tk.Text(cfg_frame, height=2, width=80, wrap="word")
-        self.db_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+        db_box = ttk.Frame(cfg_frame)
+        db_box.grid(row=0, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(db_box, text="服务器").grid(row=0, column=0, sticky="w", pady=2)
+        self.db_server_var = tk.StringVar()
+        ttk.Entry(db_box, textvariable=self.db_server_var, width=52).grid(
+            row=0, column=1, columnspan=3, sticky="ew", padx=(6, 0), pady=2
+        )
+
+        ttk.Label(db_box, text="端口").grid(row=1, column=0, sticky="w", pady=2)
+        self.db_port_var = tk.StringVar(value="1433")
+        ttk.Entry(db_box, textvariable=self.db_port_var, width=8).grid(
+            row=1, column=1, sticky="w", padx=(6, 12), pady=2
+        )
+        ttk.Label(db_box, text="用户名").grid(row=1, column=2, sticky="w", pady=2)
+        self.db_user_var = tk.StringVar()
+        ttk.Entry(db_box, textvariable=self.db_user_var, width=24).grid(
+            row=1, column=3, sticky="ew", padx=(6, 0), pady=2
+        )
+
+        ttk.Label(db_box, text="密码").grid(row=2, column=0, sticky="w", pady=2)
+        self.db_password_var = tk.StringVar()
+        ttk.Entry(db_box, textvariable=self.db_password_var, width=52, show="*").grid(
+            row=2, column=1, columnspan=3, sticky="ew", padx=(6, 0), pady=2
+        )
+
+        ttk.Label(db_box, text="数据库").grid(row=3, column=0, sticky="w", pady=2)
+        self.db_name_var = tk.StringVar()
+        ttk.Entry(db_box, textvariable=self.db_name_var, width=52).grid(
+            row=3, column=1, columnspan=3, sticky="ew", padx=(6, 0), pady=2
+        )
+
+        ttk.Button(db_box, text="测试连接", command=self.test_connection).grid(
+            row=4, column=3, sticky="e", pady=(6, 0)
+        )
+        db_box.columnconfigure(3, weight=1)
 
         ttk.Label(cfg_frame, text="SQL 文件夹").grid(row=1, column=0, sticky="w", **pad)
         self.sql_folder_var = tk.StringVar(value="sql")
@@ -159,9 +194,12 @@ class DisplayGrabberApp:
         self.root.after(0, append)
 
     def _load_fields(self) -> None:
-        cfg = load_grabber_config()
-        self.db_entry.delete("1.0", "end")
-        self.db_entry.insert("1.0", cfg.get("database_url", ""))
+        cfg = normalize_db_config(load_grabber_config())
+        self.db_server_var.set(cfg.get("db_server", ""))
+        self.db_port_var.set(str(cfg.get("db_port", 1433)))
+        self.db_user_var.set(cfg.get("db_user", ""))
+        self.db_password_var.set(cfg.get("db_password", ""))
+        self.db_name_var.set(cfg.get("db_name", ""))
         self.sql_folder_var.set(cfg.get("sql_folder", "sql"))
         self.output_folder_var.set(cfg.get("output_folder", "data"))
         self.interval_var.set(int(cfg.get("schedule_interval", 30)))
@@ -169,14 +207,37 @@ class DisplayGrabberApp:
         self.tray_var.set(bool(cfg.get("minimize_to_tray", False)))
 
     def _collect_config(self) -> dict:
+        port_raw = self.db_port_var.get().strip() or "1433"
+        try:
+            db_port = int(port_raw)
+        except ValueError:
+            db_port = 1433
         return {
-            "database_url": self.db_entry.get("1.0", "end").strip(),
+            "db_server": self.db_server_var.get().strip(),
+            "db_port": db_port,
+            "db_user": self.db_user_var.get().strip(),
+            "db_password": self.db_password_var.get(),
+            "db_name": self.db_name_var.get().strip(),
             "sql_folder": self.sql_folder_var.get().strip() or "sql",
             "output_folder": self.output_folder_var.get().strip() or "data",
             "schedule_interval": int(self.interval_var.get()),
             "schedule_unit": self.unit_var.get(),
             "minimize_to_tray": bool(self.tray_var.get()),
         }
+
+    def test_connection(self) -> None:
+        cfg = self._collect_config()
+        self.log("正在测试数据库连接...")
+        threading.Thread(target=lambda: self._test_connection_job(cfg), daemon=True).start()
+
+    def _test_connection_job(self, cfg: dict) -> None:
+        ok, msg = test_database_connection(cfg)
+        if ok:
+            self.log(msg)
+            self.root.after(0, lambda: messagebox.showinfo("连接测试", msg))
+        else:
+            self.log(f"连接失败: {msg}")
+            self.root.after(0, lambda: messagebox.showerror("连接测试", msg))
 
     def save_config(self) -> None:
         cfg = self._collect_config()

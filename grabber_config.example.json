@@ -1,6 +1,10 @@
 {
-  "_comment": "复制为 grabber_config.json 并填入数据库密码。运行 grab_display.bat 打开抓取界面。",
-  "database_url": "mssql+pymssql://nzlivepooluser:YOUR_PASSWORD@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
+  "_comment": "复制为 grabber_config.json 并填入数据库密码。密码含 @ ^ ! 等符号时直接写在 db_password，程序会自动编码。",
+  "db_server": "if-akl-live.database.windows.net",
+  "db_port": 1433,
+  "db_user": "nzlivepooluser",
+  "db_password": "YOUR_PASSWORD",
+  "db_name": "nz_ierp_live",
   "sql_folder": "sql",
   "output_folder": "data",
   "sql_file": "sql/display.sql",

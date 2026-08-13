@@ -10,6 +10,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from urllib.parse import quote_plus
 from datetime import datetime, timezone
 from typing import Any
 
@@ -431,30 +432,119 @@ def _load_config() -> dict:
     return load_grabber_config()
 
 
-def _database_url(cfg: dict) -> str | None:
+def parse_mssql_url(url: str) -> dict:
+    """从 SQLAlchemy 连接字符串解析服务器/用户名/密码/库名。"""
+    url = (url or "").strip()
+    if not url:
+        return {}
+    try:
+        from sqlalchemy.engine.url import make_url
+
+        parsed = make_url(url)
+        return {
+            "db_server": parsed.host or "",
+            "db_port": parsed.port or 1433,
+            "db_user": parsed.username or "",
+            "db_password": parsed.password or "",
+            "db_name": (parsed.database or "").lstrip("/"),
+        }
+    except Exception:
+        return {}
+
+
+def normalize_db_config(cfg: dict) -> dict:
+    """合并旧版 database_url 与分项字段，分项优先。"""
+    merged = dict(cfg)
+    url = (merged.get("database_url") or "").strip()
+    if url:
+        for key, value in parse_mssql_url(url).items():
+            if not str(merged.get(key) or "").strip() and value:
+                merged[key] = value
+    if not merged.get("db_port"):
+        merged["db_port"] = 1433
+    return merged
+
+
+def build_database_url(cfg: dict) -> str | None:
+    """生成分项或完整连接字符串；密码中的特殊字符会自动 URL 编码。"""
     env = os.environ.get("DISPLAY_DB_URL", "").strip()
     if env:
         return env
-    return (cfg.get("database_url") or "").strip() or None
+
+    merged = normalize_db_config(cfg)
+    server = (merged.get("db_server") or "").strip()
+    user = (merged.get("db_user") or "").strip()
+    password = merged.get("db_password")
+    db_name = (merged.get("db_name") or "").strip()
+    if server and user and password not in (None, "") and db_name:
+        port = int(merged.get("db_port") or 1433)
+        enc_user = quote_plus(user)
+        enc_pass = quote_plus(str(password))
+        return (
+            f"mssql+pymssql://{enc_user}:{enc_pass}@{server}:{port}/{db_name}?charset=utf8"
+        )
+
+    url = (merged.get("database_url") or "").strip()
+    return url or None
+
+
+def format_db_error(exc: Exception) -> str:
+    msg = str(exc)
+    if "YOUR_PASSWORD" in msg:
+        return "请在 grabber_config.json 或界面中填写真实数据库密码（不要用 YOUR_PASSWORD 占位符）。"
+    if "18456" in msg or "Login failed" in msg:
+        return (
+            "数据库登录失败：用户名或密码不正确。"
+            "若密码含 @ ^ ! 等符号，请用界面上的「密码」框填写，不要手动拼连接字符串。"
+        )
+    if "40615" in msg or "not allowed to access the server" in msg.lower():
+        return "无法连接 Azure SQL：请在防火墙中添加当前公网 IP 后重试。"
+    return msg
+
+
+def test_database_connection(cfg: dict | None = None) -> tuple[bool, str]:
+    runtime = build_runtime_config(cfg or {})
+    url = build_database_url(runtime)
+    if not url:
+        return False, "未配置数据库：请填写服务器、用户名、密码和数据库名。"
+    try:
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(url, connect_args={"timeout": 15})
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, "连接成功"
+    except Exception as exc:
+        return False, format_db_error(exc)
+
+
+def _database_url(cfg: dict) -> str | None:
+    return build_database_url(cfg)
 
 
 def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
     url = _database_url(cfg)
     if not url:
-        raise RuntimeError("未配置 database_url（grabber_config.json 或环境变量 DISPLAY_DB_URL）")
+        raise RuntimeError(
+            "未配置数据库连接（grabber_config.json 中的 db_server/db_user/db_password/db_name，"
+            "或环境变量 DISPLAY_DB_URL）"
+        )
     query = (query or cfg.get("query") or "").strip() or load_sql_query(cfg)
 
     from sqlalchemy import create_engine, text
 
-    engine = create_engine(url, connect_args={"timeout": 30})
-    rows: list[dict] = []
-    with engine.connect() as conn:
-        result = conn.execute(text(query))
-        keys = list(result.keys())
-        for row in result:
-            raw = {keys[i]: row[i] for i in range(len(keys))}
-            rows.append(_canonicalize_row(raw))
-    return rows
+    try:
+        engine = create_engine(url, connect_args={"timeout": 30})
+        rows: list[dict] = []
+        with engine.connect() as conn:
+            result = conn.execute(text(query))
+            keys = list(result.keys())
+            for row in result:
+                raw = {keys[i]: row[i] for i in range(len(keys))}
+                rows.append(_canonicalize_row(raw))
+        return rows
+    except Exception as exc:
+        raise RuntimeError(format_db_error(exc)) from exc
 
 
 def export_rows_to_excel(rows: list[dict], path: str) -> None:

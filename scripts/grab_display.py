@@ -30,7 +30,7 @@ def main() -> int:
         if last_load_error():
             print(last_load_error())
         print("\n请检查:")
-        print("  1. grabber_config.json 是否存在且 database_url 正确")
+        print("  1. grabber_config.json 是否存在且 db_server/db_user/db_password/db_name 正确")
         print("  2. Azure SQL 防火墙是否放行你的 IP")
         print("  3. pip install sqlalchemy pymssql openpyxl pandas")
         return 1
