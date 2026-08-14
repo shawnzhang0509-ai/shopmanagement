@@ -1023,8 +1023,37 @@ def shop_stats(items: list[DisplayItem], templates: list[dict]) -> dict[str, dic
         sid = shop["id"]
         filtered = filter_items(items, sid)
         modeled = sum(1 for it in filtered if match_template_index(it, templates) >= 0)
-        stats[sid] = {"total": len(filtered), "modeled": modeled}
+        families = len({
+            it.product_family
+            for it in filtered
+            if it.product_family and it.product_family != "未分类"
+        })
+        stats[sid] = {"total": len(filtered), "modeled": modeled, "families": families}
     return stats
+
+
+def shops_for_display_tabs(
+    items: list[DisplayItem], templates: list[dict]
+) -> list[tuple[dict[str, Any], dict[str, int]]]:
+    """门店 Tab：全部固定第一，其余按 Product Family 数量从高到低。"""
+    stats = shop_stats(items, templates)
+    rows: list[tuple[dict[str, Any], dict[str, int]]] = []
+    for shop in SHOPS:
+        sid = shop["id"]
+        if sid == "other":
+            continue
+        st = stats.get(sid, {"total": 0, "modeled": 0, "families": 0})
+        if sid != "all" and st["total"] == 0:
+            continue
+        rows.append((shop, st))
+    all_row = next((r for r in rows if r[0]["id"] == "all"), None)
+    rest = [r for r in rows if r[0]["id"] != "all"]
+    rest.sort(key=lambda r: (-r[1].get("families", 0), -r[1]["total"], r[0]["label"].lower()))
+    out: list[tuple[dict[str, Any], dict[str, int]]] = []
+    if all_row:
+        out.append(all_row)
+    out.extend(rest)
+    return out
 
 
 def match_template_index(item: DisplayItem, templates: list[dict]) -> int:

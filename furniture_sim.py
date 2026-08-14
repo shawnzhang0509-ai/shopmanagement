@@ -21,7 +21,7 @@ from roi_lookup import lookup_roi, reload_roi_map
 from display_lookup import (
     SHOPS,
     filter_items,
-    group_by_family_hierarchy,
+    group_by_family,
     last_load_error,
     last_load_source,
     last_family_column,
@@ -29,6 +29,7 @@ from display_lookup import (
     match_template_index,
     reload_display_items,
     shop_stats,
+    shops_for_display_tabs,
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -164,6 +165,8 @@ _sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
 _last_list_pick = {"index": -1, "time": 0}
 _last_gallery_pick = {"index": -1, "time": 0}
 CLICK_MOVE_TOLERANCE = 10
+return_to_gallery_after_edit = False
+_gallery_snapshot: dict | None = None
 
 
 class GalleryView:
@@ -229,32 +232,22 @@ class GalleryView:
         self._cards = []
         y = self.PAD
         filtered = self._filtered_displays()
-        for family, sub_groups in group_by_family_hierarchy(filtered):
-            fam_total = sum(len(items) for _, items in sub_groups)
-            fam_modeled = sum(
-                1
-                for _, items in sub_groups
-                for it in items
-                if match_template_index(it, templates) >= 0
-            )
-            self._layout.append(("family", family, fam_total, fam_modeled, y))
+        for family, items in group_by_family(filtered):
+            modeled = sum(1 for it in items if match_template_index(it, templates) >= 0)
+            self._layout.append(("family", family, len(items), modeled, y))
             y += self.FAMILY_H
-            for sub_family, items in sub_groups:
-                modeled = sum(1 for it in items if match_template_index(it, templates) >= 0)
-                self._layout.append(("sub_family", family, sub_family, len(items), modeled, y))
-                y += self.SUB_FAMILY_H
-                x = self.PAD + 20
-                row_y = y
-                for item in sorted(items, key=lambda it: it.product_name.lower()):
-                    if x + self.CARD_W > screen_w - self.PAD:
-                        x = self.PAD + 20
-                        row_y += self.CARD_H + self.CARD_GAP
-                    rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
-                    tpl_idx = match_template_index(item, templates)
-                    self._layout.append(("card_disp", rect, item, tpl_idx))
-                    self._cards.append((rect, "display", item.key))
-                    x += self.CARD_W + self.CARD_GAP
-                y = row_y + self.CARD_H + self.FAMILY_GAP
+            x = self.PAD
+            row_y = y
+            for item in sorted(items, key=lambda it: it.product_name.lower()):
+                if x + self.CARD_W > screen_w - self.PAD:
+                    x = self.PAD
+                    row_y += self.CARD_H + self.CARD_GAP
+                rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
+                tpl_idx = match_template_index(item, templates)
+                self._layout.append(("card_disp", rect, item, tpl_idx))
+                self._cards.append((rect, "display", item.key))
+                x += self.CARD_W + self.CARD_GAP
+            y = row_y + self.CARD_H + self.FAMILY_GAP
         return y + self.PAD
 
     def build_layout(self, templates, screen_w: int):
@@ -329,17 +322,13 @@ class GalleryView:
         if gallery_mode == "display":
             x = 20
             y = 52
-            for shop in SHOPS:
+            for shop, st in shops_for_display_tabs(display_items, templates):
                 sid = shop["id"]
-                if sid == "other":
-                    continue
-                st = stats.get(sid, {"total": 0, "modeled": 0})
-                if sid != "all" and st["total"] == 0:
-                    continue
                 if sid == "all":
                     text = f"全部 {st['total']}"
                 else:
-                    text = f"{shop['label']} {st['modeled']}/{st['total']}"
+                    fam_n = st.get("families", 0)
+                    text = f"{shop['label']} {fam_n}族 {st['modeled']}/{st['total']}"
                 w = max(88, FONT_SMALL.size(text)[0] + 20)
                 rect = pygame.Rect(x, y, w, self.SHOP_H - 4)
                 active = display_shop == sid
@@ -359,7 +348,7 @@ class GalleryView:
         title = "Display 大库" if gallery_mode == "display" else "已测绘模板"
         if gallery_mode == "display":
             surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
-            surface.blit(FONT_MARK.render("按 Sub Product Family 查看测绘 · 双击测绘/编辑", True, C_SIDEBAR_MUTED), (168, 62))
+            surface.blit(FONT_MARK.render("按 Product Family 分组 · 双击测绘/编辑 · Esc 返回", True, C_SIDEBAR_MUTED), (168, 62))
 
         self._draw_header_tabs(surface, sw, templates)
 
@@ -385,18 +374,6 @@ class GalleryView:
                     meta = f"{count} 款  ·  ROI {extra:.1f}"
                 meta_surf = FONT_SMALL.render(meta, True, C_SIDEBAR_MUTED)
                 surface.blit(meta_surf, (bar.right - meta_surf.get_width() - 14, bar.y + 12))
-            elif item[0] == "sub_family":
-                _, _family, sub_family, count, modeled, y = item
-                sy = self.TOP_H + y - self.scroll_y
-                if sy > sh or sy + self.SUB_FAMILY_H < self.TOP_H:
-                    continue
-                bar = pygame.Rect(self.PAD + 20, sy, sw - self.PAD * 2 - 20, self.SUB_FAMILY_H - 4)
-                pygame.draw.rect(surface, (52, 62, 74), bar, border_radius=5)
-                label = sub_family if len(sub_family) <= 48 else sub_family[:47] + "…"
-                surface.blit(FONT_SMALL.render(label, True, (230, 235, 240)), (bar.x + 12, bar.y + 8))
-                meta = f"{count} 款  ·  已测绘 {modeled}/{count}"
-                meta_surf = FONT_SMALL.render(meta, True, C_SIDEBAR_MUTED)
-                surface.blit(meta_surf, (bar.right - meta_surf.get_width() - 12, bar.y + 8))
             elif item[0] == "card_tpl":
                 _, rect, idx, tpl = item
                 screen_rect = rect.move(0, self.TOP_H - self.scroll_y)
@@ -584,12 +561,42 @@ def handle_enter_action():
     return False
 
 
-def open_gallery():
-    global app_screen, display_items
+def open_gallery(reset_scroll: bool = True):
+    global app_screen, display_items, return_to_gallery_after_edit, _gallery_snapshot
     blur_inputs()
     app_screen = "gallery"
-    gallery_view.scroll_y = 0
+    if reset_scroll:
+        gallery_view.scroll_y = 0
+    return_to_gallery_after_edit = False
+    _gallery_snapshot = None
     display_items = load_display_items()
+
+
+def open_editor_from_gallery():
+    """从 Display 大库打开测绘/编辑，保留大库滚动与门店筛选。"""
+    global app_screen, return_to_gallery_after_edit, _gallery_snapshot
+    _gallery_snapshot = {
+        "scroll_y": gallery_view.scroll_y,
+        "display_shop": display_shop,
+        "gallery_mode": gallery_mode,
+    }
+    return_to_gallery_after_edit = True
+    app_screen = "editor"
+    input_search.deactivate()
+
+
+def return_to_gallery_view():
+    global app_screen, display_shop, gallery_mode, display_items
+    global return_to_gallery_after_edit, _gallery_snapshot
+    snap = _gallery_snapshot or {}
+    gallery_view.scroll_y = snap.get("scroll_y", 0)
+    display_shop = snap.get("display_shop", display_shop)
+    gallery_mode = snap.get("gallery_mode", gallery_mode)
+    return_to_gallery_after_edit = False
+    _gallery_snapshot = None
+    app_screen = "gallery"
+    display_items = reload_display_items(prefer_db=False)
+    toast.show("已返回 Display 大库")
 
 
 def close_gallery():
@@ -958,6 +965,12 @@ def draw_sidebar(tool_buttons, buttons):
     for btn in tool_buttons.values():
         btn.active = btn.action == f"tool:{current_tool}"
         btn.draw(screen, mouse_pos, on_dark=True)
+    if return_to_gallery_after_edit:
+        buttons["gallery"].label = "← 返回 Display 大库"
+        buttons["gallery"].action = "gallery_return"
+    else:
+        buttons["gallery"].label = "Display 总览 →"
+        buttons["gallery"].action = "gallery"
     for btn in buttons.values():
         btn.draw(screen, mouse_pos, on_dark=True)
 
@@ -1311,6 +1324,8 @@ def handle_toolbar(action):
         toast.show("画布已清空")
     elif action == "gallery":
         open_gallery()
+    elif action == "gallery_return":
+        return_to_gallery_view()
     elif action == "gallery_back":
         close_gallery()
 
@@ -1472,17 +1487,17 @@ def _find_display_item(key: str):
 
 
 def begin_survey_display(item) -> None:
-    """无模型时进入绘制界面开始测绘。"""
+    """无模型时进入绘制界面开始测绘（保留 Display 大库状态，可一键返回）。"""
     global editing_template, editing_mode, selected_index, selected_display_key
     reset_draw_state()
     selected_display_key = item.key
     input_name.set_text(item.product_name)
-    input_family.set_text(item.product_family)
+    input_family.set_text(item.product_family if item.product_family != "未分类" else "")
     editing_mode = "new"
     selected_index = -1
-    close_gallery()
+    open_editor_from_gallery()
     focus_input(input_name)
-    toast.show(f"开始测绘: {item.product_name}")
+    toast.show(f"开始测绘: {item.product_name}（保存后点「返回 Display 大库」）")
 
 
 def refresh_display_data(prefer_db: bool = True) -> None:
@@ -1531,8 +1546,8 @@ def handle_gallery_click(mx, my):
         tpl_idx = match_template_index(item, furniture_templates)
         if is_double:
             if tpl_idx >= 0:
+                open_editor_from_gallery()
                 load_template_into_editor(tpl_idx)
-                close_gallery()
             else:
                 begin_survey_display(item)
         else:
@@ -1547,8 +1562,8 @@ def handle_gallery_click(mx, my):
         is_double = hit == _last_gallery_pick["index"] and now - _last_gallery_pick["time"] < 400
         _last_gallery_pick = {"index": hit, "time": now}
         if is_double:
+            open_editor_from_gallery()
             load_template_into_editor(hit)
-            close_gallery()
         else:
             selected_index = hit
             toast.show(f"已选中: {furniture_templates[hit]['id']}")
@@ -1759,6 +1774,12 @@ def main():
                             polygon_points = []
                             draw_phase = "idle"
                             preview_point = None
+                    elif event.key == pygame.K_ESCAPE:
+                        if return_to_gallery_after_edit and draw_phase == "idle":
+                            if input_name.active or input_family.active:
+                                blur_inputs()
+                            else:
+                                return_to_gallery_view()
                     elif event.key == pygame.K_s and event.mod & pygame.KMOD_CTRL:
                         if not (input_name.active or input_family.active):
                             save_to_list()
