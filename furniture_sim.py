@@ -21,6 +21,7 @@ from roi_lookup import lookup_roi, reload_roi_map
 from display_lookup import (
     SHOPS,
     blacklist_files_revision,
+    blacklist_status,
     filter_gallery_items,
     filter_items,
     group_by_family,
@@ -584,6 +585,8 @@ class GalleryView:
             survey_labels = {"all": "全部", "modeled": "已测绘", "unmodeled": "未测绘"}
             bl_labels = {"exclude": "剔除黑", "all": "含黑名单", "only": "仅黑"}
             hint += f" · {survey_labels.get(display_survey_filter, '')} · {bl_labels.get(display_blacklist_mode, '')}"
+            bl_n, bl_src, _ = blacklist_status()
+            hint += f" · 黑名单 {bl_n} 个 ({bl_src})"
             err = last_load_error()
             if err and display_items and "未读到有效" in (err or ""):
                 hint += f" · {err[:70]}"
@@ -826,7 +829,10 @@ def open_gallery(reset_scroll: bool = True):
     gallery_view.invalidate_layout()
     return_to_gallery_after_edit = False
     _gallery_snapshot = None
-    display_items = load_display_items()
+    display_items = reload_display_items(prefer_db=False)
+    bl_n, bl_src, _ = blacklist_status()
+    if bl_n:
+        toast.show(f"黑名单已加载 {bl_n} 个 SKU（{bl_src}）")
 
 
 def open_editor_from_gallery():
@@ -1846,8 +1852,9 @@ def refresh_display_data(prefer_db: bool = True) -> None:
     display_items = reload_display_items(prefer_db=False)
     gallery_view.invalidate_layout()
     src = last_load_source() or "display.xlsx"
+    bl_n, bl_src, _ = blacklist_status()
     if display_items:
-        toast.show(f"已刷新 {len(display_items)} 款（来自 {src}）")
+        toast.show(f"已刷新 {len(display_items)} 款 · 黑名单 {bl_n} 个 ({bl_src})")
     else:
         toast.show(last_load_error() or "请先运行 grab_display.bat")
 
