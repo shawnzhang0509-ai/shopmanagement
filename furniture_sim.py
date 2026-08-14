@@ -623,10 +623,14 @@ def _blit_thumb_fit(surface, thumb_surf, rect: pygame.Rect) -> None:
 
 def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
     has_model = tpl is not None
+    sku_show = (item.product_code or "").strip()
+    if len(sku_show) > 13:
+        sku_show = sku_show[:12] + "…"
+
     img_size = min(GalleryView.IMG_SIZE, rect.width - 8)
     img_rect = pygame.Rect(0, 0, img_size, img_size)
     img_rect.centerx = rect.centerx
-    img_rect.y = rect.y + 6
+    img_rect.y = rect.y + 18
 
     if has_model:
         border = C_SUCCESS
@@ -643,6 +647,11 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
 
     pygame.draw.rect(surface, bg, rect, border_radius=8)
     pygame.draw.rect(surface, border, rect, border_w, border_radius=8)
+
+    if sku_show:
+        sku_surf = FONT_MARK.render(sku_show, True, (44, 62, 80))
+        surface.blit(sku_surf, (rect.x + 6, rect.y + 4))
+
     pygame.draw.rect(surface, (248, 250, 252), img_rect, border_radius=4)
 
     thumb_surf = None
