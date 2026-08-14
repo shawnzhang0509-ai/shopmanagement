@@ -31,7 +31,7 @@ from display_lookup import (
     shop_stats,
     shops_for_display_tabs,
 )
-from product_images import prefetch_urls, request_thumbnail
+from product_images import is_image_failed, prefetch_urls, request_thumbnail
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
@@ -512,6 +512,11 @@ class GalleryView:
             hint = f"数据源: {src}"
             if fam_col:
                 hint += f" · Family列: {fam_col}"
+            with_img = sum(1 for it in display_items if getattr(it, "image_url", ""))
+            if with_img:
+                hint += f" · 有图链接 {with_img}/{len(display_items)}"
+            else:
+                hint += " · 无 ImageUrl，请重新 grab_display"
             err = last_load_error()
             if err and display_items and "未读到有效" in (err or ""):
                 hint += f" · {err[:70]}"
@@ -543,7 +548,12 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
             surface.blit(scaled, inner.topleft)
         else:
             pygame.draw.rect(surface, (210, 218, 226), inner, 2, border_radius=4)
-            label = "加载中…" if getattr(item, "image_url", "") else "待测绘"
+            if not getattr(item, "image_url", ""):
+                label = "待测绘"
+            elif is_image_failed(item.image_url):
+                label = "无图"
+            else:
+                label = "加载中…"
             wait = FONT_MARK.render(label, True, C_MUTED)
             surface.blit(wait, wait.get_rect(center=inner.center))
 
