@@ -438,17 +438,39 @@ def blacklist_files_revision() -> str:
     return "|".join(parts)
 
 
+def _blacklist_key(value) -> str:
+    """黑名单 SKU 归一化（去空格、Excel 数字格式）。"""
+    s = _cell_value(value)
+    if not s:
+        return ""
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".", 1)[0]
+    return _normalize_key(s)
+
+
 def _blacklist_add_sku(blocked: set[str], value) -> None:
-    key = _normalize_key(str(value or ""))
+    key = _blacklist_key(value)
     if key:
         blocked.add(key)
+        compact = re.sub(r"[^a-z0-9]", "", key)
+        if compact:
+            blocked.add(compact)
 
 
 def _blacklist_read_csv_rows(path: str) -> list[list[str]]:
     import csv
 
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        return list(csv.reader(f))
+    last_err: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "cp936", "latin-1"):
+        try:
+            with open(path, "r", encoding=encoding, newline="") as f:
+                return list(csv.reader(f))
+        except UnicodeDecodeError as exc:
+            last_err = exc
+            continue
+    if last_err is not None:
+        raise last_err
+    return []
 
 
 def load_blacklist(cfg: dict | None = None) -> set[str]:
@@ -535,9 +557,24 @@ def load_blacklist(cfg: dict | None = None) -> set[str]:
 def is_blacklisted(item: DisplayItem, blocked: set[str]) -> bool:
     if not blocked:
         return False
-    code = _normalize_key(item.product_code)
-    name = _normalize_key(item.product_name)
-    return code in blocked or name in blocked
+    keys = {_blacklist_key(item.product_code), _blacklist_key(item.product_name)}
+    keys.discard("")
+    for key in keys:
+        if key in blocked:
+            return True
+        compact = re.sub(r"[^a-z0-9]", "", key)
+        if compact and compact in blocked:
+            return True
+    return False
+
+
+def blacklist_status(cfg: dict | None = None) -> tuple[int, str, list[str]]:
+    """返回 (SKU 数量, 主文件名, 实际读到的文件列表)。"""
+    blocked = load_blacklist(cfg)
+    used = [p for p in resolve_blacklist_paths(cfg) if os.path.isfile(p)]
+    names = [os.path.basename(p) for p in used]
+    primary = names[0] if names else "未找到黑名单文件"
+    return len(blocked), primary, names
 
 
 def filter_blacklisted(items: list[DisplayItem], cfg: dict | None = None) -> list[DisplayItem]:
