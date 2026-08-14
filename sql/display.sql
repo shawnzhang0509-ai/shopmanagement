@@ -1,23 +1,68 @@
 -- Display 库：各门店 Display 库存
 -- 由 grab_display.bat / grab_display_gui.py 自动执行
 --
--- 说明：多数 iERP 库没有 ProductFamilies 查找表，本文件只查 Products 上的字段。
--- 若你的库有 family 查找表，可改用 sql/display.with_families.sql
--- 若 ImageUrl 列名不对，在 SSMS 运行 sql/discover_schema.sql 查列名后改下面 COALESCE 一行。
+-- 图片逻辑与库存 stock SQL 一致：ProductDocuments + Documents → RelativeFilePath
+-- ProductFamily 直接读 Products 表字段（无 ProductFamilies 查找表）
 
 SELECT
     w.Name AS WarehouseName,
     p.Sku,
     p.Name AS ProductName,
-    CAST('' AS NVARCHAR(200)) AS ProductFamily,
+    ISNULL(p.ProductFamily, '') AS ProductFamily,
     p.Name AS SubProductFamily,
-    COALESCE(p.ImageUrl, p.ImagePath, '') AS ImageUrl,
+    MAX(
+        CASE
+            WHEN img.RelativeFilePath IS NOT NULL
+            THEN 'https://ierpapi.ifurniture.co.nz/' + REPLACE(img.RelativeFilePath, '\', '/')
+            ELSE ''
+        END
+    ) AS ImageUrl,
     SUM(s.Quantity) AS DisplayQty
-FROM Stocks s
-JOIN Warehouses w ON s.WarehouseId = w.Id
-JOIN Products p ON s.ProductId = p.Id
+FROM [dbo].[Products] p
+
+-- 产品默认图：优先 IsDefaultProductPicture=1，否则取最新上传图
+LEFT JOIN (
+    SELECT ProductId, RelativeFilePath
+    FROM (
+        SELECT
+            PD.ProductId,
+            D.RelativeFilePath,
+            ROW_NUMBER() OVER (
+                PARTITION BY PD.ProductId
+                ORDER BY
+                    CASE WHEN PD.IsDefaultProductPicture = 1 THEN 0 ELSE 1 END,
+                    D.DateUploadedOnUtc DESC
+            ) AS rn
+        FROM dbo.ProductDocuments PD
+        INNER JOIN dbo.Documents D
+            ON PD.DocumentId = D.Id
+        WHERE NULLIF(LTRIM(RTRIM(D.RelativeFilePath)), '') IS NOT NULL
+    ) t
+    WHERE rn = 1
+) img
+    ON img.ProductId = p.Id
+
+INNER JOIN [dbo].[Stocks] s
+    ON s.ProductId = p.Id
+    AND s.StockStatus = 'Normal'
+    AND s.StockOnHoldStatus IS NULL
+
+INNER JOIN [dbo].[Warehouses] w
+    ON s.WarehouseId = w.Id
+
 WHERE w.Name LIKE '%Display%'
   AND p.IsDiscontinued = 0
-GROUP BY w.Name, p.Sku, p.Name, p.ImageUrl, p.ImagePath
+
+GROUP BY
+    w.Name,
+    p.Sku,
+    p.Name,
+    p.ProductFamily
+
 HAVING SUM(s.Quantity) > 0
-ORDER BY w.Name, DisplayQty DESC;
+
+ORDER BY
+    w.Name,
+    ProductFamily,
+    SubProductFamily,
+    DisplayQty DESC;
