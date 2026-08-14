@@ -20,6 +20,8 @@ except ModuleNotFoundError:
 from roi_lookup import lookup_roi, reload_roi_map
 from display_lookup import (
     SHOPS,
+    display_items_including_blacklist,
+    filter_gallery_items,
     filter_items,
     group_by_family,
     last_load_error,
@@ -159,6 +161,8 @@ focus_zone = "canvas"
 app_screen = "gallery"  # editor | gallery
 gallery_mode = "display"  # display | templates
 display_shop = "all"
+display_survey_filter = "all"  # all | modeled | unmodeled
+display_blacklist_mode = "exclude"  # exclude | all | only
 selected_display_key = None
 display_items = []
 _pending_input_focus = None
@@ -174,13 +178,14 @@ _gallery_snapshot: dict | None = None
 class GalleryView:
     """全屏总览：Display 大库（按门店）+ 已测绘模板库。"""
 
-    TOP_H = 96
+    TOP_H = 118
     SHOP_H = 36
+    FILTER_H = 28
     FAMILY_H = 40
     SUB_FAMILY_H = 34
     CARD_W = 108
-    CARD_H = 132
-    IMG_SIZE = 96
+    CARD_H = 142
+    IMG_SIZE = 88
     CARD_GAP = 14
     PAD = 28
     FAMILY_GAP = 24
@@ -196,6 +201,8 @@ class GalleryView:
         self._layout = []
         self._cards = []  # (rect, kind, data) kind: template|display
         self._shop_tabs: list[tuple[pygame.Rect, str]] = []
+        self._survey_tabs: list[tuple[pygame.Rect, str]] = []
+        self._blacklist_tabs: list[tuple[pygame.Rect, str]] = []
         self._mode_tabs: list[tuple[pygame.Rect, str]] = []
         self._layout_key: tuple | None = None
         self._content_h = 0
@@ -203,8 +210,15 @@ class GalleryView:
         self._scroll_drag_offset = 0
         self._last_sw = 0
 
-    def _filtered_displays(self):
-        return filter_items(display_items, display_shop, input_search.get_text())
+    def _filtered_displays(self, templates):
+        return filter_gallery_items(
+            display_items_including_blacklist(),
+            display_shop,
+            input_search.get_text(),
+            templates,
+            survey_filter=display_survey_filter,
+            blacklist_mode=display_blacklist_mode,
+        )
 
     def group_templates(self, templates):
         query = input_search.get_text().lower().strip()
@@ -225,6 +239,8 @@ class GalleryView:
             screen_w,
             gallery_mode,
             display_shop,
+            display_survey_filter,
+            display_blacklist_mode,
             input_search.get_text(),
             len(display_items),
             len(templates),
@@ -339,7 +355,7 @@ class GalleryView:
         self._layout = []
         self._cards = []
         y = self.PAD
-        filtered = self._filtered_displays()
+        filtered = self._filtered_displays(templates)
         for family, items in group_by_family(filtered):
             modeled = sum(1 for it in items if match_template_index(it, templates) >= 0)
             self._layout.append(("family", family, len(items), modeled, y))
@@ -389,6 +405,13 @@ class GalleryView:
         for rect, shop_id in self._shop_tabs:
             if rect.collidepoint(mx, my):
                 return f"shop:{shop_id}"
+        if gallery_mode == "display":
+            for rect, sid in self._survey_tabs:
+                if rect.collidepoint(mx, my):
+                    return f"survey:{sid}"
+            for rect, bid in self._blacklist_tabs:
+                if rect.collidepoint(mx, my):
+                    return f"bl:{bid}"
         if input_search.contains((mx, my)):
             return None
         if my < self.TOP_H:
@@ -404,6 +427,8 @@ class GalleryView:
     def _draw_header_tabs(self, surface, sw: int, templates):
         self._mode_tabs = []
         self._shop_tabs = []
+        self._survey_tabs = []
+        self._blacklist_tabs = []
         x = 20
         y = 10
         for mode, label in (("display", "Display 库"), ("templates", "已测绘")):
@@ -457,6 +482,30 @@ class GalleryView:
                 x += w + 8
                 if x > sw - 40:
                     break
+
+            self._survey_tabs = []
+            self._blacklist_tabs = []
+            fy = 84
+            fx = 20
+            for sid, label in (("all", "全部"), ("modeled", "已测绘"), ("unmodeled", "未测绘")):
+                w = max(56, FONT_SMALL.size(label)[0] + 16)
+                rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
+                active = display_survey_filter == sid
+                bg = C_SUCCESS if active else C_SIDEBAR_HOVER
+                pygame.draw.rect(surface, bg, rect, border_radius=5)
+                surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
+                self._survey_tabs.append((rect, sid))
+                fx += w + 6
+            fx += 12
+            for bid, label in (("exclude", "剔除黑"), ("all", "含黑名单"), ("only", "仅黑")):
+                w = max(64, FONT_SMALL.size(label)[0] + 16)
+                rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
+                active = display_blacklist_mode == bid
+                bg = (192, 57, 43) if bid == "only" and active else (127, 140, 141) if active else C_SIDEBAR_HOVER
+                pygame.draw.rect(surface, bg, rect, border_radius=5)
+                surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
+                self._blacklist_tabs.append((rect, bid))
+                fx += w + 6
 
     def draw(self, surface, templates, selected_index: int):
         sw, sh = surface.get_width(), surface.get_height()
@@ -531,6 +580,9 @@ class GalleryView:
                 hint += f" · 有图链接 {with_img}/{len(display_items)}"
             else:
                 hint += " · 无 ImageUrl，请重新 grab_display"
+            survey_labels = {"all": "全部", "modeled": "已测绘", "unmodeled": "未测绘"}
+            bl_labels = {"exclude": "剔除黑", "all": "含黑名单", "only": "仅黑"}
+            hint += f" · {survey_labels.get(display_survey_filter, '')} · {bl_labels.get(display_blacklist_mode, '')}"
             err = last_load_error()
             if err and display_items and "未读到有效" in (err or ""):
                 hint += f" · {err[:70]}"
@@ -538,6 +590,23 @@ class GalleryView:
 
 
 gallery_view = GalleryView()
+
+
+def template_shape_badge(tpl: dict | None) -> str:
+    """已测绘模板的形状角标：矩 / 圆 / L / 多边。"""
+    if not tpl:
+        return ""
+    shape = tpl.get("type", "")
+    if shape == "rectangle":
+        return "矩"
+    if shape == "circle":
+        return "圆"
+    if shape == "polygon":
+        pts = tpl.get("points", [])
+        if len(pts) == 6:
+            return "L"
+        return "多边"
+    return "?"
 
 
 def _blit_thumb_fit(surface, thumb_surf, rect: pygame.Rect) -> None:
@@ -598,6 +667,12 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
         pygame.draw.circle(surface, C_SUCCESS, badge.center, 8)
         check = FONT_MARK.render("✓", True, (255, 255, 255))
         surface.blit(check, check.get_rect(center=badge.center))
+        shape = template_shape_badge(tpl)
+        if shape:
+            tag = FONT_MARK.render(shape, True, (255, 255, 255))
+            tag_bg = pygame.Rect(img_rect.x + 4, img_rect.y + 4, tag.get_width() + 8, tag.get_height() + 2)
+            pygame.draw.rect(surface, C_SUCCESS, tag_bg, border_radius=4)
+            surface.blit(tag, (tag_bg.x + 4, tag_bg.y + 1))
 
     name = item.product_name
     if len(name) > 14:
@@ -751,6 +826,8 @@ def open_editor_from_gallery():
         "scroll_y": gallery_view.scroll_y,
         "display_shop": display_shop,
         "gallery_mode": gallery_mode,
+        "display_survey_filter": display_survey_filter,
+        "display_blacklist_mode": display_blacklist_mode,
     }
     return_to_gallery_after_edit = True
     app_screen = "editor"
@@ -760,10 +837,13 @@ def open_editor_from_gallery():
 def return_to_gallery_view():
     global app_screen, display_shop, gallery_mode, display_items
     global return_to_gallery_after_edit, _gallery_snapshot
+    global display_survey_filter, display_blacklist_mode
     snap = _gallery_snapshot or {}
     gallery_view.scroll_y = snap.get("scroll_y", 0)
     display_shop = snap.get("display_shop", display_shop)
     gallery_mode = snap.get("gallery_mode", gallery_mode)
+    display_survey_filter = snap.get("display_survey_filter", display_survey_filter)
+    display_blacklist_mode = snap.get("display_blacklist_mode", display_blacklist_mode)
     return_to_gallery_after_edit = False
     _gallery_snapshot = None
     app_screen = "gallery"
@@ -1763,7 +1843,9 @@ def refresh_display_data(prefer_db: bool = True) -> None:
 
 
 def handle_gallery_click(mx, my):
-    global selected_index, selected_display_key, gallery_mode, display_shop, _last_gallery_pick, _last_gallery_display_pick
+    global selected_index, selected_display_key, gallery_mode, display_shop
+    global display_survey_filter, display_blacklist_mode
+    global _last_gallery_pick, _last_gallery_display_pick
     hit = gallery_view.handle_click(mx, my)
     if hit == "back":
         close_gallery()
@@ -1784,6 +1866,16 @@ def handle_gallery_click(mx, my):
         return True
     if isinstance(hit, str) and hit.startswith("shop:"):
         display_shop = hit.split(":", 1)[1]
+        gallery_view.scroll_y = 0
+        gallery_view.invalidate_layout()
+        return True
+    if isinstance(hit, str) and hit.startswith("survey:"):
+        display_survey_filter = hit.split(":", 1)[1]
+        gallery_view.scroll_y = 0
+        gallery_view.invalidate_layout()
+        return True
+    if isinstance(hit, str) and hit.startswith("bl:"):
+        display_blacklist_mode = hit.split(":", 1)[1]
         gallery_view.scroll_y = 0
         gallery_view.invalidate_layout()
         return True

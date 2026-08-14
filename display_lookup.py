@@ -77,6 +77,7 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 _display_cache: list["DisplayItem"] | None = None
+_display_items_all: list["DisplayItem"] | None = None
 _last_load_error: str | None = None
 _last_load_source: str | None = None
 _last_family_column: str | None = None
@@ -382,7 +383,7 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
     return items
 
 
-def _rows_to_items(rows: list[dict], fmt: str | None = None) -> list[DisplayItem]:
+def _rows_to_items(rows: list[dict], fmt: str | None = None, *, apply_blacklist: bool = True) -> list[DisplayItem]:
     if not rows:
         return []
     canonical = [_canonicalize_row(r) for r in rows]
@@ -396,7 +397,9 @@ def _rows_to_items(rows: list[dict], fmt: str | None = None) -> list[DisplayItem
             item = _row_to_item(row)
             if item:
                 items.append(item)
-    return filter_blacklisted(items)
+    if apply_blacklist:
+        return filter_blacklisted(items)
+    return items
 
 
 _BLACKLIST_ALIASES = {
@@ -420,31 +423,54 @@ def resolve_blacklist_paths(cfg: dict | None = None) -> list[str]:
     return out
 
 
+def _blacklist_add_sku(blocked: set[str], value) -> None:
+    key = _normalize_key(str(value or ""))
+    if key:
+        blocked.add(key)
+
+
+def _blacklist_read_csv_rows(path: str) -> list[list[str]]:
+    import csv
+
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.reader(f))
+
+
 def load_blacklist(cfg: dict | None = None) -> set[str]:
-    """读取黑名单 SKU / 产品名（小写归一化）。"""
+    """读取黑名单 SKU（支持仅一列 SKU，也兼容产品名列）。"""
     blocked: set[str] = set()
     for path in resolve_blacklist_paths(cfg):
         if not os.path.isfile(path):
             continue
         if path.lower().endswith(".csv"):
-            import csv
-
-            with open(path, "r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.DictReader(f)
-                if not reader.fieldnames:
+            rows = _blacklist_read_csv_rows(path)
+            if not rows:
+                continue
+            headers = [_normalize_header(h) for h in rows[0]]
+            sku_col = name_col = None
+            for i, h in enumerate(headers):
+                if h in _BLACKLIST_ALIASES["sku"]:
+                    sku_col = i
+                if h in _BLACKLIST_ALIASES["product_name"]:
+                    name_col = i
+            data_start = 1
+            # 无表头：整文件每行第一列当作 SKU
+            if sku_col is None and name_col is None:
+                if len(headers) == 1:
+                    sku_col = 0
+                    data_start = 0
+                elif all(_normalize_key(h) for h in rows[0]):
+                    sku_col = 0
+                    data_start = 0
+            elif sku_col is None and len(headers) == 1:
+                sku_col = 0
+            for line in rows[data_start:]:
+                if not line:
                     continue
-                headers = [_normalize_header(h) for h in reader.fieldnames]
-                sku_idx = name_idx = None
-                for i, h in enumerate(headers):
-                    if h in _BLACKLIST_ALIASES["sku"]:
-                        sku_idx = reader.fieldnames[i]
-                    if h in _BLACKLIST_ALIASES["product_name"]:
-                        name_idx = reader.fieldnames[i]
-                for row in reader:
-                    if sku_idx and row.get(sku_idx):
-                        blocked.add(_normalize_key(row[sku_idx]))
-                    if name_idx and row.get(name_idx):
-                        blocked.add(_normalize_key(row[name_idx]))
+                if sku_col is not None and sku_col < len(line):
+                    _blacklist_add_sku(blocked, line[sku_col])
+                if name_col is not None and name_col < len(line):
+                    _blacklist_add_sku(blocked, line[name_col])
             continue
         try:
             import pandas as pd
@@ -477,11 +503,17 @@ def load_blacklist(cfg: dict | None = None) -> set[str]:
                 sku_col = i
             if h in _BLACKLIST_ALIASES["product_name"]:
                 name_col = i
-        for line in raw[1:]:
+        data_start = 1
+        if sku_col is None and name_col is None and len(headers) == 1:
+            sku_col = 0
+            data_start = 0
+        elif sku_col is None and len(headers) == 1:
+            sku_col = 0
+        for line in raw[data_start:]:
             if sku_col is not None and sku_col < len(line) and line[sku_col]:
-                blocked.add(_normalize_key(str(line[sku_col])))
+                _blacklist_add_sku(blocked, line[sku_col])
             if name_col is not None and name_col < len(line) and line[name_col]:
-                blocked.add(_normalize_key(str(line[name_col])))
+                _blacklist_add_sku(blocked, line[name_col])
     return blocked
 
 
@@ -591,7 +623,10 @@ def load_from_excel(path: str | None = None) -> list[DisplayItem]:
             continue
         try:
             fmt, rows = _load_excel_rows(candidate)
-            items = _rows_to_items(rows, fmt)
+            items_all = _rows_to_items(rows, fmt, apply_blacklist=False)
+            global _display_items_all
+            _display_items_all = items_all
+            items = filter_blacklisted(items_all)
             if not items:
                 _last_load_error = f"{os.path.basename(candidate)} 中没有 Display 数据"
                 continue
@@ -928,7 +963,10 @@ def grab_and_save(cfg: dict | None = None) -> tuple[list["DisplayItem"], str]:
     rows = _fetch_raw_rows(runtime)
     excel_path = runtime["output_excel"]
     export_rows_to_excel(rows, excel_path)
-    items = _rows_to_items(rows, "warehouse")
+    items_all = _rows_to_items(rows, "warehouse", apply_blacklist=False)
+    global _display_items_all
+    _display_items_all = items_all
+    items = filter_blacklisted(items_all)
     save_cache(items, runtime["output_json"])
     _display_cache = items
     _last_load_error = None
@@ -1038,6 +1076,57 @@ def last_load_source() -> str | None:
 
 def last_family_column() -> str | None:
     return _last_family_column
+
+
+def filter_gallery_items(
+    items: list[DisplayItem],
+    shop_id: str,
+    query: str,
+    templates: list[dict],
+    *,
+    survey_filter: str = "all",
+    blacklist_mode: str = "exclude",
+) -> list[DisplayItem]:
+    """画廊筛选：门店 / 搜索 / 已测绘 / 黑名单模式。"""
+    blocked = load_blacklist()
+    q = _normalize_key(query)
+    out: list[DisplayItem] = []
+    for it in items:
+        bl = is_blacklisted(it, blocked)
+        if blacklist_mode == "exclude" and bl:
+            continue
+        if blacklist_mode == "only" and not bl:
+            continue
+        if shop_id != "all" and it.display_qty_for_shop(shop_id) <= 0:
+            continue
+        if q:
+            blob = " ".join([
+                it.product_code,
+                it.product_name,
+                it.product_family,
+                it.sub_product_family,
+            ]).lower()
+            if q not in blob:
+                continue
+        modeled = match_template_index(it, templates) >= 0
+        if survey_filter == "modeled" and not modeled:
+            continue
+        if survey_filter == "unmodeled" and modeled:
+            continue
+        out.append(it)
+    out.sort(key=lambda x: (
+        x.product_family.lower(),
+        x.sub_product_family.lower(),
+        x.product_name.lower(),
+    ))
+    return out
+
+
+def display_items_including_blacklist() -> list[DisplayItem]:
+    """含黑名单的完整 Display 列表（画廊「全部/仅黑名单」用）。"""
+    if _display_items_all is not None:
+        return _display_items_all
+    return _display_cache or []
 
 
 def filter_items(items: list[DisplayItem], shop_id: str, query: str = "") -> list[DisplayItem]:
