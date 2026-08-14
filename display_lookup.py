@@ -1127,28 +1127,21 @@ def shops_for_display_tabs(
 
 
 def match_template_index(item: DisplayItem, templates: list[dict]) -> int:
-    name = _normalize_key(item.product_name)
+    """按 SKU 或产品名精确匹配模板，不按 Family 模糊匹配（避免测绘一款整族都变绿）。"""
     code = _normalize_key(item.product_code)
-    family = _normalize_key(item.product_family)
-    sub_family = _normalize_key(item.sub_product_family)
+    name = _normalize_key(item.product_name)
     for i, tpl in enumerate(templates):
         tid = _normalize_key(tpl.get("id", ""))
-        tfam = _normalize_key(tpl.get("product_family", ""))
-        if code and (code == tid or code == tfam):
+        if code and code == tid:
             return i
-        if name and (name == tid or name == tfam):
+        if name and name == tid:
             return i
-        if sub_family and (sub_family == tid or sub_family == tfam):
-            return i
+    return -1
+
+
+def find_template_index_by_id(templates: list[dict], tpl_id: str) -> int:
+    key = _normalize_key(tpl_id)
     for i, tpl in enumerate(templates):
-        tid = _normalize_key(tpl.get("id", ""))
-        tfam = _normalize_key(tpl.get("product_family", ""))
-        if family and (family == tid or family == tfam):
-            return i
-        if name and (name in tid or tid in name):
-            return i
-        if family and (family in tfam or tfam in family):
-            return i
-        if sub_family and (sub_family in tid or tid in sub_family or sub_family in tfam):
+        if _normalize_key(tpl.get("id", "")) == key:
             return i
     return -1

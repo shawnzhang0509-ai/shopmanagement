@@ -27,6 +27,7 @@ from display_lookup import (
     last_family_column,
     load_display_items,
     match_template_index,
+    find_template_index_by_id,
     reload_display_items,
     shop_stats,
     shops_for_display_tabs,
@@ -177,8 +178,9 @@ class GalleryView:
     SHOP_H = 36
     FAMILY_H = 40
     SUB_FAMILY_H = 34
-    CARD_W = 140
-    CARD_H = 120
+    CARD_W = 108
+    CARD_H = 132
+    IMG_SIZE = 96
     CARD_GAP = 14
     PAD = 28
     FAMILY_GAP = 24
@@ -452,7 +454,7 @@ class GalleryView:
         title = "Display 大库" if gallery_mode == "display" else "已测绘模板"
         if gallery_mode == "display":
             surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
-            surface.blit(FONT_MARK.render("按 Product Family 分组 · 双击测绘/编辑 · 右侧滑块滚动", True, C_SIDEBAR_MUTED), (168, 62))
+            surface.blit(FONT_MARK.render("单击选中 · 双击测绘 · Ctrl+C/V 复制粘贴模型", True, C_SIDEBAR_MUTED), (168, 62))
 
         self._draw_header_tabs(surface, sw, templates)
 
@@ -526,45 +528,75 @@ class GalleryView:
 gallery_view = GalleryView()
 
 
+def _blit_thumb_fit(surface, thumb_surf, rect: pygame.Rect) -> None:
+    tw, th = thumb_surf.get_size()
+    if tw <= 0 or th <= 0:
+        return
+    scale = min(rect.width / tw, rect.height / th)
+    nw = max(1, int(tw * scale))
+    nh = max(1, int(th * scale))
+    scaled = pygame.transform.smoothscale(thumb_surf, (nw, nh))
+    dest = scaled.get_rect(center=rect.center)
+    surface.blit(scaled, dest)
+
+
 def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
     has_model = tpl is not None
-    inner = rect.inflate(-10, -36)
-    inner.height = max(48, inner.height)
-    thumb_surf = None
-    if not has_model and getattr(item, "image_url", ""):
-        thumb_surf = request_thumbnail(item.image_url)
+    img_size = min(GalleryView.IMG_SIZE, rect.width - 8)
+    img_rect = pygame.Rect(0, 0, img_size, img_size)
+    img_rect.centerx = rect.centerx
+    img_rect.y = rect.y + 6
 
     if has_model:
-        draw_template_card(surface, tpl, rect, selected)
-        pygame.draw.circle(surface, C_SUCCESS, (rect.right - 14, rect.top + 14), 7)
-        pygame.draw.circle(surface, (255, 255, 255), (rect.right - 14, rect.top + 14), 7, 2)
+        border = C_SUCCESS
+        border_w = 3
+        bg = (232, 245, 236) if not selected else (214, 238, 220)
+    elif selected:
+        border = C_ACCENT
+        border_w = 2
+        bg = (220, 228, 238)
     else:
-        bg = (235, 238, 242) if not selected else (220, 228, 238)
-        border = (190, 198, 208) if not selected else C_ACCENT
-        pygame.draw.rect(surface, bg, rect, border_radius=8)
-        pygame.draw.rect(surface, border, rect, 2 if selected else 1, border_radius=8)
-        if thumb_surf is not None:
-            scaled = pygame.transform.smoothscale(thumb_surf, (inner.width, inner.height))
-            surface.blit(scaled, inner.topleft)
+        border = (190, 198, 208)
+        border_w = 1
+        bg = (235, 238, 242)
+
+    pygame.draw.rect(surface, bg, rect, border_radius=8)
+    pygame.draw.rect(surface, border, rect, border_w, border_radius=8)
+    pygame.draw.rect(surface, (248, 250, 252), img_rect, border_radius=4)
+
+    thumb_surf = None
+    if getattr(item, "image_url", ""):
+        thumb_surf = request_thumbnail(item.image_url)
+
+    if thumb_surf is not None:
+        _blit_thumb_fit(surface, thumb_surf, img_rect)
+    else:
+        pygame.draw.rect(surface, (210, 218, 226), img_rect, 1, border_radius=4)
+        if not getattr(item, "image_url", ""):
+            label = "待测绘"
+        elif is_image_failed(item.image_url):
+            label = "无图"
         else:
-            pygame.draw.rect(surface, (210, 218, 226), inner, 2, border_radius=4)
-            if not getattr(item, "image_url", ""):
-                label = "待测绘"
-            elif is_image_failed(item.image_url):
-                label = "无图"
-            else:
-                label = "加载中…"
-            wait = FONT_MARK.render(label, True, C_MUTED)
-            surface.blit(wait, wait.get_rect(center=inner.center))
+            label = "加载中…"
+        wait = FONT_MARK.render(label, True, C_MUTED)
+        surface.blit(wait, wait.get_rect(center=img_rect.center))
+
+    if has_model:
+        badge = pygame.Rect(img_rect.right - 20, img_rect.bottom - 18, 16, 16)
+        pygame.draw.circle(surface, C_SUCCESS, badge.center, 8)
+        check = FONT_MARK.render("✓", True, (255, 255, 255))
+        surface.blit(check, check.get_rect(center=badge.center))
 
     name = item.product_name
-    if len(name) > 16:
-        name = name[:15] + "…"
-    name_surf = FONT_SMALL.render(name, True, INPUT_TEXT if not selected else (255, 255, 255))
-    surface.blit(name_surf, (rect.x + 8, rect.bottom - 34))
+    if len(name) > 14:
+        name = name[:13] + "…"
+    name_y = img_rect.bottom + 4
+    name_surf = FONT_SMALL.render(name, True, INPUT_TEXT)
+    surface.blit(name_surf, (rect.x + 6, name_y))
     qty = item.display_qty_for_shop(shop_id)
-    qty_surf = FONT_MARK.render(f"Display ×{qty}", True, C_SUCCESS if has_model else C_MUTED)
-    surface.blit(qty_surf, (rect.x + 8, rect.bottom - 18))
+    qty_color = C_SUCCESS if has_model else C_MUTED
+    qty_surf = FONT_MARK.render(f"Display ×{qty}", True, qty_color)
+    surface.blit(qty_surf, (rect.x + 6, rect.bottom - 16))
 
 
 def draw_template_card(surface, tpl, rect, selected=False):
@@ -1570,6 +1602,12 @@ def handle_global_clipboard_shortcuts(event):
     if input_name.active or input_family.active or input_search.active:
         return False
 
+    if app_screen == "gallery" and gallery_mode == "display":
+        if ui.is_ctrl_key(event, "c"):
+            return gallery_copy_model()
+        if ui.is_ctrl_key(event, "v"):
+            return gallery_paste_model()
+
     if ui.is_ctrl_key(event, "c"):
         copy_template_to_clipboard()
         return True
@@ -1620,13 +1658,67 @@ def begin_survey_display(item) -> None:
     global editing_template, editing_mode, selected_index, selected_display_key
     reset_draw_state()
     selected_display_key = item.key
-    input_name.set_text(item.product_name)
+    input_name.set_text(item.product_code or item.product_name)
     input_family.set_text(item.product_family if item.product_family != "未分类" else "")
     editing_mode = "new"
     selected_index = -1
     open_editor_from_gallery()
     focus_input(input_name)
     toast.show(f"开始测绘: {item.product_name}（保存后点「返回 Display 大库」）")
+
+
+def apply_template_to_display_item(item, src_tpl: dict) -> None:
+    """把剪贴板里的模型形状绑定到指定 Display 产品（按 SKU 存模板）。"""
+    global furniture_templates
+    tpl_id = item.product_code or item.product_name
+    family = item.product_family if item.product_family and item.product_family != "未分类" else tpl_id
+    new_tpl = copy.deepcopy(src_tpl)
+    new_tpl["id"] = tpl_id
+    new_tpl["product_family"] = family
+    new_tpl["roi"] = lookup_roi(family)
+    idx = find_template_index_by_id(furniture_templates, tpl_id)
+    if idx >= 0:
+        furniture_templates[idx] = new_tpl
+        action = "已更新"
+    else:
+        furniture_templates.append(new_tpl)
+        action = "已粘贴"
+    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+        json.dump(furniture_templates, f, ensure_ascii=False, indent=2)
+    gallery_view.invalidate_layout()
+    toast.show(f"{action}模型 → {item.product_name}")
+
+
+def gallery_copy_model() -> bool:
+    if gallery_mode != "display":
+        return False
+    if not selected_display_key:
+        toast.show("请先单击选中一个产品")
+        return False
+    item = _find_display_item(selected_display_key)
+    if not item:
+        return False
+    idx = match_template_index(item, furniture_templates)
+    if idx < 0:
+        toast.show("该产品尚未测绘，无法复制")
+        return False
+    return copy_template_to_clipboard(furniture_templates[idx])
+
+
+def gallery_paste_model() -> bool:
+    if gallery_mode != "display":
+        return False
+    if not selected_display_key:
+        toast.show("请先单击选中目标产品")
+        return False
+    if not _template_clipboard:
+        toast.show("剪贴板为空，请先 Ctrl+C 复制已测绘产品")
+        return False
+    item = _find_display_item(selected_display_key)
+    if not item:
+        return False
+    apply_template_to_display_item(item, _template_clipboard)
+    return True
 
 
 def refresh_display_data(prefer_db: bool = True) -> None:
@@ -1689,9 +1781,9 @@ def handle_gallery_click(mx, my):
         else:
             selected_display_key = key
             if tpl_idx >= 0:
-                toast.show(f"已选中: {item.product_name}（已有模型 · 双击编辑）")
+                toast.show(f"已选中: {item.product_name}（已测绘 · 双击编辑 · Ctrl+C 复制）")
             else:
-                toast.show(f"已选中: {item.product_name}（待测绘 · 双击开始）")
+                toast.show(f"已选中: {item.product_name}（待测绘 · 双击开始 · Ctrl+V 粘贴）")
         return True
     if hit is not None and isinstance(hit, int):
         now = pygame.time.get_ticks()
