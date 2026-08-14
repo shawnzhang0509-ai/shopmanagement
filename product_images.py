@@ -10,11 +10,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-# 静态图在官网 CDN，ierpapi 只有 API（会 404）
+# SQL 里已是完整 URL 时直接用；相对路径优先拼 ierpapi（与库存 stock SQL 一致）
 DEFAULT_IMAGE_BASES = (
+    "https://ierpapi.ifurniture.co.nz/",
     "https://ifurniture.co.nz/",
     "https://www.ifurniture.co.nz/",
-    "https://ierpapi.ifurniture.co.nz/",
 )
 TIMEOUT = 12
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DisplayGallery/1.0)"}
