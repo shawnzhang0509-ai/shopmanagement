@@ -20,6 +20,7 @@ from display_lookup import (
     GRABBER_CONFIG,
     build_runtime_config,
     grab_and_save,
+    last_sql_file,
     load_grabber_config,
     resolve_database_url,
     save_grabber_config,
@@ -255,6 +256,16 @@ class DisplayGrabberApp:
                 raise InterruptedError("用户停止")
 
             items, excel_path = grab_and_save(cfg)
+            used_sql = last_sql_file() or runtime["sql_file"]
+            if used_sql != runtime["sql_file"]:
+                self.log(f"已自动改用: {used_sql}")
+            else:
+                self.log(f"使用 SQL: {os.path.basename(used_sql)}")
+            with_img = sum(1 for it in items if getattr(it, "image_url", ""))
+            if with_img:
+                self.log(f"其中 {with_img}/{len(items)} 款有 ImageUrl")
+            else:
+                self.log("警告: Excel 里没有 ImageUrl，画廊无法显示图片。请在 SSMS 运行 sql/discover_schema.sql 查列名。")
             self.root.after(0, lambda: self.progress.configure(value=90))
             stats = shop_stats(items, [])
             total = stats.get("all", {}).get("total", len(items))
