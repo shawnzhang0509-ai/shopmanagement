@@ -22,6 +22,7 @@ from display_lookup import (
     SHOPS,
     blacklist_files_revision,
     blacklist_status,
+    display_items_including_blacklist,
     filter_gallery_items,
     filter_items,
     group_by_family,
