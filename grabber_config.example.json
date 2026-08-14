@@ -6,7 +6,7 @@
   "sql_file": "sql/display.sql",
   "output_excel": "data/display.xlsx",
   "output_json": "data/display_cache.json",
-  "blacklist_file": "data/display_blacklist.xlsx",
+  "blacklist_file": "data/display_blacklist.csv",
   "image_base_url": "https://ierpapi.ifurniture.co.nz/",
   "schedule_interval": 30,
   "schedule_unit": "分钟",

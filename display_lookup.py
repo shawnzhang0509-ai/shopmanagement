@@ -22,7 +22,8 @@ DEFAULT_EXCEL = os.path.join(SCRIPT_DIR, "data", "display.xlsx")
 LEGACY_EXCEL = os.path.join(SCRIPT_DIR, "display.xlsx")
 DEFAULT_SQL = os.path.join(SCRIPT_DIR, "sql", "display.sql")
 DEFAULT_BLACKLIST = os.path.join(SCRIPT_DIR, "data", "display_blacklist.xlsx")
-DEFAULT_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.example.csv")
+DEFAULT_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.csv")
+EXAMPLE_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.example.csv")
 
 # 门店：按 Stock Details 里的 location 名称匹配
 SHOPS: list[dict[str, Any]] = [
@@ -413,7 +414,12 @@ def resolve_blacklist_paths(cfg: dict | None = None) -> list[str]:
     paths: list[str] = []
     if cfg.get("blacklist_file"):
         paths.append(_resolve_path(cfg["blacklist_file"]))
-    paths.extend([DEFAULT_BLACKLIST, os.path.join(SCRIPT_DIR, "display_blacklist.xlsx")])
+    paths.extend([
+        DEFAULT_BLACKLIST,
+        DEFAULT_BLACKLIST_CSV,
+        EXAMPLE_BLACKLIST_CSV,
+        os.path.join(SCRIPT_DIR, "display_blacklist.xlsx"),
+    ])
     seen: set[str] = set()
     out: list[str] = []
     for p in paths:
@@ -421,6 +427,15 @@ def resolve_blacklist_paths(cfg: dict | None = None) -> list[str]:
             seen.add(p)
             out.append(p)
     return out
+
+
+def blacklist_files_revision() -> str:
+    """黑名单文件修改时间（画廊布局缓存用，改 CSV 后自动刷新）。"""
+    parts: list[str] = []
+    for path in resolve_blacklist_paths():
+        if os.path.isfile(path):
+            parts.append(f"{os.path.basename(path)}:{int(os.path.getmtime(path))}")
+    return "|".join(parts)
 
 
 def _blacklist_add_sku(blocked: set[str], value) -> None:
