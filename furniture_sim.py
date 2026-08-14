@@ -191,6 +191,8 @@ class GalleryView:
         self.scroll_y = 0
         self.back_btn = Button((0, 0, 0, 0), "← 返回绘制", "gallery_back")
         self.refresh_btn = Button((0, 0, 0, 0), "刷新", "display_refresh")
+        self.copy_btn = Button((0, 0, 0, 0), "复制", "gallery_copy")
+        self.paste_btn = Button((0, 0, 0, 0), "粘贴", "gallery_paste")
         self._layout = []
         self._cards = []  # (rect, kind, data) kind: template|display
         self._shop_tabs: list[tuple[pygame.Rect, str]] = []
@@ -376,6 +378,11 @@ class GalleryView:
             return "back"
         if self.refresh_btn.contains((mx, my)):
             return "refresh"
+        if gallery_mode == "display":
+            if self.copy_btn.contains((mx, my)):
+                return "gallery_copy"
+            if self.paste_btn.contains((mx, my)):
+                return "gallery_paste"
         for rect, mode in self._mode_tabs:
             if rect.collidepoint(mx, my):
                 return f"mode:{mode}"
@@ -422,6 +429,11 @@ class GalleryView:
 
         self.refresh_btn.rect = pygame.Rect(sw - 248, 10, 72, 28)
         self.refresh_btn.draw(surface, mouse_pos, on_dark=True)
+        if gallery_mode == "display":
+            self.paste_btn.rect = pygame.Rect(sw - 328, 10, 56, 28)
+            self.copy_btn.rect = pygame.Rect(sw - 392, 10, 56, 28)
+            self.paste_btn.draw(surface, mouse_pos, on_dark=True)
+            self.copy_btn.draw(surface, mouse_pos, on_dark=True)
         self.back_btn.rect = pygame.Rect(sw - 148, 10, 128, 28)
         self.back_btn.draw(surface, mouse_pos, on_dark=True)
 
@@ -454,7 +466,7 @@ class GalleryView:
         title = "Display 大库" if gallery_mode == "display" else "已测绘模板"
         if gallery_mode == "display":
             surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
-            surface.blit(FONT_MARK.render("单击选中 · 双击测绘 · Ctrl+C/V 复制粘贴模型", True, C_SIDEBAR_MUTED), (168, 62))
+            surface.blit(FONT_MARK.render("单击选中 · 复制/粘贴按钮或 Ctrl+C/V", True, C_SIDEBAR_MUTED), (168, 62))
 
         self._draw_header_tabs(surface, sw, templates)
 
@@ -1599,14 +1611,20 @@ def handle_global_clipboard_shortcuts(event):
     """Template-level Ctrl+C/V when input fields are not focused."""
     if event.type != pygame.KEYDOWN:
         return False
-    if input_name.active or input_family.active or input_search.active:
-        return False
 
+    # 大库里优先处理模型复制粘贴（即使搜索框曾获得焦点）
     if app_screen == "gallery" and gallery_mode == "display":
         if ui.is_ctrl_key(event, "c"):
+            if input_search.active:
+                input_search.deactivate()
             return gallery_copy_model()
         if ui.is_ctrl_key(event, "v"):
+            if input_search.active:
+                input_search.deactivate()
             return gallery_paste_model()
+
+    if input_name.active or input_family.active or input_search.active:
+        return False
 
     if ui.is_ctrl_key(event, "c"):
         copy_template_to_clipboard()
@@ -1753,6 +1771,12 @@ def handle_gallery_click(mx, my):
     if hit == "refresh":
         refresh_display_data(prefer_db=True)
         return True
+    if hit == "gallery_copy":
+        gallery_copy_model()
+        return True
+    if hit == "gallery_paste":
+        gallery_paste_model()
+        return True
     if isinstance(hit, str) and hit.startswith("mode:"):
         gallery_mode = hit.split(":", 1)[1]
         gallery_view.scroll_y = 0
@@ -1768,6 +1792,7 @@ def handle_gallery_click(mx, my):
         item = _find_display_item(key)
         if not item:
             return True
+        blur_inputs()
         now = pygame.time.get_ticks()
         is_double = key == _last_gallery_display_pick["key"] and now - _last_gallery_display_pick["time"] < 400
         _last_gallery_display_pick = {"key": key, "time": now}
@@ -1781,9 +1806,9 @@ def handle_gallery_click(mx, my):
         else:
             selected_display_key = key
             if tpl_idx >= 0:
-                toast.show(f"已选中: {item.product_name}（已测绘 · 双击编辑 · Ctrl+C 复制）")
+                toast.show(f"已选中: {item.product_name}（已测绘 · 点「复制」或 Ctrl+C）")
             else:
-                toast.show(f"已选中: {item.product_name}（待测绘 · 双击开始 · Ctrl+V 粘贴）")
+                toast.show(f"已选中: {item.product_name}（待测绘 · 先复制已测绘款，再点「粘贴」）")
         return True
     if hit is not None and isinstance(hit, int):
         now = pygame.time.get_ticks()
