@@ -40,7 +40,18 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
     "warehouse_name": ("warehouse_name", "warehousename", "warehouse name", "warehouse"),
     "product_code": ("product_code", "productcode", "code", "sku", "product code", "item code"),
     "product_name": ("product_name", "productname", "product name", "title", "description"),
-    "product_family": ("product_family", "productfamily", "family", "product family", "range", "collection"),
+    "product_family": (
+        "product_family",
+        "productfamily",
+        "family",
+        "product family",
+        "family name",
+        "familyname",
+        "range",
+        "collection",
+        "产品系列",
+        "系列",
+    ),
     "sub_product_family": (
         "sub_product_family",
         "subproductfamily",
@@ -57,6 +68,7 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
 _display_cache: list["DisplayItem"] | None = None
 _last_load_error: str | None = None
 _last_load_source: str | None = None
+_last_family_column: str | None = None
 
 
 @dataclass
@@ -124,6 +136,68 @@ def _canonicalize_row(raw: dict) -> dict:
     return out
 
 
+def _header_is_sub_family(header: str) -> bool:
+    h = _normalize_header(header)
+    compact = h.replace(" ", "")
+    return h.startswith("sub") or " sub" in f" {h} " or compact.startswith("subproduct")
+
+
+def _header_is_product_family(header: str) -> bool:
+    h = _normalize_header(header)
+    if _header_is_sub_family(h):
+        return False
+    if h in _COL_ALIASES["product_family"]:
+        return True
+    compact = h.replace(" ", "")
+    if compact in ("productfamily", "familyname", "family"):
+        return True
+    if "系列" in h:
+        return True
+    if h.endswith("family") and "name" not in h.replace("family", ""):
+        return True
+    return False
+
+
+def _infer_family_column_indices(headers: list[str]) -> tuple[int | None, int | None]:
+    family_idx = sub_idx = None
+    for i, h in enumerate(headers):
+        if sub_idx is None and _header_is_sub_family(h):
+            sub_idx = i
+    for i, h in enumerate(headers):
+        if family_idx is None and _header_is_product_family(h):
+            family_idx = i
+    return family_idx, sub_idx
+
+
+def _resolve_family_name(family: str, name: str, code: str) -> str:
+    """只用 Excel/SQL 的 ProductFamily；缺失时标为未分类，不用 SKU/产品名猜测。"""
+    if family:
+        return family
+    return "未分类"
+
+
+def _resolve_sub_family_name(sub_family: str, name: str, code: str) -> str:
+    if sub_family:
+        return sub_family
+    return name or code or "未分类"
+
+
+def _family_data_score(items: list[DisplayItem]) -> int:
+    """优先选用真正带有 ProductFamily 数据的 Excel。"""
+    score = 0
+    for it in items:
+        fam = it.product_family or ""
+        if not fam or fam == "未分类":
+            continue
+        if fam == it.product_code:
+            continue
+        first = (it.product_name or "").split(" ")[0]
+        if fam == first and re.match(r"^\d{3}-\d{3}$", fam):
+            continue
+        score += 1
+    return score
+
+
 def _detect_format(fields: dict) -> str | None:
     keys = set(fields)
     has_product = "product_code" in keys or "product_name" in keys
@@ -150,11 +224,11 @@ def _resolve_columns(headers: list[str]) -> tuple[str, dict[str, int]] | None:
             if h in aliases:
                 mapping[field] = i
                 break
-    # 宽松匹配：列名含 family 时也能识别（如 MainProductFamily）
+    # 宽松匹配 family 列
     for i, h in enumerate(headers):
-        if "sub_product_family" not in mapping and "sub" in h and "family" in h:
+        if "sub_product_family" not in mapping and _header_is_sub_family(h):
             mapping["sub_product_family"] = i
-        elif "product_family" not in mapping and "family" in h and "sub" not in h:
+        elif "product_family" not in mapping and _header_is_product_family(h):
             mapping["product_family"] = i
     return fmt, mapping
 
@@ -220,10 +294,8 @@ def _row_to_item(row: dict) -> DisplayItem | None:
     stock = _cell_value(row.get("stock_details") or row.get("stock") or row.get("Stock Details"))
     if not name and not code:
         return None
-    if not family:
-        family = name.split(" ")[0] if name else code
-    if not sub_family:
-        sub_family = name or code
+    family = _resolve_family_name(family, name, code)
+    sub_family = _resolve_sub_family_name(sub_family, name, code)
     displays = row.get("displays")
     if isinstance(displays, list) and displays:
         slots = [
@@ -261,25 +333,19 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
         family = _cell_value(row.get("product_family"))
         sub_family = _cell_value(row.get("sub_product_family"))
         if key not in groups:
-            if not family:
-                family = (name or code).split(" ")[0]
-            if not sub_family:
-                sub_family = name or code
             groups[key] = {
                 "product_code": code or name,
                 "product_name": name or code,
-                "product_family": family,
-                "sub_product_family": sub_family,
+                "product_family": _resolve_family_name(family, name, code),
+                "sub_product_family": _resolve_sub_family_name(sub_family, name, code),
                 "slots": {},
             }
         else:
-            if family and not groups[key]["product_family"]:
-                groups[key]["product_family"] = family
-            if sub_family and groups[key]["sub_product_family"] in (
-                groups[key]["product_name"],
-                groups[key]["product_code"],
-                "",
-            ):
+            if family:
+                groups[key]["product_family"] = _resolve_family_name(
+                    family, groups[key]["product_name"], groups[key]["product_code"]
+                )
+            if sub_family:
                 groups[key]["sub_product_family"] = sub_family
         sid = shop_id_for_location(warehouse)
         slot_key = (sid, warehouse)
@@ -416,7 +482,21 @@ def filter_blacklisted(items: list[DisplayItem], cfg: dict | None = None) -> lis
     return [it for it in items if not is_blacklisted(it, blocked)]
 
 
+def _apply_family_fields(
+    row: dict,
+    values: tuple,
+    headers: list[str],
+    family_idx: int | None,
+    sub_idx: int | None,
+) -> None:
+    if family_idx is not None and family_idx < len(values):
+        row["product_family"] = _cell_value(values[family_idx])
+    if sub_idx is not None and sub_idx < len(values):
+        row["sub_product_family"] = _cell_value(values[sub_idx])
+
+
 def _load_excel_rows(path: str) -> tuple[str, list[dict]]:
+    global _last_family_column
     if not os.path.isfile(path):
         return "warehouse", []
 
@@ -425,20 +505,26 @@ def _load_excel_rows(path: str) -> tuple[str, list[dict]]:
 
         df = pd.read_excel(path)
         df.columns = [_normalize_header(c) for c in df.columns]
-        resolved = _resolve_columns(list(df.columns))
+        headers = list(df.columns)
+        resolved = _resolve_columns(headers)
         if not resolved:
             raise ValueError(
                 f"{os.path.basename(path)} 列不匹配。需要 WarehouseName+Sku+ProductName+DisplayQty（可选 ProductFamily/SubProductFamily），"
                 "或 stock_details + product_name"
             )
         fmt, colmap = resolved
-        col_names = list(df.columns)
+        family_idx, sub_idx = _infer_family_column_indices(headers)
+        if family_idx is not None:
+            _last_family_column = headers[family_idx]
+        elif "product_family" in colmap:
+            _last_family_column = headers[colmap["product_family"]]
         rows: list[dict] = []
         for _, series in df.iterrows():
             row = {
                 field: _cell_value(series.iloc[idx] if idx < len(series) else None)
                 for field, idx in colmap.items()
             }
+            _apply_family_fields(row, tuple(series.tolist()), headers, family_idx, sub_idx)
             rows.append(row)
         return fmt, rows
     except ImportError:
@@ -460,33 +546,56 @@ def _load_excel_rows(path: str) -> tuple[str, list[dict]]:
             "或 stock_details + product_name"
         )
     fmt, colmap = resolved
+    family_idx, sub_idx = _infer_family_column_indices(headers)
+    if family_idx is not None:
+        _last_family_column = headers[family_idx]
+    elif "product_family" in colmap:
+        _last_family_column = headers[colmap["product_family"]]
     rows: list[dict] = []
     for line in raw[1:]:
         if not line:
             continue
         row = {field: _cell_str(line, idx) for field, idx in colmap.items()}
+        _apply_family_fields(row, line, headers, family_idx, sub_idx)
         rows.append(row)
     return fmt, rows
 
 
 def load_from_excel(path: str | None = None) -> list[DisplayItem]:
-    global _last_load_error, _last_load_source
+    global _last_load_error, _last_load_source, _last_family_column
     candidates = [path] if path else resolve_display_excel_paths()
     last_exc = None
+    best_items: list[DisplayItem] = []
+    best_score = -1
+    best_source: str | None = None
     for candidate in candidates:
         if not candidate or not os.path.isfile(candidate):
             continue
         try:
             fmt, rows = _load_excel_rows(candidate)
             items = _rows_to_items(rows, fmt)
-            if items:
-                _last_load_error = None
-                _last_load_source = os.path.basename(candidate)
-                return items
-            _last_load_error = f"{os.path.basename(candidate)} 中没有 Display 数据"
+            if not items:
+                _last_load_error = f"{os.path.basename(candidate)} 中没有 Display 数据"
+                continue
+            score = _family_data_score(items)
+            if score > best_score:
+                best_score = score
+                best_items = items
+                best_source = candidate
         except Exception as exc:
             last_exc = exc
             _last_load_error = f"读取 {os.path.basename(candidate)} 失败: {exc}"
+    if best_items and best_source:
+        _last_load_source = os.path.basename(best_source)
+        if best_score <= 0:
+            col = _last_family_column or "ProductFamily"
+            _last_load_error = (
+                f"未读到有效的 {col} 数据，界面将显示「未分类」。"
+                "请确认 Excel 有 ProductFamily 列且已填写，或重新 grab_display.bat 抓取。"
+            )
+        else:
+            _last_load_error = None
+        return best_items
     if not candidates or not any(os.path.isfile(p) for p in candidates if p):
         _last_load_error = "未找到 display.xlsx，请先运行 grab_display.bat 抓取数据"
     elif last_exc:
@@ -855,6 +964,10 @@ def last_load_error() -> str | None:
 
 def last_load_source() -> str | None:
     return _last_load_source
+
+
+def last_family_column() -> str | None:
+    return _last_family_column
 
 
 def filter_items(items: list[DisplayItem], shop_id: str, query: str = "") -> list[DisplayItem]:

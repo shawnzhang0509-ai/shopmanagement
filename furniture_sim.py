@@ -24,6 +24,7 @@ from display_lookup import (
     group_by_family_hierarchy,
     last_load_error,
     last_load_source,
+    last_family_column,
     load_display_items,
     match_template_index,
     reload_display_items,
@@ -423,7 +424,14 @@ class GalleryView:
             surface.blit(banner, (self.PAD, sh - 28))
         elif gallery_mode == "display" and display_items and last_load_source():
             src = last_load_source()
-            surface.blit(FONT_MARK.render(f"数据源: {src}", True, C_SIDEBAR_MUTED), (self.PAD, sh - 22))
+            fam_col = last_family_column()
+            hint = f"数据源: {src}"
+            if fam_col:
+                hint += f" · Family列: {fam_col}"
+            err = last_load_error()
+            if err and display_items and "未读到有效" in (err or ""):
+                hint += f" · {err[:70]}"
+            surface.blit(FONT_MARK.render(hint, True, C_SIDEBAR_MUTED), (self.PAD, sh - 22))
 
 
 gallery_view = GalleryView()
