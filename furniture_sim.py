@@ -258,11 +258,8 @@ class GalleryView:
         return track, thumb, max_scroll
 
     def scroll_to_thumb_center(self, my: int, screen_h: int, content_h: int) -> None:
-        track, thumb, max_scroll = self.scrollbar_geometry(0, screen_h, content_h)
-        if not track or max_scroll <= 0:
-            return
-        _, thumb, max_scroll = self.scrollbar_geometry(self._last_sw, screen_h, content_h)
-        if not thumb:
+        track, thumb, max_scroll = self.scrollbar_geometry(self._last_sw, screen_h, content_h)
+        if not track or not thumb or max_scroll <= 0:
             return
         rel = (my - self._scroll_drag_offset - track.y) / max(1, track.height - thumb.height)
         rel = max(0.0, min(1.0, rel))
@@ -1739,6 +1736,7 @@ def main():
 
             elif event.type == pygame.VIDEORESIZE and not is_fullscreen:
                 screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
+                gallery_view.invalidate_layout()
 
             elif app_screen == "gallery":
                 sh = screen.get_height()
