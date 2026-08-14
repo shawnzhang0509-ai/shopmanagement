@@ -77,6 +77,7 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 _display_cache: list["DisplayItem"] | None = None
+_display_items_all: list["DisplayItem"] | None = None
 _last_load_error: str | None = None
 _last_load_source: str | None = None
 _last_family_column: str | None = None
@@ -382,7 +383,7 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
     return items
 
 
-def _rows_to_items(rows: list[dict], fmt: str | None = None) -> list[DisplayItem]:
+def _rows_to_items(rows: list[dict], fmt: str | None = None, *, apply_blacklist: bool = True) -> list[DisplayItem]:
     if not rows:
         return []
     canonical = [_canonicalize_row(r) for r in rows]
@@ -396,7 +397,9 @@ def _rows_to_items(rows: list[dict], fmt: str | None = None) -> list[DisplayItem
             item = _row_to_item(row)
             if item:
                 items.append(item)
-    return filter_blacklisted(items)
+    if apply_blacklist:
+        return filter_blacklisted(items)
+    return items
 
 
 _BLACKLIST_ALIASES = {
@@ -591,7 +594,10 @@ def load_from_excel(path: str | None = None) -> list[DisplayItem]:
             continue
         try:
             fmt, rows = _load_excel_rows(candidate)
-            items = _rows_to_items(rows, fmt)
+            items_all = _rows_to_items(rows, fmt, apply_blacklist=False)
+            global _display_items_all
+            _display_items_all = items_all
+            items = filter_blacklisted(items_all)
             if not items:
                 _last_load_error = f"{os.path.basename(candidate)} 中没有 Display 数据"
                 continue
@@ -928,7 +934,10 @@ def grab_and_save(cfg: dict | None = None) -> tuple[list["DisplayItem"], str]:
     rows = _fetch_raw_rows(runtime)
     excel_path = runtime["output_excel"]
     export_rows_to_excel(rows, excel_path)
-    items = _rows_to_items(rows, "warehouse")
+    items_all = _rows_to_items(rows, "warehouse", apply_blacklist=False)
+    global _display_items_all
+    _display_items_all = items_all
+    items = filter_blacklisted(items_all)
     save_cache(items, runtime["output_json"])
     _display_cache = items
     _last_load_error = None
@@ -1038,6 +1047,57 @@ def last_load_source() -> str | None:
 
 def last_family_column() -> str | None:
     return _last_family_column
+
+
+def filter_gallery_items(
+    items: list[DisplayItem],
+    shop_id: str,
+    query: str,
+    templates: list[dict],
+    *,
+    survey_filter: str = "all",
+    blacklist_mode: str = "exclude",
+) -> list[DisplayItem]:
+    """画廊筛选：门店 / 搜索 / 已测绘 / 黑名单模式。"""
+    blocked = load_blacklist()
+    q = _normalize_key(query)
+    out: list[DisplayItem] = []
+    for it in items:
+        bl = is_blacklisted(it, blocked)
+        if blacklist_mode == "exclude" and bl:
+            continue
+        if blacklist_mode == "only" and not bl:
+            continue
+        if shop_id != "all" and it.display_qty_for_shop(shop_id) <= 0:
+            continue
+        if q:
+            blob = " ".join([
+                it.product_code,
+                it.product_name,
+                it.product_family,
+                it.sub_product_family,
+            ]).lower()
+            if q not in blob:
+                continue
+        modeled = match_template_index(it, templates) >= 0
+        if survey_filter == "modeled" and not modeled:
+            continue
+        if survey_filter == "unmodeled" and modeled:
+            continue
+        out.append(it)
+    out.sort(key=lambda x: (
+        x.product_family.lower(),
+        x.sub_product_family.lower(),
+        x.product_name.lower(),
+    ))
+    return out
+
+
+def display_items_including_blacklist() -> list[DisplayItem]:
+    """含黑名单的完整 Display 列表（画廊「全部/仅黑名单」用）。"""
+    if _display_items_all is not None:
+        return _display_items_all
+    return _display_cache or []
 
 
 def filter_items(items: list[DisplayItem], shop_id: str, query: str = "") -> list[DisplayItem]:
