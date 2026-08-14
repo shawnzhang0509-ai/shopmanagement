@@ -184,8 +184,8 @@ class GalleryView:
     FAMILY_H = 40
     SUB_FAMILY_H = 34
     CARD_W = 108
-    CARD_H = 132
-    IMG_SIZE = 96
+    CARD_H = 142
+    IMG_SIZE = 88
     CARD_GAP = 14
     PAD = 28
     FAMILY_GAP = 24
