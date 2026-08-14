@@ -998,7 +998,7 @@ def group_by_family(items: list[DisplayItem]) -> list[tuple[str, list[DisplayIte
     groups: dict[str, list[DisplayItem]] = {}
     for it in items:
         groups.setdefault(it.product_family or "未分类", []).append(it)
-    return sorted(groups.items(), key=lambda x: x[0].lower())
+    return sorted(groups.items(), key=lambda x: (-len(x[1]), x[0].lower()))
 
 
 def group_by_family_hierarchy(
