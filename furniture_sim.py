@@ -20,7 +20,7 @@ except ModuleNotFoundError:
 from roi_lookup import lookup_roi, reload_roi_map
 from display_lookup import (
     SHOPS,
-    display_items_including_blacklist,
+    blacklist_files_revision,
     filter_gallery_items,
     filter_items,
     group_by_family,
@@ -241,6 +241,7 @@ class GalleryView:
             display_shop,
             display_survey_filter,
             display_blacklist_mode,
+            blacklist_files_revision(),
             input_search.get_text(),
             len(display_items),
             len(templates),
