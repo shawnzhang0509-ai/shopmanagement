@@ -3,4 +3,5 @@ __pycache__/
 grabber_config.json
 data/*.xlsx
 data/*.json
+data/image_cache/
 !data/.gitkeep

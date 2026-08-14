@@ -31,6 +31,7 @@ from display_lookup import (
     shop_stats,
     shops_for_display_tabs,
 )
+from product_images import prefetch_urls, request_thumbnail
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
@@ -181,6 +182,8 @@ class GalleryView:
     CARD_GAP = 14
     PAD = 28
     FAMILY_GAP = 24
+    SCROLLBAR_W = 12
+    SCROLLBAR_MARGIN = 6
 
     def __init__(self):
         self.scroll_y = 0
@@ -190,6 +193,14 @@ class GalleryView:
         self._cards = []  # (rect, kind, data) kind: template|display
         self._shop_tabs: list[tuple[pygame.Rect, str]] = []
         self._mode_tabs: list[tuple[pygame.Rect, str]] = []
+        self._layout_key: tuple | None = None
+        self._content_h = 0
+        self._scroll_drag = False
+        self._scroll_drag_offset = 0
+        self._last_sw = 0
+
+    def _filtered_displays(self):
+        return filter_items(display_items, display_shop, input_search.get_text())
 
     def group_templates(self, templates):
         query = input_search.get_text().lower().strip()
@@ -202,8 +213,104 @@ class GalleryView:
             groups.setdefault(family, []).append((i, tpl))
         return sorted(groups.items(), key=lambda item: item[0].lower())
 
-    def _filtered_displays(self):
-        return filter_items(display_items, display_shop, input_search.get_text())
+    def invalidate_layout(self) -> None:
+        self._layout_key = None
+
+    def _layout_cache_key(self, templates, screen_w: int) -> tuple:
+        return (
+            screen_w,
+            gallery_mode,
+            display_shop,
+            input_search.get_text(),
+            len(display_items),
+            len(templates),
+            id(display_items),
+        )
+
+    def _ensure_layout(self, templates, screen_w: int) -> int:
+        key = self._layout_cache_key(templates, screen_w)
+        if key != self._layout_key or screen_w != self._last_sw:
+            self._content_h = self.build_layout(templates, screen_w)
+            self._layout_key = key
+            self._last_sw = screen_w
+        return self._content_h
+
+    def _view_height(self, screen_h: int) -> int:
+        return screen_h - self.TOP_H
+
+    def scrollbar_geometry(
+        self, screen_w: int, screen_h: int, content_h: int
+    ) -> tuple[pygame.Rect | None, pygame.Rect | None, int]:
+        view_h = self._view_height(screen_h)
+        if content_h <= view_h:
+            return None, None, 0
+        track = pygame.Rect(
+            screen_w - self.SCROLLBAR_W - self.SCROLLBAR_MARGIN,
+            self.TOP_H + self.SCROLLBAR_MARGIN,
+            self.SCROLLBAR_W,
+            view_h - self.SCROLLBAR_MARGIN * 2,
+        )
+        thumb_h = max(40, int(track.height * view_h / content_h))
+        max_scroll = max(0, content_h - view_h)
+        ratio = self.scroll_y / max_scroll if max_scroll else 0
+        thumb_y = track.y + int((track.height - thumb_h) * ratio)
+        thumb = pygame.Rect(track.x, thumb_y, track.width, thumb_h)
+        return track, thumb, max_scroll
+
+    def scroll_to_thumb_center(self, my: int, screen_h: int, content_h: int) -> None:
+        track, thumb, max_scroll = self.scrollbar_geometry(0, screen_h, content_h)
+        if not track or max_scroll <= 0:
+            return
+        _, thumb, max_scroll = self.scrollbar_geometry(self._last_sw, screen_h, content_h)
+        if not thumb:
+            return
+        rel = (my - self._scroll_drag_offset - track.y) / max(1, track.height - thumb.height)
+        rel = max(0.0, min(1.0, rel))
+        self.scroll_y = int(rel * max_scroll)
+
+    def begin_scroll_drag(self, mx: int, my: int, screen_h: int) -> bool:
+        track, thumb, max_scroll = self.scrollbar_geometry(self._last_sw, screen_h, self._content_h)
+        if not track or not thumb:
+            return False
+        if thumb.collidepoint(mx, my):
+            self._scroll_drag = True
+            self._scroll_drag_offset = my - thumb.centery
+            return True
+        if track.collidepoint(mx, my):
+            self._scroll_drag = True
+            self._scroll_drag_offset = thumb.height // 2
+            self.scroll_to_thumb_center(my, screen_h, self._content_h)
+            return True
+        return False
+
+    def update_scroll_drag(self, my: int, screen_h: int) -> None:
+        if self._scroll_drag:
+            self.scroll_to_thumb_center(my, screen_h, self._content_h)
+
+    def end_scroll_drag(self) -> None:
+        self._scroll_drag = False
+
+    def draw_scrollbar(self, surface, screen_w: int, screen_h: int, content_h: int) -> None:
+        track, thumb, _ = self.scrollbar_geometry(screen_w, screen_h, content_h)
+        if not track or not thumb:
+            return
+        pygame.draw.rect(surface, (220, 224, 230), track, border_radius=6)
+        pygame.draw.rect(surface, (140, 148, 160), thumb, border_radius=6)
+
+    def _prefetch_visible_images(self, screen_h: int) -> None:
+        if gallery_mode != "display":
+            return
+        urls: list[str] = []
+        for item in self._layout:
+            if item[0] != "card_disp":
+                continue
+            _, rect, disp_item, _ = item
+            sy = self.TOP_H + rect.y - self.scroll_y
+            if sy > screen_h or sy + self.CARD_H < self.TOP_H:
+                continue
+            if getattr(disp_item, "image_url", ""):
+                urls.append(disp_item.image_url)
+        prefetch_urls(urls, limit=32)
 
     def build_layout_templates(self, templates, screen_w: int):
         self._layout = []
@@ -348,14 +455,15 @@ class GalleryView:
         title = "Display 大库" if gallery_mode == "display" else "已测绘模板"
         if gallery_mode == "display":
             surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
-            surface.blit(FONT_MARK.render("按 Product Family 分组 · 双击测绘/编辑 · Esc 返回", True, C_SIDEBAR_MUTED), (168, 62))
+            surface.blit(FONT_MARK.render("按 Product Family 分组 · 双击测绘/编辑 · 右侧滑块滚动", True, C_SIDEBAR_MUTED), (168, 62))
 
         self._draw_header_tabs(surface, sw, templates)
 
-        content_h = self.build_layout(templates, sw)
+        content_h = self._ensure_layout(templates, sw)
         self.clamp_scroll(content_h, sh)
+        self._prefetch_visible_images(sh)
 
-        viewport = pygame.Rect(0, self.TOP_H, sw, sh - self.TOP_H)
+        viewport = pygame.Rect(0, self.TOP_H, sw - self.SCROLLBAR_W - 4, sh - self.TOP_H)
         clip = surface.get_clip()
         surface.set_clip(viewport)
 
@@ -395,6 +503,8 @@ class GalleryView:
 
         surface.set_clip(clip)
 
+        self.draw_scrollbar(surface, sw, sh, content_h)
+
         err = last_load_error()
         if gallery_mode == "display" and err and not display_items:
             banner = FONT_SMALL.render(f"⚠ {err[:90]}", True, (200, 80, 60))
@@ -416,6 +526,12 @@ gallery_view = GalleryView()
 
 def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
     has_model = tpl is not None
+    inner = rect.inflate(-10, -36)
+    inner.height = max(48, inner.height)
+    thumb_surf = None
+    if not has_model and getattr(item, "image_url", ""):
+        thumb_surf = request_thumbnail(item.image_url)
+
     if has_model:
         draw_template_card(surface, tpl, rect, selected)
         pygame.draw.circle(surface, C_SUCCESS, (rect.right - 14, rect.top + 14), 7)
@@ -425,10 +541,14 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
         border = (190, 198, 208) if not selected else C_ACCENT
         pygame.draw.rect(surface, bg, rect, border_radius=8)
         pygame.draw.rect(surface, border, rect, 2 if selected else 1, border_radius=8)
-        inner = rect.inflate(-28, -40)
-        pygame.draw.rect(surface, (210, 218, 226), inner, 2, border_radius=4)
-        wait = FONT_MARK.render("待测绘", True, C_MUTED)
-        surface.blit(wait, wait.get_rect(center=inner.center))
+        if thumb_surf is not None:
+            scaled = pygame.transform.smoothscale(thumb_surf, (inner.width, inner.height))
+            surface.blit(scaled, inner.topleft)
+        else:
+            pygame.draw.rect(surface, (210, 218, 226), inner, 2, border_radius=4)
+            label = "加载中…" if getattr(item, "image_url", "") else "待测绘"
+            wait = FONT_MARK.render(label, True, C_MUTED)
+            surface.blit(wait, wait.get_rect(center=inner.center))
 
     name = item.product_name
     if len(name) > 16:
@@ -567,6 +687,7 @@ def open_gallery(reset_scroll: bool = True):
     app_screen = "gallery"
     if reset_scroll:
         gallery_view.scroll_y = 0
+    gallery_view.invalidate_layout()
     return_to_gallery_after_edit = False
     _gallery_snapshot = None
     display_items = load_display_items()
@@ -596,6 +717,7 @@ def return_to_gallery_view():
     _gallery_snapshot = None
     app_screen = "gallery"
     display_items = reload_display_items(prefer_db=False)
+    gallery_view.invalidate_layout()
     toast.show("已返回 Display 大库")
 
 
@@ -1505,12 +1627,17 @@ def refresh_display_data(prefer_db: bool = True) -> None:
     try:
         if prefer_db:
             from display_lookup import grab_and_save
+            from product_images import clear_image_cache
+
             display_items, excel_path = grab_and_save()
+            clear_image_cache()
+            gallery_view.invalidate_layout()
             toast.show(f"已抓取 {len(display_items)} 款 → {os.path.basename(excel_path)}")
             return
     except Exception:
         pass
     display_items = reload_display_items(prefer_db=False)
+    gallery_view.invalidate_layout()
     src = last_load_source() or "display.xlsx"
     if display_items:
         toast.show(f"已刷新 {len(display_items)} 款（来自 {src}）")
@@ -1530,10 +1657,12 @@ def handle_gallery_click(mx, my):
     if isinstance(hit, str) and hit.startswith("mode:"):
         gallery_mode = hit.split(":", 1)[1]
         gallery_view.scroll_y = 0
+        gallery_view.invalidate_layout()
         return True
     if isinstance(hit, str) and hit.startswith("shop:"):
         display_shop = hit.split(":", 1)[1]
         gallery_view.scroll_y = 0
+        gallery_view.invalidate_layout()
         return True
     if isinstance(hit, tuple) and hit[0] == "display":
         key = hit[1]
@@ -1612,11 +1741,20 @@ def main():
                 screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
 
             elif app_screen == "gallery":
+                sh = screen.get_height()
                 if event.type == pygame.MOUSEWHEEL:
                     gallery_view.scroll(-event.y * 48)
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    _gallery_click_start = event.pos
+                    mx, my = event.pos
+                    if gallery_view.begin_scroll_drag(mx, my, sh):
+                        _gallery_click_start = None
+                    else:
+                        _gallery_click_start = event.pos
+                elif event.type == pygame.MOUSEMOTION:
+                    if gallery_view._scroll_drag:
+                        gallery_view.update_scroll_drag(event.pos[1], sh)
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    gallery_view.end_scroll_drag()
                     if _gallery_click_start is not None:
                         gx, gy = _gallery_click_start
                         mx, my = event.pos
@@ -1643,6 +1781,7 @@ def main():
                         input_search.handle_event(event)
                         if event.type == pygame.TEXTINPUT:
                             gallery_view.scroll_y = 0
+                            gallery_view.invalidate_layout()
 
             else:
                 if event.type == pygame.MOUSEWHEEL:

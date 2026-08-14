@@ -62,6 +62,17 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
         "line",
     ),
     "display_qty": ("display_qty", "displayqty", "display qty", "quantity", "qty"),
+    "image_url": (
+        "image_url",
+        "imageurl",
+        "image url",
+        "imagepath",
+        "image path",
+        "image",
+        "picture",
+        "photo",
+        "thumbnail",
+    ),
     "stock_details": ("stock_details", "stockdetails", "stock details", "stock", "display stock", "inventory"),
 }
 
@@ -85,6 +96,7 @@ class DisplayItem:
     product_name: str
     product_family: str
     sub_product_family: str = ""
+    image_url: str = ""
     stock_details: str = ""
     displays: list[DisplaySlot] = field(default_factory=list)
 
@@ -291,6 +303,7 @@ def _row_to_item(row: dict) -> DisplayItem | None:
     name = _cell_value(row.get("product_name") or row.get("name") or row.get("title"))
     family = _cell_value(row.get("product_family") or row.get("family"))
     sub_family = _cell_value(row.get("sub_product_family") or row.get("subfamily"))
+    image_url = _cell_value(row.get("image_url") or row.get("imageurl") or row.get("imagepath"))
     stock = _cell_value(row.get("stock_details") or row.get("stock") or row.get("Stock Details"))
     if not name and not code:
         return None
@@ -312,7 +325,7 @@ def _row_to_item(row: dict) -> DisplayItem | None:
         slots = parse_stock_details(stock)
     if not slots:
         return None
-    return DisplayItem(code or name, name or code, family, sub_family, stock, slots)
+    return DisplayItem(code or name, name or code, family, sub_family, image_url, stock, slots)
 
 
 def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
@@ -332,12 +345,14 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
         key = _normalize_key(code or name)
         family = _cell_value(row.get("product_family"))
         sub_family = _cell_value(row.get("sub_product_family"))
+        image_url = _cell_value(row.get("image_url"))
         if key not in groups:
             groups[key] = {
                 "product_code": code or name,
                 "product_name": name or code,
                 "product_family": _resolve_family_name(family, name, code),
                 "sub_product_family": _resolve_sub_family_name(sub_family, name, code),
+                "image_url": image_url,
                 "slots": {},
             }
         else:
@@ -347,6 +362,8 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 )
             if sub_family:
                 groups[key]["sub_product_family"] = sub_family
+            if image_url and not groups[key].get("image_url"):
+                groups[key]["image_url"] = image_url
         sid = shop_id_for_location(warehouse)
         slot_key = (sid, warehouse)
         groups[key]["slots"][slot_key] = groups[key]["slots"].get(slot_key, 0) + qty
@@ -826,6 +843,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
             "ProductName": row.get("product_name", ""),
             "ProductFamily": row.get("product_family", ""),
             "SubProductFamily": row.get("sub_product_family", ""),
+            "ImageUrl": row.get("image_url", ""),
             "DisplayQty": row.get("display_qty", 0),
         })
     try:
@@ -839,7 +857,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["WarehouseName", "Sku", "ProductName", "ProductFamily", "SubProductFamily", "DisplayQty"])
+    ws.append(["WarehouseName", "Sku", "ProductName", "ProductFamily", "SubProductFamily", "ImageUrl", "DisplayQty"])
     for r in export:
         ws.append([
             r["WarehouseName"],
@@ -847,6 +865,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
             r["ProductName"],
             r["ProductFamily"],
             r["SubProductFamily"],
+            r["ImageUrl"],
             r["DisplayQty"],
         ])
     wb.save(path)
@@ -893,6 +912,7 @@ def save_cache(items: list[DisplayItem], path: str | None = None) -> None:
                 "product_name": it.product_name,
                 "product_family": it.product_family,
                 "sub_product_family": it.sub_product_family,
+                "image_url": it.image_url,
                 "stock_details": it.stock_details,
                 "displays": [
                     {
