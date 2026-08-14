@@ -80,6 +80,7 @@ _display_cache: list["DisplayItem"] | None = None
 _last_load_error: str | None = None
 _last_load_source: str | None = None
 _last_family_column: str | None = None
+_last_sql_file: str | None = None
 
 
 @dataclass
@@ -691,9 +692,9 @@ def resolve_cache_path() -> str:
     return CACHE_FILE
 
 
-def load_sql_query(cfg: dict | None = None) -> str:
+def load_sql_query(cfg: dict | None = None, *, path: str | None = None) -> str:
     cfg = build_runtime_config(cfg)
-    path = cfg["sql_file"]
+    path = path or cfg["sql_file"]
     if not os.path.isfile(path):
         raise FileNotFoundError(f"找不到 SQL 文件: {path}")
     with open(path, "r", encoding="utf-8") as f:
@@ -702,6 +703,30 @@ def load_sql_query(cfg: dict | None = None) -> str:
     if not query:
         raise ValueError(f"SQL 文件为空: {path}")
     return query
+
+
+def _is_schema_sql_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "invalid object name" in msg
+        or "invalid column name" in msg
+        or "208," in msg
+        or "207," in msg
+    )
+
+
+def _sql_fallback_paths(primary_path: str) -> list[str]:
+    folder = os.path.dirname(primary_path) or _resolve_path("sql")
+    ordered = [primary_path]
+    for name in ("display.sql", "display.minimal.sql"):
+        candidate = os.path.join(folder, name)
+        if candidate not in ordered and os.path.isfile(candidate):
+            ordered.append(candidate)
+    return ordered
+
+
+def last_sql_file() -> str | None:
+    return _last_sql_file
 
 
 def _load_config() -> dict:
@@ -810,27 +835,52 @@ def _database_url(cfg: dict) -> str | None:
 
 
 def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
+    global _last_sql_file
     url = _database_url(cfg)
     if not url:
         raise RuntimeError(
             "未配置 database_url（grabber_config.json 或环境变量 DISPLAY_DB_URL）"
         )
-    query = (query or cfg.get("query") or "").strip() or load_sql_query(cfg)
 
     from sqlalchemy import create_engine, text
 
-    try:
+    def _execute(sql_text: str) -> list[dict]:
         engine = create_engine(url, connect_args={"timeout": 30})
         rows: list[dict] = []
         with engine.connect() as conn:
-            result = conn.execute(text(query))
+            result = conn.execute(text(sql_text))
             keys = list(result.keys())
             for row in result:
                 raw = {keys[i]: row[i] for i in range(len(keys))}
                 rows.append(_canonicalize_row(raw))
         return rows
-    except Exception as exc:
-        raise RuntimeError(format_db_error(exc)) from exc
+
+    if (query or cfg.get("query") or "").strip():
+        sql_text = (query or cfg.get("query") or "").strip()
+        try:
+            rows = _execute(sql_text)
+            _last_sql_file = cfg.get("sql_file")
+            return rows
+        except Exception as exc:
+            raise RuntimeError(format_db_error(exc)) from exc
+
+    primary = cfg["sql_file"]
+    last_exc: Exception | None = None
+    for path in _sql_fallback_paths(primary):
+        try:
+            rows = _execute(load_sql_query(cfg, path=path))
+            _last_sql_file = path
+            return rows
+        except Exception as exc:
+            if _is_schema_sql_error(exc):
+                last_exc = exc
+                continue
+            raise RuntimeError(format_db_error(exc)) from exc
+
+    hint = "请在 SSMS 运行 sql/discover_schema.sql，把 Products 表的图片列名发给我们。"
+    if last_exc is not None:
+        raise RuntimeError(f"{format_db_error(last_exc)}\n{hint}") from last_exc
+    raise RuntimeError(hint)
 
 
 def export_rows_to_excel(rows: list[dict], path: str) -> None:
