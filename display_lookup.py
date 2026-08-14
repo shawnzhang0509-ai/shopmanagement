@@ -423,31 +423,54 @@ def resolve_blacklist_paths(cfg: dict | None = None) -> list[str]:
     return out
 
 
+def _blacklist_add_sku(blocked: set[str], value) -> None:
+    key = _normalize_key(str(value or ""))
+    if key:
+        blocked.add(key)
+
+
+def _blacklist_read_csv_rows(path: str) -> list[list[str]]:
+    import csv
+
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.reader(f))
+
+
 def load_blacklist(cfg: dict | None = None) -> set[str]:
-    """读取黑名单 SKU / 产品名（小写归一化）。"""
+    """读取黑名单 SKU（支持仅一列 SKU，也兼容产品名列）。"""
     blocked: set[str] = set()
     for path in resolve_blacklist_paths(cfg):
         if not os.path.isfile(path):
             continue
         if path.lower().endswith(".csv"):
-            import csv
-
-            with open(path, "r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.DictReader(f)
-                if not reader.fieldnames:
+            rows = _blacklist_read_csv_rows(path)
+            if not rows:
+                continue
+            headers = [_normalize_header(h) for h in rows[0]]
+            sku_col = name_col = None
+            for i, h in enumerate(headers):
+                if h in _BLACKLIST_ALIASES["sku"]:
+                    sku_col = i
+                if h in _BLACKLIST_ALIASES["product_name"]:
+                    name_col = i
+            data_start = 1
+            # 无表头：整文件每行第一列当作 SKU
+            if sku_col is None and name_col is None:
+                if len(headers) == 1:
+                    sku_col = 0
+                    data_start = 0
+                elif all(_normalize_key(h) for h in rows[0]):
+                    sku_col = 0
+                    data_start = 0
+            elif sku_col is None and len(headers) == 1:
+                sku_col = 0
+            for line in rows[data_start:]:
+                if not line:
                     continue
-                headers = [_normalize_header(h) for h in reader.fieldnames]
-                sku_idx = name_idx = None
-                for i, h in enumerate(headers):
-                    if h in _BLACKLIST_ALIASES["sku"]:
-                        sku_idx = reader.fieldnames[i]
-                    if h in _BLACKLIST_ALIASES["product_name"]:
-                        name_idx = reader.fieldnames[i]
-                for row in reader:
-                    if sku_idx and row.get(sku_idx):
-                        blocked.add(_normalize_key(row[sku_idx]))
-                    if name_idx and row.get(name_idx):
-                        blocked.add(_normalize_key(row[name_idx]))
+                if sku_col is not None and sku_col < len(line):
+                    _blacklist_add_sku(blocked, line[sku_col])
+                if name_col is not None and name_col < len(line):
+                    _blacklist_add_sku(blocked, line[name_col])
             continue
         try:
             import pandas as pd
@@ -480,11 +503,17 @@ def load_blacklist(cfg: dict | None = None) -> set[str]:
                 sku_col = i
             if h in _BLACKLIST_ALIASES["product_name"]:
                 name_col = i
-        for line in raw[1:]:
+        data_start = 1
+        if sku_col is None and name_col is None and len(headers) == 1:
+            sku_col = 0
+            data_start = 0
+        elif sku_col is None and len(headers) == 1:
+            sku_col = 0
+        for line in raw[data_start:]:
             if sku_col is not None and sku_col < len(line) and line[sku_col]:
-                blocked.add(_normalize_key(str(line[sku_col])))
+                _blacklist_add_sku(blocked, line[sku_col])
             if name_col is not None and name_col < len(line) and line[name_col]:
-                blocked.add(_normalize_key(str(line[name_col])))
+                _blacklist_add_sku(blocked, line[name_col])
     return blocked
 
 
