@@ -80,9 +80,17 @@ FONT_SMALL = load_font(13)
 FONT_LABEL = load_font(14, bold=True)
 FONT_MARK = load_font(12)
 
-screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("坪效布局编辑器")
-clock = pygame.time.Clock()
+screen = None
+clock = None
+
+
+def init_display():
+    global screen, clock
+    if screen is not None:
+        return
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption("坪效布局编辑器")
+    clock = pygame.time.Clock()
 
 # ── 状态 ────────────────────────────────────────────────────
 offset_x, offset_y = 0.0, 0.0
@@ -394,6 +402,22 @@ def popup_load_dialog():
             show_toast(f"加载失败: {e}")
 
 
+def _raise_tk_window(win):
+    win.update_idletasks()
+    w = win.winfo_width()
+    h = win.winfo_height()
+    x = max(0, (win.winfo_screenwidth() - w) // 2)
+    y = max(0, (win.winfo_screenheight() - h) // 2)
+    win.geometry(f"+{x}+{y}")
+    try:
+        win.attributes("-topmost", True)
+        win.after(200, lambda: win.attributes("-topmost", False))
+    except tk.TclError:
+        pass
+    win.lift()
+    win.focus_force()
+
+
 def _parse_store_size_fields(width_var, height_var, parent):
     try:
         width_m = float(width_var.get().strip())
@@ -472,10 +496,7 @@ def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=No
     tk.Button(btn_frame, text="确定", width=10, command=on_ok).pack(side="right")
     tk.Button(btn_frame, text="取消", width=10, command=on_cancel).pack(side="right", padx=(0, 8))
 
-    win.update_idletasks()
-    x = root.winfo_x() + max(0, (root.winfo_width() - win.winfo_width()) // 2)
-    y = root.winfo_y() + max(0, (root.winfo_height() - win.winfo_height()) // 2)
-    win.geometry(f"+{x}+{y}")
+    _raise_tk_window(win)
 
     root.wait_window(win)
     return result
@@ -563,10 +584,7 @@ def show_quick_start_dialog(has_saved=False):
     tk.Button(btn_frame, text="打开文件...", width=12, command=on_load_file).pack(side="left", padx=(8, 0))
     tk.Button(btn_frame, text="取消", width=8, command=win.destroy).pack(side="right")
 
-    win.update_idletasks()
-    x = root.winfo_x() + max(0, (root.winfo_width() - win.winfo_width()) // 2)
-    y = root.winfo_y() + max(0, (root.winfo_height() - win.winfo_height()) // 2)
-    win.geometry(f"+{x}+{y}")
+    _raise_tk_window(win)
 
     root.wait_window(win)
     if not result.get("action"):
@@ -999,7 +1017,7 @@ def main():
         collision_polygons.clear()
 
     fit_view_to_store()
-
+    init_display()
     buttons, input_box, template_list_top = build_sidebar_ui()
     running = True
 
