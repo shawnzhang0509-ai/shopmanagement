@@ -49,6 +49,18 @@ C_WARN = (234, 179, 8)
 C_OBSTACLE = (248, 113, 113)
 C_OBSTACLE_SEL = (252, 165, 165)
 C_SELECTION = (37, 99, 235)
+C_FLOOR = (255, 253, 245)
+C_OUTSIDE = (148, 163, 184)
+C_WALL = (51, 65, 85)
+
+DEFAULT_STORE_WIDTH_M = 20.0
+DEFAULT_STORE_HEIGHT_M = 15.0
+STORE_PRESETS = [
+    ("小型店 12×8 m", 12.0, 8.0),
+    ("中型店 20×15 m", 20.0, 15.0),
+    ("大型店 30×20 m", 30.0, 20.0),
+    ("自定义", None, None),
+]
 
 # ── 字体 ────────────────────────────────────────────────────
 FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
@@ -96,6 +108,8 @@ search_box_active = False
 toast_message = ""
 toast_until = 0
 mouse_pos = (0, 0)
+store_width_mm = int(DEFAULT_STORE_WIDTH_M * 1000)
+store_height_mm = int(DEFAULT_STORE_HEIGHT_M * 1000)
 
 
 def show_toast(msg, duration_ms=2500):
@@ -189,6 +203,45 @@ def world_to_screen(wx, wy):
     return (wx - offset_x) * scale + SIDEBAR_WIDTH, (wy - offset_y) * scale
 
 
+def store_rect_points():
+    return [
+        (0, 0),
+        (store_width_mm, 0),
+        (store_width_mm, store_height_mm),
+        (0, store_height_mm),
+    ]
+
+
+def set_store_size(width_m, height_m):
+    global store_width_mm, store_height_mm
+    width_m = float(width_m)
+    height_m = float(height_m)
+    if width_m <= 0 or height_m <= 0:
+        raise ValueError("门店宽高必须大于 0")
+    store_width_mm = int(round(width_m * 1000))
+    store_height_mm = int(round(height_m * 1000))
+    fit_view_to_store()
+
+
+def fit_view_to_store():
+    global offset_x, offset_y, scale
+    margin = 64
+    avail_w = max(1, CANVAS_RECT.width - margin * 2)
+    avail_h = max(1, SCREEN_HEIGHT - margin * 2)
+    scale = min(avail_w / store_width_mm, avail_h / store_height_mm)
+    scale = max(MIN_SCALE, min(MAX_SCALE, scale))
+    store_cx = store_width_mm / 2
+    store_cy = store_height_mm / 2
+    canvas_cx = SIDEBAR_WIDTH + CANVAS_RECT.width / 2
+    canvas_cy = SCREEN_HEIGHT / 2
+    offset_x = store_cx - (canvas_cx - SIDEBAR_WIDTH) / scale
+    offset_y = store_cy - canvas_cy / scale
+
+
+def point_in_store(x, y):
+    return 0 <= x <= store_width_mm and 0 <= y <= store_height_mm
+
+
 def roi_to_color(roi):
     roi = max(0, min(10, roi))
     start, end = (173, 216, 230), (178, 34, 34)
@@ -258,6 +311,10 @@ class Furniture:
 
 
 def check_collision(furniture, obstacles):
+    store_poly = store_rect_points()
+    for px, py in furniture.get_rotated_points():
+        if not point_in_poly(px, py, store_poly):
+            return True
     for col in obstacles:
         for px, py in furniture.get_rotated_points():
             if point_in_poly(px, py, col["points"]):
@@ -288,6 +345,7 @@ furniture_templates = []
 # ── 数据持久化 ──────────────────────────────────────────────
 def save_layout(filepath="saved_layout.json"):
     data = {
+        "store": {"width_mm": store_width_mm, "height_mm": store_height_mm},
         "furnitures": [
             {"name": f.name, "roi": f.roi, "x": f.x, "y": f.y, "rotation": f.rotation, "points": f.points}
             for f in placed_furnitures
@@ -300,9 +358,12 @@ def save_layout(filepath="saved_layout.json"):
 
 
 def load_layout(filepath="saved_layout.json"):
-    global placed_furnitures, collision_polygons
+    global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
+    store = data.get("store", {})
+    store_width_mm = int(store.get("width_mm", store_width_mm))
+    store_height_mm = int(store.get("height_mm", store_height_mm))
     placed_furnitures = []
     for f in data.get("furnitures", []):
         furniture = Furniture(f["name"], f["roi"], f["points"])
@@ -311,7 +372,10 @@ def load_layout(filepath="saved_layout.json"):
         furniture.rotation = f.get("rotation", 0)
         placed_furnitures.append(furniture)
     collision_polygons = data.get("obstacles", [])
-    show_toast(f"已加载 {len(placed_furnitures)} 件家具, {len(collision_polygons)} 个障碍物")
+    show_toast(
+        f"已加载 {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m 画布, "
+        f"{len(placed_furnitures)} 件家具, {len(collision_polygons)} 个障碍"
+    )
 
 
 def popup_save_dialog():
@@ -325,8 +389,189 @@ def popup_load_dialog():
     if path:
         try:
             load_layout(path)
+            fit_view_to_store()
         except Exception as e:
             show_toast(f"加载失败: {e}")
+
+
+def _parse_store_size_fields(width_var, height_var, parent):
+    try:
+        width_m = float(width_var.get().strip())
+        height_m = float(height_var.get().strip())
+    except ValueError as exc:
+        raise ValueError("请输入有效的数字（单位：米）") from exc
+    if width_m <= 0 or height_m <= 0:
+        raise ValueError("宽高必须大于 0")
+    return width_m, height_m
+
+
+def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=None):
+    width_m = DEFAULT_STORE_WIDTH_M if width_m is None else float(width_m)
+    height_m = DEFAULT_STORE_HEIGHT_M if height_m is None else float(height_m)
+    result = {"ok": False}
+
+    win = tk.Toplevel(root)
+    win.title(title)
+    win.resizable(False, False)
+    win.transient(root)
+    win.grab_set()
+
+    tk.Label(
+        win,
+        text="设置门店平面外框（米）。可摆放区域为外框内，障碍物用刨除方式挖掉。",
+        wraplength=360,
+        justify="left",
+    ).pack(padx=16, pady=(16, 10), anchor="w")
+
+    preset_var = tk.StringVar(value=STORE_PRESETS[1][0])
+    width_var = tk.StringVar(value=f"{width_m:g}")
+    height_var = tk.StringVar(value=f"{height_m:g}")
+
+    preset_frame = tk.Frame(win)
+    preset_frame.pack(fill="x", padx=16, pady=(0, 8))
+    tk.Label(preset_frame, text="预设:").pack(side="left")
+    preset_menu = tk.OptionMenu(
+        preset_frame,
+        preset_var,
+        *[label for label, _, _ in STORE_PRESETS],
+    )
+    preset_menu.pack(side="left", padx=(8, 0))
+
+    def apply_preset(*_):
+        for label, w, h in STORE_PRESETS:
+            if preset_var.get() != label:
+                continue
+            if w is not None and h is not None:
+                width_var.set(f"{w:g}")
+                height_var.set(f"{h:g}")
+            break
+
+    preset_var.trace_add("write", apply_preset)
+
+    size_frame = tk.Frame(win)
+    size_frame.pack(fill="x", padx=16, pady=8)
+    tk.Label(size_frame, text="宽 (m):").grid(row=0, column=0, sticky="w", pady=4)
+    tk.Entry(size_frame, textvariable=width_var, width=12).grid(row=0, column=1, padx=(8, 24), sticky="w")
+    tk.Label(size_frame, text="深 (m):").grid(row=0, column=2, sticky="w", pady=4)
+    tk.Entry(size_frame, textvariable=height_var, width=12).grid(row=0, column=3, padx=(8, 0), sticky="w")
+
+    btn_frame = tk.Frame(win)
+    btn_frame.pack(fill="x", padx=16, pady=(12, 16))
+
+    def on_ok():
+        try:
+            result["width_m"], result["height_m"] = _parse_store_size_fields(width_var, height_var, win)
+            result["ok"] = True
+            win.destroy()
+        except ValueError as exc:
+            messagebox.showerror("输入错误", str(exc), parent=win)
+
+    def on_cancel():
+        win.destroy()
+
+    tk.Button(btn_frame, text="确定", width=10, command=on_ok).pack(side="right")
+    tk.Button(btn_frame, text="取消", width=10, command=on_cancel).pack(side="right", padx=(0, 8))
+
+    win.update_idletasks()
+    x = root.winfo_x() + max(0, (root.winfo_width() - win.winfo_width()) // 2)
+    y = root.winfo_y() + max(0, (root.winfo_height() - win.winfo_height()) // 2)
+    win.geometry(f"+{x}+{y}")
+
+    root.wait_window(win)
+    return result
+
+
+def popup_store_size_dialog():
+    try:
+        result = show_store_size_dialog(
+            title="调整门店画布",
+            width_m=store_width_mm / 1000,
+            height_m=store_height_mm / 1000,
+        )
+        if result.get("ok"):
+            set_store_size(result["width_m"], result["height_m"])
+            show_toast(f"画布已设为 {result['width_m']:g}×{result['height_m']:g} m")
+    except Exception as e:
+        show_toast(f"设置失败: {e}")
+
+
+def show_quick_start_dialog(has_saved=False):
+    result = {"action": None, "width_m": DEFAULT_STORE_WIDTH_M, "height_m": DEFAULT_STORE_HEIGHT_M}
+
+    win = tk.Toplevel(root)
+    win.title("坪效布局 - 快速开始")
+    win.resizable(False, False)
+    win.transient(root)
+    win.grab_set()
+
+    tk.Label(win, text="选择门店画布尺寸，再用刨除方式绘制障碍物", font=("", 12, "bold")).pack(pady=(18, 6))
+    tk.Label(
+        win,
+        text="先定义店铺外框，再在可行走区域内画出要挖掉的墙体/柱位等区域。",
+        wraplength=380,
+        justify="left",
+        fg="#475569",
+    ).pack(padx=20, pady=(0, 12))
+
+    preset_var = tk.StringVar(value=STORE_PRESETS[1][0])
+    width_var = tk.StringVar(value=f"{DEFAULT_STORE_WIDTH_M:g}")
+    height_var = tk.StringVar(value=f"{DEFAULT_STORE_HEIGHT_M:g}")
+
+    preset_frame = tk.Frame(win)
+    preset_frame.pack(fill="x", padx=20, pady=(0, 8))
+    tk.Label(preset_frame, text="预设:").pack(side="left")
+    tk.OptionMenu(preset_frame, preset_var, *[label for label, _, _ in STORE_PRESETS]).pack(side="left", padx=(8, 0))
+
+    def apply_preset(*_):
+        for label, w, h in STORE_PRESETS:
+            if preset_var.get() == label and w is not None and h is not None:
+                width_var.set(f"{w:g}")
+                height_var.set(f"{h:g}")
+                break
+
+    preset_var.trace_add("write", apply_preset)
+
+    size_frame = tk.Frame(win)
+    size_frame.pack(fill="x", padx=20, pady=8)
+    tk.Label(size_frame, text="宽 (m):").grid(row=0, column=0, sticky="w")
+    tk.Entry(size_frame, textvariable=width_var, width=12).grid(row=0, column=1, padx=(8, 24))
+    tk.Label(size_frame, text="深 (m):").grid(row=0, column=2, sticky="w")
+    tk.Entry(size_frame, textvariable=height_var, width=12).grid(row=0, column=3, padx=(8, 0))
+
+    btn_frame = tk.Frame(win)
+    btn_frame.pack(fill="x", padx=20, pady=(14, 18))
+
+    def on_new():
+        try:
+            result["width_m"], result["height_m"] = _parse_store_size_fields(width_var, height_var, win)
+            result["action"] = "new"
+            win.destroy()
+        except ValueError as exc:
+            messagebox.showerror("输入错误", str(exc), parent=win)
+
+    def on_load_saved():
+        result["action"] = "load_saved"
+        win.destroy()
+
+    def on_load_file():
+        result["action"] = "load_file"
+        win.destroy()
+
+    tk.Button(btn_frame, text="新建门店", width=12, command=on_new).pack(side="left")
+    if has_saved:
+        tk.Button(btn_frame, text="加载上次布局", width=14, command=on_load_saved).pack(side="left", padx=(8, 0))
+    tk.Button(btn_frame, text="打开文件...", width=12, command=on_load_file).pack(side="left", padx=(8, 0))
+    tk.Button(btn_frame, text="取消", width=8, command=win.destroy).pack(side="right")
+
+    win.update_idletasks()
+    x = root.winfo_x() + max(0, (root.winfo_width() - win.winfo_width()) // 2)
+    y = root.winfo_y() + max(0, (root.winfo_height() - win.winfo_height()) // 2)
+    win.geometry(f"+{x}+{y}")
+
+    root.wait_window(win)
+    if not result.get("action"):
+        result["action"] = "cancel"
+    return result
 
 
 # ── 操作 ────────────────────────────────────────────────────
@@ -334,8 +579,8 @@ def add_furniture_to_canvas():
     global selected_furniture, selected_feature, selected_collision
     tpl = furniture_templates[selected_template_index]
     new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points])
-    new_furn.x = offset_x + (SCREEN_WIDTH - SIDEBAR_WIDTH) / 2 / scale
-    new_furn.y = offset_y + SCREEN_HEIGHT / 2 / scale
+    new_furn.x = store_width_mm / 2
+    new_furn.y = store_height_mm / 2
     placed_furnitures.append(new_furn)
     selected_furniture = new_furn
     selected_feature = new_furn
@@ -365,7 +610,7 @@ def toggle_draw_obstacle(active=None):
     if drawing_polygon:
         current_polygon = []
         preview_point = None
-        show_toast("绘制障碍物: 左键加点, Enter 完成, Esc 取消")
+        show_toast("刨除障碍: 在可行走区域内画出要挖掉的区域 | Enter 完成 | Esc 取消")
     else:
         current_polygon = []
         preview_point = None
@@ -378,7 +623,7 @@ def finish_obstacle():
             "name": f"障碍物{len(collision_polygons) + 1}",
             "points": current_polygon.copy(),
         })
-        show_toast(f"障碍物已创建 ({len(current_polygon)} 个顶点)")
+        show_toast(f"障碍区域已刨除 ({len(current_polygon)} 个顶点)")
     else:
         show_toast("至少需要 3 个顶点")
     current_polygon = []
@@ -421,6 +666,33 @@ def draw_grid(surface):
         pygame.draw.line(surface, C_GRID, (SIDEBAR_WIDTH, sy), (SCREEN_WIDTH, sy))
 
 
+def draw_store_floor(surface):
+    floor_pts = [world_to_screen(x, y) for x, y in store_rect_points()]
+    pygame.draw.polygon(surface, C_FLOOR, floor_pts)
+    pygame.draw.polygon(surface, C_WALL, floor_pts, 4)
+    label = FONT_SMALL.render(
+        f"门店 {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m",
+        True,
+        C_WALL,
+    )
+    tl = world_to_screen(0, 0)
+    surface.blit(label, (tl[0] + 8, tl[1] + 8))
+
+
+def _draw_excavation_hatch(surface, pts):
+    if len(pts) < 3:
+        return
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    min_x, max_x = int(min(xs)), int(max(xs))
+    min_y, max_y = int(min(ys)), int(max(ys))
+    step = 14
+    hatch_color = (185, 28, 28, 80)
+    for i in range(min_x - max_y, max_x + max_y, step):
+        line = [(i, min_y - 20), (i + (max_y - min_y) + 40, max_y + 20)]
+        pygame.draw.lines(surface, hatch_color[:3], False, line, 1)
+
+
 def draw_obstacles(surface):
     for idx, col in enumerate(collision_polygons):
         pts = [world_to_screen(x, y) for x, y in col["points"]]
@@ -428,6 +700,7 @@ def draw_obstacles(surface):
         fill = C_OBSTACLE_SEL if selected else (254, 202, 202)
         border = C_DANGER if selected else (185, 28, 28)
         pygame.draw.polygon(surface, fill, pts)
+        _draw_excavation_hatch(surface, pts)
         pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
@@ -471,7 +744,7 @@ def draw_banner(surface):
         rect = pygame.Rect(SIDEBAR_WIDTH + 16, 12, CANVAS_RECT.width - 32, 36)
         pygame.draw.rect(surface, C_ACCENT_LIGHT, rect, border_radius=8)
         pygame.draw.rect(surface, C_ACCENT, rect, 1, border_radius=8)
-        text = FONT_SMALL.render("绘制障碍物中 — 左键添加顶点 | Shift 水平/垂直 | Enter 完成 | Esc 取消", True, C_ACCENT)
+        text = FONT_SMALL.render("刨除障碍中 — 在浅色可行走区内画出要挖掉的区域 | Enter 完成 | Esc 取消", True, C_ACCENT)
         surface.blit(text, text.get_rect(center=rect.center))
 
 
@@ -515,7 +788,9 @@ def build_sidebar_ui():
     buttons["save"] = Button((pad, y, bw, 34), "保存", "save")
     buttons["load"] = Button((pad + bw + 8, y, bw, 34), "加载", "load")
     y += 42
-    buttons["obstacle"] = Button((pad, y, w, 34), "绘制障碍物", "obstacle", toggle=True)
+    buttons["store"] = Button((pad, y, w, 34), "门店画布尺寸", "store")
+    y += 42
+    buttons["obstacle"] = Button((pad, y, w, 34), "刨除障碍", "obstacle", toggle=True)
     y += 42
     buttons["add"] = Button((pad, y, w, 40), "＋ 添加到画布", "add", primary=True)
     y += 48
@@ -538,7 +813,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.rect.y = 52
     input_box.draw(surface)
 
-    for key in ("save", "load", "obstacle", "add", "rotate_l", "rotate_r", "rename", "delete"):
+    for key in ("save", "load", "store", "obstacle", "add", "rotate_l", "rotate_r", "rename", "delete"):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
 
@@ -574,10 +849,15 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "右键拖动画布 | 滚轮缩放 | 模板编辑: furniture_sim.py"
+    hints = "右键拖动画布 | 滚轮缩放 | 浅色=可行走 | 红色=刨除障碍"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
+    y += 18
     surface.blit(
-        FONT_SMALL.render(f"家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}", True, C_MUTED),
+        FONT_SMALL.render(
+            f"画布 {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}",
+            True,
+            C_MUTED,
+        ),
         (16, SCREEN_HEIGHT - 24),
     )
 
@@ -587,6 +867,8 @@ def handle_toolbar_click(action, buttons):
         popup_save_dialog()
     elif action == "load":
         popup_load_dialog()
+    elif action == "store":
+        popup_store_size_dialog()
     elif action == "obstacle":
         toggle_draw_obstacle()
         buttons["obstacle"].active = drawing_polygon
@@ -636,6 +918,9 @@ def handle_canvas_click(mx, my, button):
         return "pan"
 
     if drawing_polygon:
+        if not point_in_store(wx, wy):
+            show_toast("请在门店画布内绘制障碍区域")
+            return
         if current_polygon:
             last = current_polygon[-1]
             keys = pygame.key.get_pressed()
@@ -676,7 +961,7 @@ def main():
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos
     global drawing_polygon, current_polygon, preview_point
     global selected_collision, selected_furniture, dragging_furniture, selected_feature
-    global placed_furnitures, selected_template_index, dragging_collision, collision_drag_offset
+    global placed_furnitures, collision_polygons, selected_template_index, dragging_collision, collision_drag_offset
     global renaming_obstacle, input_text, search_text, search_box_active, mouse_pos
     global furniture_templates
 
@@ -689,11 +974,31 @@ def main():
     offset_x = -((SCREEN_WIDTH - SIDEBAR_WIDTH) / 2) / scale
     offset_y = -SCREEN_HEIGHT / 2 / scale
 
-    if os.path.exists("saved_layout.json"):
+    has_saved = os.path.exists("saved_layout.json")
+    quick = show_quick_start_dialog(has_saved=has_saved)
+    if quick.get("action") == "cancel":
+        return
+    if quick.get("action") == "load_saved":
         try:
             load_layout("saved_layout.json")
-        except Exception:
-            pass
+        except Exception as e:
+            messagebox.showerror("加载失败", str(e), parent=root)
+            return
+    elif quick.get("action") == "load_file":
+        path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="加载布局")
+        if not path:
+            return
+        try:
+            load_layout(path)
+        except Exception as e:
+            messagebox.showerror("加载失败", str(e), parent=root)
+            return
+    else:
+        set_store_size(quick["width_m"], quick["height_m"])
+        placed_furnitures.clear()
+        collision_polygons.clear()
+
+    fit_view_to_store()
 
     buttons, input_box, template_list_top = build_sidebar_ui()
     running = True
@@ -810,9 +1115,10 @@ def main():
                         toggle_draw_obstacle()
                         buttons["obstacle"].active = drawing_polygon
 
-        screen.fill(C_CANVAS)
-        pygame.draw.rect(screen, C_CANVAS, CANVAS_RECT)
+        screen.fill(C_OUTSIDE)
+        pygame.draw.rect(screen, C_OUTSIDE, CANVAS_RECT)
         draw_grid(screen)
+        draw_store_floor(screen)
         for f in placed_furnitures:
             f.draw(screen, selected=(f is selected_furniture))
         draw_obstacles(screen)
