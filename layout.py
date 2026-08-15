@@ -7,7 +7,9 @@ except ModuleNotFoundError:
 import json
 import math
 import os
+import re
 import sys
+import time
 import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -19,11 +21,20 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 
 os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+if sys.platform == "win32":
+    os.environ.setdefault("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")
 
 pygame.init()
 
-root = tk.Tk()
-root.withdraw()
+_tk_root = None
+
+
+def get_tk_root():
+    global _tk_root
+    if _tk_root is None:
+        _tk_root = tk.Tk()
+        _tk_root.withdraw()
+    return _tk_root
 
 # ── 窗口与布局 ──────────────────────────────────────────────
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
@@ -57,6 +68,8 @@ C_WALL = (51, 65, 85)
 
 DEFAULT_STORE_WIDTH_M = 20.0
 DEFAULT_STORE_HEIGHT_M = 15.0
+LAYOUTS_DIR = os.path.join(SCRIPT_DIR, "data", "layouts")
+LEGACY_LAYOUT_FILE = os.path.join(SCRIPT_DIR, "saved_layout.json")
 STORE_PRESETS = [
     ("小型店 12×8 m", 12.0, 8.0),
     ("中型店 20×15 m", 20.0, 15.0),
@@ -93,6 +106,26 @@ def init_display():
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("坪效布局编辑器")
     clock = pygame.time.Clock()
+    pygame.mouse.set_visible(True)
+    pygame.event.set_grab(False)
+    pygame.event.clear()
+
+
+def to_surface_pos(pos):
+    """Windows 高 DPI 下窗口坐标与画布坐标可能不一致，统一转换。"""
+    if screen is None:
+        return int(pos[0]), int(pos[1])
+    try:
+        win_w, win_h = pygame.display.get_window_size()
+        surf_w, surf_h = screen.get_size()
+        if win_w > 0 and win_h > 0 and (win_w, win_h) != (surf_w, surf_h):
+            return (
+                int(pos[0] * surf_w / win_w),
+                int(pos[1] * surf_h / win_h),
+            )
+    except (AttributeError, pygame.error):
+        pass
+    return int(pos[0]), int(pos[1])
 
 # ── 状态 ────────────────────────────────────────────────────
 offset_x, offset_y = 0.0, 0.0
@@ -122,6 +155,10 @@ store_width_mm = int(DEFAULT_STORE_WIDTH_M * 1000)
 store_height_mm = int(DEFAULT_STORE_HEIGHT_M * 1000)
 startup_active = True
 has_saved_layout = False
+store_name = "新门店"
+current_layout_path = None
+store_picker_active = False
+renaming_store = False
 
 
 def show_toast(msg, duration_ms=2500):
@@ -144,10 +181,13 @@ class Button:
         self.enabled = True
 
     def contains(self, pos):
-        return self.enabled and self.rect.collidepoint(pos)
+        if not self.enabled:
+            return False
+        mx, my = to_surface_pos(pos)
+        return self.rect.collidepoint(mx, my)
 
     def draw(self, surface):
-        hover = self.enabled and self.rect.collidepoint(mouse_pos)
+        hover = self.enabled and self.rect.collidepoint(to_surface_pos(mouse_pos))
         if self.toggle and self.active:
             bg, fg, border = C_ACCENT, (255, 255, 255), C_ACCENT
         elif self.danger:
@@ -355,24 +395,106 @@ furniture_templates = []
 
 
 # ── 数据持久化 ──────────────────────────────────────────────
-def save_layout(filepath="saved_layout.json"):
+def ensure_layouts_dir():
+    os.makedirs(LAYOUTS_DIR, exist_ok=True)
+
+
+def slugify_name(name):
+    safe = re.sub(r'[<>:"/\\|?*]', "", (name or "").strip())
+    safe = re.sub(r"\s+", "_", safe)[:48]
+    return safe or "store"
+
+
+def unique_layout_path(display_name):
+    ensure_layouts_dir()
+    base = slugify_name(display_name)
+    path = os.path.join(LAYOUTS_DIR, f"{base}.json")
+    if not os.path.exists(path):
+        return path
+    n = 2
+    while os.path.exists(os.path.join(LAYOUTS_DIR, f"{base}_{n}.json")):
+        n += 1
+    return os.path.join(LAYOUTS_DIR, f"{base}_{n}.json")
+
+
+def migrate_legacy_layout():
+    if not os.path.isfile(LEGACY_LAYOUT_FILE):
+        return None
+    ensure_layouts_dir()
+    target = os.path.join(LAYOUTS_DIR, "默认门店.json")
+    if os.path.isfile(target):
+        return target
+    try:
+        with open(LEGACY_LAYOUT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.setdefault("name", "默认门店")
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"已迁移旧版 saved_layout.json -> {target}")
+        return target
+    except Exception as exc:
+        print(f"迁移 saved_layout.json 失败: {exc}")
+        return None
+
+
+def list_store_layouts():
+    ensure_layouts_dir()
+    migrate_legacy_layout()
+    stores = []
+    for fname in os.listdir(LAYOUTS_DIR):
+        if not fname.lower().endswith(".json") or fname.startswith("_"):
+            continue
+        path = os.path.join(LAYOUTS_DIR, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            store = data.get("store", {})
+            w = int(store.get("width_mm", 0)) / 1000
+            h = int(store.get("height_mm", 0)) / 1000
+            stores.append({
+                "path": path,
+                "name": data.get("name") or os.path.splitext(fname)[0],
+                "width": w,
+                "height": h,
+                "furniture_count": len(data.get("furnitures", [])),
+                "obstacle_count": len(data.get("obstacles", [])),
+                "mtime": os.path.getmtime(path),
+            })
+        except Exception:
+            continue
+    stores.sort(key=lambda s: s["mtime"], reverse=True)
+    return stores
+
+
+def save_layout(filepath=None):
+    global current_layout_path
+    filepath = filepath or current_layout_path
+    if not filepath:
+        filepath = unique_layout_path(store_name)
+    ensure_layouts_dir()
     data = {
+        "name": store_name,
         "store": {"width_mm": store_width_mm, "height_mm": store_height_mm},
         "furnitures": [
             {"name": f.name, "roi": f.roi, "x": f.x, "y": f.y, "rotation": f.rotation, "points": f.points}
             for f in placed_furnitures
         ],
         "obstacles": collision_polygons,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    show_toast(f"已保存: {os.path.basename(filepath)}")
+    current_layout_path = filepath
+    show_toast(f"已保存门店: {store_name}")
 
 
-def load_layout(filepath="saved_layout.json"):
+def load_layout(filepath):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
+    global store_name, current_layout_path
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
+    store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
+    current_layout_path = filepath
     store = data.get("store", {})
     store_width_mm = int(store.get("width_mm", store_width_mm))
     store_height_mm = int(store.get("height_mm", store_height_mm))
@@ -385,27 +507,91 @@ def load_layout(filepath="saved_layout.json"):
         placed_furnitures.append(furniture)
     collision_polygons = data.get("obstacles", [])
     show_toast(
-        f"已加载 {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m 画布, "
+        f"已打开「{store_name}」{store_width_mm / 1000:g}×{store_height_mm / 1000:g} m, "
         f"{len(placed_furnitures)} 件家具, {len(collision_polygons)} 个障碍"
     )
 
 
+def create_store_layout(name, width_m, height_m):
+    global store_name, current_layout_path, placed_furnitures, collision_polygons, startup_active
+    store_name = (name or "新门店").strip() or "新门店"
+    current_layout_path = unique_layout_path(store_name)
+    placed_furnitures = []
+    collision_polygons = []
+    set_store_size(width_m, height_m)
+    save_layout(current_layout_path)
+    startup_active = False
+    show_toast(f"已创建门店: {store_name}")
+
+
+def switch_store_layout(path):
+    if current_layout_path and os.path.isfile(current_layout_path):
+        try:
+            save_layout(current_layout_path)
+        except Exception:
+            pass
+    load_layout(path)
+    fit_view_to_store()
+
+
+def rename_current_store(new_name):
+    global store_name, current_layout_path
+    new_name = (new_name or "").strip()
+    if not new_name:
+        show_toast("门店名称不能为空")
+        return
+    old_path = current_layout_path
+    store_name = new_name
+    new_path = unique_layout_path(store_name)
+    if old_path and os.path.abspath(old_path) != os.path.abspath(new_path):
+        save_layout(new_path)
+        if os.path.isfile(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+        current_layout_path = new_path
+    else:
+        save_layout(current_layout_path)
+    show_toast(f"门店已重命名为: {store_name}")
+
+
+def save_current_layout():
+    if current_layout_path:
+        save_layout(current_layout_path)
+    else:
+        popup_save_dialog()
+
+
 def popup_save_dialog():
     pygame.event.pump()
-    root.update()
-    path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="保存布局")
+    get_tk_root().update()
+    path = filedialog.asksaveasfilename(
+        parent=get_tk_root(),
+        initialdir=LAYOUTS_DIR,
+        defaultextension=".json",
+        filetypes=[("JSON", "*.json")],
+        title="另存为门店布局",
+    )
     if path:
+        if not path.lower().endswith(".json"):
+            path += ".json"
         save_layout(path)
 
 
 def popup_load_dialog():
     pygame.event.pump()
-    root.update()
-    path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="加载布局")
+    get_tk_root().update()
+    path = filedialog.askopenfilename(
+        parent=get_tk_root(),
+        initialdir=LAYOUTS_DIR,
+        defaultextension=".json",
+        filetypes=[("JSON", "*.json")],
+        title="打开门店布局",
+    )
     if path:
         try:
-            load_layout(path)
-            fit_view_to_store()
+            switch_store_layout(path)
         except Exception as e:
             show_toast(f"加载失败: {e}")
 
@@ -442,10 +628,10 @@ def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=No
     height_m = DEFAULT_STORE_HEIGHT_M if height_m is None else float(height_m)
     result = {"ok": False}
 
-    win = tk.Toplevel(root)
+    win = tk.Toplevel(get_tk_root())
     win.title(title)
     win.resizable(False, False)
-    win.transient(root)
+    win.transient(get_tk_root())
     win.grab_set()
 
     tk.Label(
@@ -506,14 +692,14 @@ def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=No
 
     _raise_tk_window(win)
 
-    root.wait_window(win)
+    get_tk_root().wait_window(win)
     return result
 
 
 def popup_store_size_dialog():
     try:
         pygame.event.pump()
-        root.update()
+        get_tk_root().update()
         result = show_store_size_dialog(
             title="调整门店画布",
             width_m=store_width_mm / 1000,
@@ -528,31 +714,36 @@ def popup_store_size_dialog():
 
 def build_startup_ui():
     cx = SCREEN_WIDTH // 2
-    btn_w, btn_h = 300, 42
-    gap = 10
-    y = 170
+    btn_w, btn_h = 300, 40
+    gap = 8
+    y = 188
     buttons = {}
+    stores = list_store_layouts()
+    if stores:
+        for i, store in enumerate(stores[:6]):
+            label = f"打开: {store['name']}  ({store['width']:g}×{store['height']:g}m)"
+            buttons[f"open_{i}"] = Button(
+                (cx - btn_w // 2, y, btn_w, btn_h),
+                label,
+                f"open:{store['path']}",
+                primary=(i == 0),
+            )
+            y += btn_h + gap
+        y += 6
     for i, (label, w_m, h_m) in enumerate(STORE_PRESETS):
         if w_m is None:
             continue
+        short = label.split()[0]
         buttons[f"preset_{i}"] = Button(
             (cx - btn_w // 2, y, btn_w, btn_h),
-            label,
-            f"preset:{w_m}:{h_m}",
-            primary=(i == 1),
+            f"新建 {label}",
+            f"preset:{w_m}:{h_m}:{short}",
+            primary=(i == 1 and not stores),
         )
         y += btn_h + gap
-    buttons["custom"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "自定义尺寸...", "custom")
-    y += btn_h + gap + 6
-    if has_saved_layout:
-        buttons["load_saved"] = Button(
-            (cx - btn_w // 2, y, btn_w, btn_h),
-            "加载上次布局 (saved_layout.json)",
-            "load_saved",
-            primary=True,
-        )
-        y += btn_h + gap
-    buttons["load_file"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "打开其他布局文件...", "load_file")
+    buttons["custom"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "新建自定义尺寸...", "custom")
+    y += btn_h + gap
+    buttons["load_file"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "从其他文件打开...", "load_file")
     return buttons
 
 
@@ -568,67 +759,120 @@ def draw_startup_screen(surface, buttons):
     for i, line in enumerate(lines):
         surf = FONT_SMALL.render(line, True, C_MUTED)
         surface.blit(surf, surf.get_rect(center=(SCREEN_WIDTH // 2, 108 + i * 22)))
+    hint = FONT_SMALL.render("快捷键: 1/2/3 新建 | Enter 中型店 | 点已有门店或预设按钮", True, C_ACCENT)
+    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 178)))
     for btn in buttons.values():
         btn.draw(surface)
 
 
-def handle_startup_click(mx, my, buttons):
+def handle_startup_key(event):
+    key_map = {
+        pygame.K_1: "preset:12.0:8.0:小型店",
+        pygame.K_2: "preset:20.0:15.0:中型店",
+        pygame.K_3: "preset:30.0:20.0:大型店",
+    }
+    if event.key in key_map:
+        handle_startup_action(key_map[event.key])
+    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+        handle_startup_action("preset:20.0:15.0:中型店")
+
+
+def handle_startup_click(mx, my, buttons, allow_fallback=True):
+    mx, my = to_surface_pos((mx, my))
     for btn in buttons.values():
-        if btn.contains((mx, my)):
+        hit = btn.rect.inflate(12, 12)
+        if hit.collidepoint(mx, my):
+            print(f"启动选项: {btn.label}")
             handle_startup_action(btn.action)
-            return
+            return True
+    if allow_fallback and my >= 190:
+        print("启动选项: 默认中型店 20×15 m（点击兜底）")
+        handle_startup_action("preset:20.0:15.0:中型店")
+        return True
+    return False
+
+
+_startup_keys_prev = set()
+_startup_mouse_prev = False
+
+
+def poll_startup_input(buttons):
+    """每帧轮询键鼠，不依赖事件队列（Windows 上更可靠）。"""
+    global _startup_keys_prev, _startup_mouse_prev
+
+    pygame.event.pump()
+    mouse_pos_now = to_surface_pos(pygame.mouse.get_pos())
+    mouse_down = pygame.mouse.get_pressed(3)[0]
+    if mouse_down and not _startup_mouse_prev:
+        handle_startup_click(mouse_pos_now[0], mouse_pos_now[1], buttons, allow_fallback=True)
+    _startup_mouse_prev = mouse_down
+
+    key_actions = {
+        pygame.K_1: "preset:12.0:8.0:小型店",
+        pygame.K_2: "preset:20.0:15.0:中型店",
+        pygame.K_3: "preset:30.0:20.0:大型店",
+        pygame.K_RETURN: "preset:20.0:15.0:中型店",
+        pygame.K_KP_ENTER: "preset:20.0:15.0:中型店",
+        pygame.K_SPACE: "preset:20.0:15.0:中型店",
+    }
+    pressed_now = set()
+    keys = pygame.key.get_pressed()
+    for key, action in key_actions.items():
+        if keys[key]:
+            pressed_now.add(key)
+            if key not in _startup_keys_prev:
+                print(f"启动选项: 键盘 {pygame.key.name(key)}")
+                handle_startup_action(action)
+                return
+    _startup_keys_prev = pressed_now
 
 
 def handle_startup_action(action):
     global startup_active, placed_furnitures, collision_polygons
 
-    if action.startswith("preset:"):
-        _, w_m, h_m = action.split(":")
-        set_store_size(float(w_m), float(h_m))
-        placed_furnitures.clear()
-        collision_polygons.clear()
+    if action.startswith("open:"):
+        path = action[5:]
+        switch_store_layout(path)
         startup_active = False
-        show_toast(f"画布 {w_m}×{h_m} m")
+        return
+
+    if action.startswith("preset:"):
+        _, w_m, h_m, short_name = action.split(":", 3)
+        stores = list_store_layouts()
+        name = short_name
+        if any(s["name"] == name for s in stores):
+            name = f"{short_name}{len(stores) + 1}"
+        create_store_layout(name, float(w_m), float(h_m))
         return
 
     if action == "custom":
         pygame.event.pump()
-        root.update()
-        result = show_store_size_dialog(title="自定义门店画布")
+        get_tk_root().update()
+        result = show_store_size_dialog(title="新建门店画布")
         if not result.get("ok"):
             return
-        set_store_size(result["width_m"], result["height_m"])
-        placed_furnitures.clear()
-        collision_polygons.clear()
-        startup_active = False
-        show_toast(f"画布 {result['width_m']:g}×{result['height_m']:g} m")
-        return
-
-    if action == "load_saved":
-        try:
-            load_layout("saved_layout.json")
-            fit_view_to_store()
-            startup_active = False
-        except Exception as e:
-            messagebox.showerror("加载失败", str(e), parent=root)
+        stores = list_store_layouts()
+        name = f"门店{len(stores) + 1}"
+        create_store_layout(name, result["width_m"], result["height_m"])
         return
 
     if action == "load_file":
         pygame.event.pump()
-        root.update()
+        get_tk_root().update()
         path = filedialog.askopenfilename(
+            parent=get_tk_root(),
+            initialdir=LAYOUTS_DIR,
             defaultextension=".json",
             filetypes=[("JSON", "*.json")],
-            title="加载布局",
+            title="打开门店布局",
         )
         if not path:
             return
         try:
-            load_layout(path)
-            fit_view_to_store()
+            switch_store_layout(path)
             startup_active = False
         except Exception as e:
-            messagebox.showerror("加载失败", str(e), parent=root)
+            messagebox.showerror("加载失败", str(e), parent=get_tk_root())
 
 
 # ── 操作 ────────────────────────────────────────────────────
@@ -695,11 +939,86 @@ def rotate_selected(delta):
 
 
 def start_rename_obstacle():
-    global renaming_obstacle, input_text
+    global renaming_obstacle, renaming_store, input_text
     if selected_collision is not None:
         renaming_obstacle = True
+        renaming_store = False
         input_text = collision_polygons[selected_collision]["name"]
-        show_toast("输入新名称后按 Enter")
+        show_toast("输入障碍物新名称后按 Enter")
+
+
+def start_rename_store():
+    global renaming_store, renaming_obstacle, input_text
+    renaming_store = True
+    renaming_obstacle = False
+    input_text = store_name
+    show_toast("输入门店新名称后按 Enter")
+
+
+def open_store_picker():
+    global store_picker_active
+    store_picker_active = True
+
+
+def close_store_picker():
+    global store_picker_active
+    store_picker_active = False
+
+
+def build_store_picker_ui():
+    stores = list_store_layouts()
+    cx = SCREEN_WIDTH // 2
+    btn_w, btn_h = 420, 40
+    gap = 8
+    y = 130
+    buttons = {}
+    buttons["picker_new"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "＋ 新建门店", "picker_new", primary=True)
+    y += btn_h + gap + 8
+    for i, store in enumerate(stores[:10]):
+        mark = " ●" if store["path"] == current_layout_path else ""
+        label = f"{store['name']}{mark}  ({store['width']:g}×{store['height']:g}m)"
+        buttons[f"picker_{i}"] = Button(
+            (cx - btn_w // 2, y, btn_w, btn_h),
+            label,
+            f"picker_open:{store['path']}",
+        )
+        y += btn_h + gap
+    buttons["picker_close"] = Button((cx - btn_w // 2, SCREEN_HEIGHT - 70, btn_w, 36), "关闭", "picker_close")
+    return buttons
+
+
+def draw_store_picker(surface, buttons):
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 170))
+    surface.blit(overlay, (0, 0))
+    title = FONT_TITLE.render("切换门店画布", True, (255, 255, 255))
+    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 72)))
+    sub = FONT_SMALL.render(f"当前: {store_name}  |  切换前会自动保存", True, (203, 213, 225))
+    surface.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 102)))
+    for btn in buttons.values():
+        btn.draw(surface)
+
+
+def handle_store_picker_click(mx, my, buttons):
+    mx, my = to_surface_pos((mx, my))
+    for btn in buttons.values():
+        if btn.rect.collidepoint(mx, my):
+            handle_store_picker_action(btn.action)
+            return True
+    return False
+
+
+def handle_store_picker_action(action):
+    global store_picker_active, startup_active
+    if action == "picker_close":
+        close_store_picker()
+    elif action == "picker_new":
+        close_store_picker()
+        startup_active = True
+    elif action.startswith("picker_open:"):
+        path = action[len("picker_open:"):]
+        switch_store_layout(path)
+        close_store_picker()
 
 
 def filtered_templates():
@@ -728,7 +1047,7 @@ def draw_store_floor(surface):
     pygame.draw.polygon(surface, C_FLOOR, floor_pts)
     pygame.draw.polygon(surface, C_WALL, floor_pts, 4)
     label = FONT_SMALL.render(
-        f"门店 {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m",
+        f"{store_name}  ·  {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m",
         True,
         C_WALL,
     )
@@ -820,12 +1139,13 @@ def draw_toast(surface):
 
 
 def draw_rename_dialog(surface):
-    if not renaming_obstacle:
+    if not renaming_obstacle and not renaming_store:
         return
     box = pygame.Rect(SIDEBAR_WIDTH + 80, 120, 420, 110)
     pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
-    surface.blit(FONT_LABEL.render("重命名障碍物", True, C_TEXT), (box.x + 16, box.y + 14))
+    title = "重命名门店" if renaming_store else "重命名障碍物"
+    surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 16, box.y + 14))
     input_rect = pygame.Rect(box.x + 16, box.y + 48, box.width - 32, 36)
     pygame.draw.rect(surface, (248, 250, 252), input_rect, border_radius=8)
     pygame.draw.rect(surface, C_ACCENT, input_rect, 2, border_radius=8)
@@ -843,7 +1163,9 @@ def build_sidebar_ui():
     # toolbar row 1
     bw = (w - 8) // 2
     buttons["save"] = Button((pad, y, bw, 34), "保存", "save")
-    buttons["load"] = Button((pad + bw + 8, y, bw, 34), "加载", "load")
+    buttons["switch"] = Button((pad + bw + 8, y, bw, 34), "切换门店", "switch")
+    y += 42
+    buttons["rename_store"] = Button((pad, y, w, 34), "重命名门店", "rename_store")
     y += 42
     buttons["store"] = Button((pad, y, w, 34), "门店画布尺寸", "store")
     y += 42
@@ -866,11 +1188,13 @@ def draw_sidebar(buttons, input_box, template_list_top):
     pygame.draw.line(surface, C_BORDER, (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, SCREEN_HEIGHT))
 
     surface.blit(FONT_TITLE.render("坪效布局编辑器", True, C_TEXT), (16, 16))
+    name_surf = FONT_SMALL.render(store_name, True, C_ACCENT)
+    surface.blit(name_surf, (16, 40))
 
-    input_box.rect.y = 52
+    input_box.rect.y = 58
     input_box.draw(surface)
 
-    for key in ("save", "load", "store", "obstacle", "add", "rotate_l", "rotate_r", "rename", "delete"):
+    for key in ("save", "switch", "rename_store", "store", "obstacle", "add", "rotate_l", "rotate_r", "rename", "delete"):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
 
@@ -880,7 +1204,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
 
     filtered = filtered_templates()
     row_h = 44
-    for i, (idx, tpl) in enumerate(filtered[:8]):
+    for i, (idx, tpl) in enumerate(filtered[:6]):
         row = pygame.Rect(12, y + i * row_h, SIDEBAR_WIDTH - 24, row_h - 6)
         selected = idx == selected_template_index
         bg = C_ACCENT_LIGHT if selected else (248, 250, 252)
@@ -911,7 +1235,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     y += 18
     surface.blit(
         FONT_SMALL.render(
-            f"画布 {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}",
+            f"{store_name}  |  {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}",
             True,
             C_MUTED,
         ),
@@ -921,9 +1245,11 @@ def draw_sidebar(buttons, input_box, template_list_top):
 
 def handle_toolbar_click(action, buttons):
     if action == "save":
-        popup_save_dialog()
-    elif action == "load":
-        popup_load_dialog()
+        save_current_layout()
+    elif action == "switch":
+        open_store_picker()
+    elif action == "rename_store":
+        start_rename_store()
     elif action == "store":
         popup_store_size_dialog()
     elif action == "obstacle":
@@ -956,7 +1282,7 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
 
     filtered = filtered_templates()
     row_h = 44
-    for i, (idx, tpl) in enumerate(filtered[:8]):
+    for i, (idx, tpl) in enumerate(filtered[:6]):
         row = pygame.Rect(12, template_list_top + 28 + i * row_h, SIDEBAR_WIDTH - 24, row_h - 6)
         if row.collidepoint(mx, my):
             selected_template_index = idx
@@ -1019,8 +1345,8 @@ def main():
     global drawing_polygon, current_polygon, preview_point
     global selected_collision, selected_furniture, dragging_furniture, selected_feature
     global placed_furnitures, collision_polygons, selected_template_index, dragging_collision, collision_drag_offset
-    global renaming_obstacle, input_text, search_text, search_box_active, mouse_pos
-    global furniture_templates, startup_active, has_saved_layout
+    global renaming_obstacle, renaming_store, input_text, search_text, search_box_active, mouse_pos
+    global furniture_templates, startup_active, store_picker_active
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -1028,27 +1354,52 @@ def main():
         messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
         raise SystemExit(1) from e
 
-    has_saved_layout = os.path.exists("saved_layout.json")
+    ensure_layouts_dir()
     init_display()
-    print("坪效布局编辑器已启动，请在窗口中选择门店画布尺寸。")
+    print("坪效布局编辑器已启动。")
+    print("提示: 可选择已有门店，或按 2 / Enter 新建中型店。")
 
-    startup_buttons = build_startup_ui()
+    stores = list_store_layouts()
+    if stores:
+        try:
+            switch_store_layout(stores[0]["path"])
+            startup_active = False
+            print(f"已自动打开最近门店: {stores[0]['name']}")
+        except Exception as e:
+            print(f"自动打开门店失败: {e}")
+            startup_active = True
+    else:
+        startup_active = True
+
+    startup_buttons = build_startup_ui() if startup_active else None
+    store_picker_buttons = None
     editor_buttons = None
     input_box = None
     template_list_top = 0
     running = True
 
     while running:
-        mouse_pos = pygame.mouse.get_pos()
+        mouse_pos = to_surface_pos(pygame.mouse.get_pos())
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+                continue
 
-            elif startup_active:
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    handle_startup_click(*event.pos, startup_buttons)
+            if store_picker_active:
+                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and event.button == 1:
+                    handle_store_picker_click(*event.pos, store_picker_buttons)
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    close_store_picker()
+                continue
 
-            elif event.type == pygame.MOUSEWHEEL:
+            if startup_active:
+                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and event.button == 1:
+                    handle_startup_click(*event.pos, startup_buttons, allow_fallback=False)
+                elif event.type == pygame.KEYDOWN:
+                    handle_startup_key(event)
+                continue
+
+            if event.type == pygame.MOUSEWHEEL:
                 mx, my = mouse_pos
                 wx, wy = screen_to_world(mx, my)
                 scale = max(MIN_SCALE, min(MAX_SCALE, scale * (ZOOM_IN if event.y > 0 else ZOOM_OUT)))
@@ -1111,7 +1462,19 @@ def main():
                     preview_point = None
 
             elif event.type == pygame.KEYDOWN:
-                if renaming_obstacle:
+                if renaming_store:
+                    if event.key == pygame.K_RETURN and input_text.strip():
+                        rename_current_store(input_text.strip())
+                        renaming_store = False
+                        input_text = ""
+                    elif event.key == pygame.K_ESCAPE:
+                        renaming_store = False
+                        input_text = ""
+                    elif event.key == pygame.K_BACKSPACE:
+                        input_text = input_text[:-1]
+                    elif event.unicode and event.unicode.isprintable():
+                        input_text += event.unicode
+                elif renaming_obstacle:
                     if event.key == pygame.K_RETURN and selected_collision is not None and input_text.strip():
                         collision_polygons[selected_collision]["name"] = input_text.strip()
                         show_toast("重命名成功")
@@ -1155,6 +1518,7 @@ def main():
                         editor_buttons["obstacle"].active = drawing_polygon
 
         if startup_active:
+            poll_startup_input(startup_buttons)
             draw_startup_screen(screen, startup_buttons)
         else:
             if editor_buttons is None:
@@ -1172,6 +1536,12 @@ def main():
             draw_rename_dialog(screen)
             draw_sidebar(editor_buttons, input_box, template_list_top)
             draw_toast(screen)
+            if store_picker_active:
+                if store_picker_buttons is None:
+                    store_picker_buttons = build_store_picker_ui()
+                draw_store_picker(screen, store_picker_buttons)
+            else:
+                store_picker_buttons = None
         pygame.display.flip()
         clock.tick(60)
 
