@@ -9,6 +9,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 import tkinter as tk
@@ -154,6 +155,7 @@ startup_active = True
 store_name = "新门店"
 current_layout_path = None
 store_picker_active = False
+startup_buttons = None
 renaming_store = False
 editing_canvas_size = False
 canvas_w_text = ""
@@ -164,6 +166,10 @@ canvas_size_width_rect = None
 canvas_size_height_rect = None
 force_rebuild_startup = False
 _store_summary_cache = {}
+_pending_save_snapshot = None
+_save_thread = None
+_catalog_refresh_thread = None
+_catalog_refresh_ready = False
 
 
 def show_toast(msg, duration_ms=2500):
@@ -503,6 +509,31 @@ def invalidate_store_summary(path=None):
         _store_summary_cache.clear()
 
 
+def remember_store_summary(path, *, width_m, height_m, furniture_count=0, obstacle_count=0):
+    if not path:
+        return
+    _store_summary_cache[path] = {
+        "_mtime": time.time(),
+        "path": path,
+        "width": width_m,
+        "height": height_m,
+        "furniture_count": furniture_count,
+        "obstacle_count": obstacle_count,
+    }
+
+
+def catalog_detail_for_path(path):
+    info = _store_summary_cache.get(path)
+    if info:
+        detail = f"{info['width']:g}×{info['height']:g}m"
+        if info["furniture_count"] or info["obstacle_count"]:
+            detail += f" · 家具{info['furniture_count']} 障碍{info['obstacle_count']}"
+        return detail
+    if os.path.isfile(path):
+        return "已保存 · 点击打开"
+    return "新建 20×15m"
+
+
 def migrate_legacy_layout():
     if not os.path.isfile(LEGACY_LAYOUT_FILE):
         return None
@@ -552,13 +583,8 @@ def list_store_layouts():
     return stores
 
 
-def save_layout(filepath=None, *, quiet=False):
-    global current_layout_path
-    filepath = filepath or current_layout_path
-    if not filepath:
-        filepath = unique_layout_path(store_name)
-    ensure_layouts_dir()
-    data = {
+def build_layout_data(filepath):
+    return {
         "name": store_name,
         "store_slug": catalog_slug_for_path(filepath),
         "store": {"width_mm": store_width_mm, "height_mm": store_height_mm},
@@ -569,12 +595,82 @@ def save_layout(filepath=None, *, quiet=False):
         "obstacles": collision_polygons,
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+
+
+def write_layout_data(filepath, data):
+    ensure_layouts_dir()
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    store = data.get("store", {})
+    remember_store_summary(
+        filepath,
+        width_m=int(store.get("width_mm", 0)) / 1000,
+        height_m=int(store.get("height_mm", 0)) / 1000,
+        furniture_count=len(data.get("furnitures", [])),
+        obstacle_count=len(data.get("obstacles", [])),
+    )
+
+
+def save_layout(filepath=None, *, quiet=False):
+    global current_layout_path
+    filepath = filepath or current_layout_path
+    if not filepath:
+        filepath = unique_layout_path(store_name)
+    write_layout_data(filepath, build_layout_data(filepath))
     current_layout_path = filepath
-    invalidate_store_summary(filepath)
     if not quiet:
         show_toast(f"已保存门店: {store_name}")
+
+
+def schedule_deferred_save():
+    global _pending_save_snapshot
+    if not current_layout_path:
+        return
+    _pending_save_snapshot = (current_layout_path, build_layout_data(current_layout_path))
+
+
+def _run_deferred_save(snapshot):
+    filepath, data = snapshot
+    try:
+        write_layout_data(filepath, data)
+    except Exception as exc:
+        print(f"后台保存失败: {exc}")
+
+
+def flush_deferred_save(*, block=False):
+    global _pending_save_snapshot, _save_thread
+    if _save_thread and _save_thread.is_alive():
+        if block:
+            _save_thread.join()
+        elif _pending_save_snapshot is None:
+            return
+        else:
+            return
+    if _pending_save_snapshot is None:
+        return
+    snapshot = _pending_save_snapshot
+    _pending_save_snapshot = None
+    if block:
+        _run_deferred_save(snapshot)
+        return
+    _save_thread = threading.Thread(target=_run_deferred_save, args=(snapshot,), daemon=True)
+    _save_thread.start()
+
+
+def refresh_catalog_cache_async():
+    global _catalog_refresh_thread, _catalog_refresh_ready
+    if _catalog_refresh_thread and _catalog_refresh_thread.is_alive():
+        return
+
+    def worker():
+        global _catalog_refresh_ready
+        for _, slug in STORE_CATALOG:
+            read_store_summary(layout_path_for_slug(slug))
+        _catalog_refresh_ready = True
+
+    _catalog_refresh_ready = False
+    _catalog_refresh_thread = threading.Thread(target=worker, daemon=True)
+    _catalog_refresh_thread.start()
 
 
 def load_layout(filepath):
@@ -595,6 +691,13 @@ def load_layout(filepath):
         furniture.rotation = f.get("rotation", 0)
         placed_furnitures.append(furniture)
     collision_polygons = data.get("obstacles", [])
+    remember_store_summary(
+        current_layout_path,
+        width_m=store_width_mm / 1000,
+        height_m=store_height_mm / 1000,
+        furniture_count=len(placed_furnitures),
+        obstacle_count=len(collision_polygons),
+    )
     show_toast(
         f"已打开「{store_name}」{store_width_mm / 1000:g}×{store_height_mm / 1000:g} m, "
         f"{len(placed_furnitures)} 件家具, {len(collision_polygons)} 个障碍"
@@ -624,6 +727,7 @@ def open_catalog_store(slug):
 
 
 def switch_store_layout(path):
+    flush_deferred_save(block=True)
     if current_layout_path and os.path.isfile(current_layout_path):
         try:
             save_layout(current_layout_path)
@@ -915,16 +1019,27 @@ def draw_canvas_size_dialog(surface):
 
 def go_to_store_home():
     global startup_active, store_picker_active, force_rebuild_startup, editing_canvas_size
+    global startup_buttons, _catalog_refresh_ready
     startup_active = True
     store_picker_active = False
     editing_canvas_size = False
-    force_rebuild_startup = True
+    force_rebuild_startup = False
     if current_layout_path:
-        save_layout(current_layout_path, quiet=True)
-    show_toast("已保存，请选择门店")
+        remember_store_summary(
+            current_layout_path,
+            width_m=store_width_mm / 1000,
+            height_m=store_height_mm / 1000,
+            furniture_count=len(placed_furnitures),
+            obstacle_count=len(collision_polygons),
+        )
+        schedule_deferred_save()
+    startup_buttons = build_store_catalog_ui(fast=True)
+    _catalog_refresh_ready = False
+    refresh_catalog_cache_async()
+    show_toast("请选择门店")
 
 
-def build_store_catalog_ui(*, picker_mode=False):
+def build_store_catalog_ui(*, picker_mode=False, fast=False):
     cx = SCREEN_WIDTH // 2
     btn_w = 400 if picker_mode else 360
     btn_h = 44
@@ -933,14 +1048,17 @@ def build_store_catalog_ui(*, picker_mode=False):
     buttons = {}
     for i, (name, slug) in enumerate(STORE_CATALOG):
         path = layout_path_for_slug(slug)
-        info = read_store_summary(path)
-        mark = " ●" if picker_mode and path == current_layout_path else ""
-        if info:
-            detail = f"{info['width']:g}×{info['height']:g}m"
-            if info["furniture_count"] or info["obstacle_count"]:
-                detail += f" · 家具{info['furniture_count']} 障碍{info['obstacle_count']}"
+        if fast:
+            detail = catalog_detail_for_path(path)
         else:
-            detail = "新建 20×15m"
+            info = read_store_summary(path)
+            if info:
+                detail = f"{info['width']:g}×{info['height']:g}m"
+                if info["furniture_count"] or info["obstacle_count"]:
+                    detail += f" · 家具{info['furniture_count']} 障碍{info['obstacle_count']}"
+            else:
+                detail = "新建 20×15m"
+        mark = " ●" if picker_mode and path == current_layout_path else ""
         label = f"{name}{mark}  ({detail})"
         buttons[f"cat_{i}"] = Button(
             (cx - btn_w // 2, y, btn_w, btn_h),
@@ -990,11 +1108,13 @@ def handle_startup_action(action):
     global startup_active, placed_furnitures, collision_polygons
 
     if action.startswith("catalog:"):
+        flush_deferred_save(block=True)
         open_catalog_store(action.split(":", 1)[1])
         startup_active = False
         return
 
     if action.startswith("open:"):
+        flush_deferred_save(block=True)
         path = action[5:]
         switch_store_layout(path)
         startup_active = False
@@ -1033,6 +1153,7 @@ def handle_startup_action(action):
         if not path:
             return
         try:
+            flush_deferred_save(block=True)
             switch_store_layout(path)
             startup_active = False
         except Exception as e:
@@ -1509,6 +1630,7 @@ def main():
     global renaming_obstacle, renaming_store, input_text, search_text, search_box_active, mouse_pos
     global furniture_templates, startup_active, store_picker_active
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
+    global startup_buttons, _catalog_refresh_ready
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -1533,7 +1655,7 @@ def main():
         startup_active = True
         print("请选择门店。")
 
-    startup_buttons = build_startup_ui() if startup_active else None
+    startup_buttons = build_store_catalog_ui(fast=True) if startup_active else None
     store_picker_buttons = None
     editor_buttons, input_box, template_list_top = (None, None, 0)
     if not startup_active:
@@ -1713,7 +1835,7 @@ def main():
 
         if startup_active:
             if force_rebuild_startup or startup_buttons is None:
-                startup_buttons = build_startup_ui()
+                startup_buttons = build_store_catalog_ui(fast=True)
                 force_rebuild_startup = False
                 editor_buttons = None
             draw_startup_screen(screen, startup_buttons)
@@ -1742,6 +1864,10 @@ def main():
             if editing_canvas_size:
                 draw_canvas_size_dialog(screen)
         pygame.display.flip()
+        flush_deferred_save()
+        if startup_active and _catalog_refresh_ready:
+            _catalog_refresh_ready = False
+            startup_buttons = build_store_catalog_ui(fast=True)
         clock.tick(60)
 
     pygame.quit()
