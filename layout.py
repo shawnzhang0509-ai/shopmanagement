@@ -154,7 +154,6 @@ mouse_pos = (0, 0)
 store_width_mm = int(DEFAULT_STORE_WIDTH_M * 1000)
 store_height_mm = int(DEFAULT_STORE_HEIGHT_M * 1000)
 startup_active = True
-has_saved_layout = False
 store_name = "新门店"
 current_layout_path = None
 store_picker_active = False
@@ -714,14 +713,14 @@ def popup_store_size_dialog():
 
 def build_startup_ui():
     cx = SCREEN_WIDTH // 2
-    btn_w, btn_h = 300, 40
-    gap = 8
-    y = 188
+    btn_w, btn_h = 320, 48
+    gap = 12
+    y = 160
     buttons = {}
     stores = list_store_layouts()
     if stores:
         for i, store in enumerate(stores[:6]):
-            label = f"打开: {store['name']}  ({store['width']:g}×{store['height']:g}m)"
+            label = f"{store['name']}  ({store['width']:g}×{store['height']:g} m)"
             buttons[f"open_{i}"] = Button(
                 (cx - btn_w // 2, y, btn_w, btn_h),
                 label,
@@ -729,102 +728,50 @@ def build_startup_ui():
                 primary=(i == 0),
             )
             y += btn_h + gap
-        y += 6
+        y += 8
     for i, (label, w_m, h_m) in enumerate(STORE_PRESETS):
         if w_m is None:
             continue
         short = label.split()[0]
         buttons[f"preset_{i}"] = Button(
             (cx - btn_w // 2, y, btn_w, btn_h),
-            f"新建 {label}",
+            label,
             f"preset:{w_m}:{h_m}:{short}",
             primary=(i == 1 and not stores),
         )
         y += btn_h + gap
-    buttons["custom"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "新建自定义尺寸...", "custom")
+    buttons["custom"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "自定义尺寸...", "custom")
     y += btn_h + gap
-    buttons["load_file"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "从其他文件打开...", "load_file")
+    buttons["load_file"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "打开其他文件...", "load_file")
     return buttons
 
 
 def draw_startup_screen(surface, buttons):
     surface.fill(C_BG)
-    title = FONT_TITLE.render("坪效布局 - 快速开始", True, C_TEXT)
+    title = FONT_TITLE.render("新建门店画布", True, C_TEXT)
     surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 72)))
-    lines = [
-        "1. 选择门店画布尺寸（浅色可行走区域）",
-        "2. 点击「刨除障碍」画出墙体 / 柱位等不可摆放区域",
-        "3. 从左侧模板添加家具并摆放",
-    ]
-    for i, line in enumerate(lines):
-        surf = FONT_SMALL.render(line, True, C_MUTED)
-        surface.blit(surf, surf.get_rect(center=(SCREEN_WIDTH // 2, 108 + i * 22)))
-    hint = FONT_SMALL.render("快捷键: 1/2/3 新建 | Enter 中型店 | 点已有门店或预设按钮", True, C_ACCENT)
-    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 178)))
+    hint = FONT_BODY.render("单击按钮进入（双击也可以）", True, C_MUTED)
+    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 118)))
     for btn in buttons.values():
         btn.draw(surface)
 
 
-def handle_startup_key(event):
-    key_map = {
-        pygame.K_1: "preset:12.0:8.0:小型店",
-        pygame.K_2: "preset:20.0:15.0:中型店",
-        pygame.K_3: "preset:30.0:20.0:大型店",
-    }
-    if event.key in key_map:
-        handle_startup_action(key_map[event.key])
-    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
-        handle_startup_action("preset:20.0:15.0:中型店")
+def _startup_hit_button(mx, my, btn):
+    mx, my = int(mx), int(my)
+    hit = btn.rect.inflate(20, 16)
+    if hit.collidepoint(mx, my):
+        return True
+    sx, sy = to_surface_pos((mx, my))
+    return hit.collidepoint(sx, sy)
 
 
-def handle_startup_click(mx, my, buttons, allow_fallback=True):
-    mx, my = to_surface_pos((mx, my))
+def handle_startup_mouseup(mx, my, buttons):
+    """松开鼠标进入（常规单击操作）。"""
     for btn in buttons.values():
-        hit = btn.rect.inflate(12, 12)
-        if hit.collidepoint(mx, my):
-            print(f"启动选项: {btn.label}")
+        if _startup_hit_button(mx, my, btn):
             handle_startup_action(btn.action)
             return True
-    if allow_fallback and my >= 190:
-        print("启动选项: 默认中型店 20×15 m（点击兜底）")
-        handle_startup_action("preset:20.0:15.0:中型店")
-        return True
     return False
-
-
-_startup_keys_prev = set()
-_startup_mouse_prev = False
-
-
-def poll_startup_input(buttons):
-    """每帧轮询键鼠，不依赖事件队列（Windows 上更可靠）。"""
-    global _startup_keys_prev, _startup_mouse_prev
-
-    pygame.event.pump()
-    mouse_pos_now = to_surface_pos(pygame.mouse.get_pos())
-    mouse_down = pygame.mouse.get_pressed(3)[0]
-    if mouse_down and not _startup_mouse_prev:
-        handle_startup_click(mouse_pos_now[0], mouse_pos_now[1], buttons, allow_fallback=True)
-    _startup_mouse_prev = mouse_down
-
-    key_actions = {
-        pygame.K_1: "preset:12.0:8.0:小型店",
-        pygame.K_2: "preset:20.0:15.0:中型店",
-        pygame.K_3: "preset:30.0:20.0:大型店",
-        pygame.K_RETURN: "preset:20.0:15.0:中型店",
-        pygame.K_KP_ENTER: "preset:20.0:15.0:中型店",
-        pygame.K_SPACE: "preset:20.0:15.0:中型店",
-    }
-    pressed_now = set()
-    keys = pygame.key.get_pressed()
-    for key, action in key_actions.items():
-        if keys[key]:
-            pressed_now.add(key)
-            if key not in _startup_keys_prev:
-                print(f"启动选项: 键盘 {pygame.key.name(key)}")
-                handle_startup_action(action)
-                return
-    _startup_keys_prev = pressed_now
 
 
 def handle_startup_action(action):
@@ -999,10 +946,9 @@ def draw_store_picker(surface, buttons):
         btn.draw(surface)
 
 
-def handle_store_picker_click(mx, my, buttons):
-    mx, my = to_surface_pos((mx, my))
+def handle_store_picker_mouseup(mx, my, buttons):
     for btn in buttons.values():
-        if btn.rect.collidepoint(mx, my):
+        if _startup_hit_button(mx, my, btn):
             handle_store_picker_action(btn.action)
             return True
     return False
@@ -1357,7 +1303,6 @@ def main():
     ensure_layouts_dir()
     init_display()
     print("坪效布局编辑器已启动。")
-    print("提示: 可选择已有门店，或按 2 / Enter 新建中型店。")
 
     stores = list_store_layouts()
     if stores:
@@ -1367,9 +1312,10 @@ def main():
             print(f"已自动打开最近门店: {stores[0]['name']}")
         except Exception as e:
             print(f"自动打开门店失败: {e}")
-            startup_active = True
+            create_store_layout("中型店", DEFAULT_STORE_WIDTH_M, DEFAULT_STORE_HEIGHT_M)
     else:
-        startup_active = True
+        create_store_layout("中型店", DEFAULT_STORE_WIDTH_M, DEFAULT_STORE_HEIGHT_M)
+        print("已自动创建中型店画布，可直接开始编辑。")
 
     startup_buttons = build_startup_ui() if startup_active else None
     store_picker_buttons = None
@@ -1379,24 +1325,25 @@ def main():
     running = True
 
     while running:
-        mouse_pos = to_surface_pos(pygame.mouse.get_pos())
+        if startup_active or store_picker_active:
+            mouse_pos = pygame.mouse.get_pos()
+        else:
+            mouse_pos = to_surface_pos(pygame.mouse.get_pos())
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
                 continue
 
             if store_picker_active:
-                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and event.button == 1:
-                    handle_store_picker_click(*event.pos, store_picker_buttons)
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_store_picker_mouseup(*event.pos, store_picker_buttons)
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     close_store_picker()
                 continue
 
             if startup_active:
-                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and event.button == 1:
-                    handle_startup_click(*event.pos, startup_buttons, allow_fallback=False)
-                elif event.type == pygame.KEYDOWN:
-                    handle_startup_key(event)
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_startup_mouseup(*event.pos, startup_buttons)
                 continue
 
             if event.type == pygame.MOUSEWHEEL:
@@ -1518,7 +1465,8 @@ def main():
                         editor_buttons["obstacle"].active = drawing_polygon
 
         if startup_active:
-            poll_startup_input(startup_buttons)
+            if startup_buttons is None:
+                startup_buttons = build_startup_ui()
             draw_startup_screen(screen, startup_buttons)
         else:
             if editor_buttons is None:
