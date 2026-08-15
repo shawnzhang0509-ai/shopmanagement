@@ -86,7 +86,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -166,6 +166,13 @@ canvas_size_focus = "width"
 canvas_size_buttons = {}
 canvas_size_width_rect = None
 canvas_size_height_rect = None
+editing_wall_size = False
+wall_length_text = ""
+wall_width_text = ""
+wall_size_focus = "length"
+wall_size_buttons = {}
+wall_length_rect = None
+wall_width_rect = None
 force_rebuild_startup = False
 _store_summary_cache = {}
 _pending_save_snapshot = None
@@ -304,6 +311,84 @@ def fit_view_to_store():
 
 def point_in_store(x, y):
     return 0 <= x <= store_width_mm and 0 <= y <= store_height_mm
+
+
+def polygon_area(points):
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    for i, (x1, y1) in enumerate(points):
+        x2, y2 = points[(i + 1) % len(points)]
+        area += x1 * y2 - x2 * y1
+    return abs(area) / 2.0
+
+
+def _clip_polygon_edge(points, inside, intersect):
+    if not points:
+        return []
+    output = []
+    s = points[-1]
+    for e in points:
+        s_in = inside(s)
+        e_in = inside(e)
+        if s_in and e_in:
+            output.append(e)
+        elif s_in and not e_in:
+            output.append(intersect(s, e))
+        elif not s_in and e_in:
+            output.append(intersect(s, e))
+            output.append(e)
+        s = e
+    return output
+
+
+def clip_polygon_to_rect(points, xmin, ymin, xmax, ymax):
+    if len(points) < 3:
+        return []
+
+    def intersect_vertical(s, e, x_val):
+        x1, y1 = s
+        x2, y2 = e
+        if abs(x2 - x1) < 1e-9:
+            return (x_val, y1)
+        t = (x_val - x1) / (x2 - x1)
+        return (x_val, y1 + t * (y2 - y1))
+
+    def intersect_horizontal(s, e, y_val):
+        x1, y1 = s
+        x2, y2 = e
+        if abs(y2 - y1) < 1e-9:
+            return (x1, y_val)
+        t = (y_val - y1) / (y2 - y1)
+        return (x1 + t * (x2 - x1), y_val)
+
+    result = list(points)
+    result = _clip_polygon_edge(result, lambda p: p[0] >= xmin, lambda s, e: intersect_vertical(s, e, xmin))
+    result = _clip_polygon_edge(result, lambda p: p[0] <= xmax, lambda s, e: intersect_vertical(s, e, xmax))
+    result = _clip_polygon_edge(result, lambda p: p[1] >= ymin, lambda s, e: intersect_horizontal(s, e, ymin))
+    result = _clip_polygon_edge(result, lambda p: p[1] <= ymax, lambda s, e: intersect_horizontal(s, e, ymax))
+    return result
+
+
+def clip_polygon_to_store(points):
+    return clip_polygon_to_rect(points, 0, 0, store_width_mm, store_height_mm)
+
+
+def clip_obstacle_points(points):
+    clipped = clip_polygon_to_store(points)
+    if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
+        return clipped
+    return clipped
+
+
+def rect_points_centered(cx, cy, length_mm, width_mm):
+    hl, hw = length_mm / 2.0, width_mm / 2.0
+    return [
+        (cx - hl, cy - hw),
+        (cx + hl, cy - hw),
+        (cx + hl, cy + hw),
+        (cx - hl, cy + hw),
+    ]
 
 
 def roi_to_color(roi):
@@ -924,8 +1009,9 @@ def popup_store_size_dialog():
 
 def start_edit_canvas_size():
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, canvas_size_buttons
-    global renaming_store, renaming_obstacle
+    global renaming_store, renaming_obstacle, editing_wall_size
     editing_canvas_size = True
+    editing_wall_size = False
     renaming_store = renaming_obstacle = False
     canvas_w_text = f"{store_width_mm / 1000:g}"
     canvas_h_text = f"{store_height_mm / 1000:g}"
@@ -1030,12 +1116,123 @@ def draw_canvas_size_dialog(surface):
         btn.draw(surface)
 
 
+def start_edit_wall_size():
+    global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus, wall_size_buttons
+    global renaming_store, renaming_obstacle, editing_canvas_size
+    editing_wall_size = True
+    editing_canvas_size = False
+    renaming_store = renaming_obstacle = False
+    toggle_draw_obstacle(False)
+    wall_length_text = "3"
+    wall_width_text = "0.2"
+    wall_size_focus = "length"
+    wall_size_buttons = build_wall_size_dialog_buttons()
+
+
+def build_wall_size_dialog_buttons():
+    cx = SCREEN_WIDTH // 2
+    bw, bh = 88, 34
+    y = SCREEN_HEIGHT // 2 + 36
+    return {
+        "ok": Button((cx - bw - 6, y, bw, bh), "放置", "wall_ok", primary=True),
+        "cancel": Button((cx + 6, y, bw, bh), "取消", "wall_cancel"),
+    }
+
+
+def apply_wall_obstacle():
+    global editing_wall_size, selected_collision
+    try:
+        length_m = float(wall_length_text.strip())
+        width_m = float(wall_width_text.strip())
+    except ValueError:
+        show_toast("请输入有效的长宽数字（米）")
+        return
+    if length_m <= 0 or width_m <= 0:
+        show_toast("长宽必须大于 0")
+        return
+    length_mm = length_m * 1000
+    width_mm = width_m * 1000
+    cx = store_width_mm / 2
+    cy = store_height_mm / 2
+    points = clip_obstacle_points(rect_points_centered(cx, cy, length_mm, width_mm))
+    if len(points) < 3 or polygon_area(points) <= 1.0:
+        show_toast("墙体与门店画布无有效重叠，请缩小尺寸")
+        return
+    wall_count = sum(1 for c in collision_polygons if c.get("kind") == "wall" or str(c.get("name", "")).startswith("墙体"))
+    obstacle = {
+        "name": f"墙体{wall_count + 1}",
+        "points": points,
+        "kind": "wall",
+    }
+    collision_polygons.append(obstacle)
+    selected_collision = len(collision_polygons) - 1
+    editing_wall_size = False
+    show_toast(f"已放置墙体 {length_m:g}×{width_m:g} m，可拖动调整位置")
+
+
+def cancel_wall_size_edit():
+    global editing_wall_size
+    editing_wall_size = False
+
+
+def handle_wall_size_action(action):
+    if action == "wall_ok":
+        apply_wall_obstacle()
+    elif action == "wall_cancel":
+        cancel_wall_size_edit()
+
+
+def handle_wall_size_click(mx, my):
+    global wall_size_focus, wall_length_text, wall_width_text
+    mx, my = ui_pos((mx, my))
+    if wall_length_rect and wall_length_rect.collidepoint(mx, my):
+        wall_size_focus = "length"
+        return True
+    if wall_width_rect and wall_width_rect.collidepoint(mx, my):
+        wall_size_focus = "width"
+        return True
+    for btn in wall_size_buttons.values():
+        if btn.contains((mx, my)):
+            handle_wall_size_action(btn.action)
+            return True
+    return False
+
+
+def draw_wall_size_dialog(surface):
+    global wall_length_rect, wall_width_rect
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 120))
+    surface.blit(overlay, (0, 0))
+    box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 120, 440, 240)
+    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
+    surface.blit(FONT_LABEL.render("添加墙体", True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(
+        FONT_SMALL.render("输入长方形长宽（米），将放置在门店中心，可拖动调整", True, C_MUTED),
+        (box.x + 20, box.y + 44),
+    )
+    surface.blit(FONT_SMALL.render("长 (m)", True, C_TEXT), (box.x + 20, box.y + 78))
+    wall_length_rect = pygame.Rect(box.x + 20, box.y + 100, 180, 36)
+    surface.blit(FONT_SMALL.render("宽 (m)", True, C_TEXT), (box.x + 220, box.y + 78))
+    wall_width_rect = pygame.Rect(box.x + 220, box.y + 100, 180, 36)
+    for rect, text, focused in (
+        (wall_length_rect, wall_length_text, wall_size_focus == "length"),
+        (wall_width_rect, wall_width_text, wall_size_focus == "width"),
+    ):
+        pygame.draw.rect(surface, (248, 250, 252), rect, border_radius=8)
+        pygame.draw.rect(surface, C_ACCENT if focused else C_BORDER, rect, 2 if focused else 1, border_radius=8)
+        surface.blit(FONT_BODY.render(text + ("|" if focused else ""), True, C_TEXT), (rect.x + 10, rect.y + 8))
+    for btn in wall_size_buttons.values():
+        btn.draw(surface)
+
+
 def go_to_store_home():
-    global startup_active, store_picker_active, force_rebuild_startup, editing_canvas_size
+    global startup_active, store_picker_active, force_rebuild_startup, editing_canvas_size, editing_wall_size
     global startup_buttons
     startup_active = True
     store_picker_active = False
     editing_canvas_size = False
+    editing_wall_size = False
     force_rebuild_startup = False
     if current_layout_path:
         remember_store_summary(
@@ -1210,25 +1407,34 @@ def delete_selected():
 
 
 def toggle_draw_obstacle(active=None):
-    global drawing_polygon, current_polygon, preview_point
-    drawing_polygon = not drawing_polygon if active is None else active
+    global drawing_polygon, current_polygon, preview_point, editing_wall_size
+    if active is None:
+        drawing_polygon = not drawing_polygon
+    else:
+        drawing_polygon = active
     if drawing_polygon:
+        editing_wall_size = False
         current_polygon = []
         preview_point = None
-        show_toast("刨除障碍: 在可行走区域内画出要挖掉的区域 | Enter 完成 | Esc 取消")
+        show_toast("刨除障碍: 可在画布外勾勒，完成时自动裁切到门店内 | Enter 完成 | Esc 取消")
     else:
         current_polygon = []
         preview_point = None
 
 
 def finish_obstacle():
-    global drawing_polygon, current_polygon, preview_point
+    global drawing_polygon, current_polygon, preview_point, selected_collision
     if len(current_polygon) >= 3:
-        collision_polygons.append({
-            "name": f"障碍物{len(collision_polygons) + 1}",
-            "points": current_polygon.copy(),
-        })
-        show_toast(f"障碍区域已刨除 ({len(current_polygon)} 个顶点)")
+        clipped = clip_obstacle_points(current_polygon)
+        if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
+            collision_polygons.append({
+                "name": f"障碍物{len(collision_polygons) + 1}",
+                "points": clipped,
+            })
+            selected_collision = len(collision_polygons) - 1
+            show_toast(f"障碍区域已刨除（画布内有效区域 {len(clipped)} 个顶点）")
+        else:
+            show_toast("障碍区域与门店画布无有效重叠，请重新绘制")
     else:
         show_toast("至少需要 3 个顶点")
     current_polygon = []
@@ -1369,8 +1575,9 @@ def draw_obstacles(surface):
     for idx, col in enumerate(collision_polygons):
         pts = [world_to_screen(x, y) for x, y in col["points"]]
         selected = idx == selected_collision
-        fill = C_OBSTACLE_SEL if selected else (254, 202, 202)
-        border = C_DANGER if selected else (185, 28, 28)
+        is_wall = col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
+        fill = C_OBSTACLE_SEL if selected else ((200, 210, 220) if is_wall else (254, 202, 202))
+        border = C_WALL if is_wall else (C_DANGER if selected else (185, 28, 28))
         pygame.draw.polygon(surface, fill, pts)
         _draw_excavation_hatch(surface, pts)
         pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
@@ -1416,7 +1623,7 @@ def draw_banner(surface):
         rect = pygame.Rect(SIDEBAR_WIDTH + 16, 12, CANVAS_RECT.width - 32, 36)
         pygame.draw.rect(surface, C_ACCENT_LIGHT, rect, border_radius=8)
         pygame.draw.rect(surface, C_ACCENT, rect, 1, border_radius=8)
-        text = FONT_SMALL.render("刨除障碍中 — 在浅色可行走区内画出要挖掉的区域 | Enter 完成 | Esc 取消", True, C_ACCENT)
+        text = FONT_SMALL.render("刨除障碍中 — 可在画布外勾勒，完成时自动裁切到门店内 | Enter 完成 | Esc 取消", True, C_ACCENT)
         surface.blit(text, text.get_rect(center=rect.center))
 
 
@@ -1465,7 +1672,8 @@ def build_sidebar_ui():
     y += 42
     buttons["store"] = Button((pad, y, w, 34), "修改画布尺寸", "store")
     y += 42
-    buttons["obstacle"] = Button((pad, y, w, 34), "刨除障碍", "obstacle", toggle=True)
+    buttons["obstacle"] = Button((pad, y, bw, 34), "刨除障碍", "obstacle", toggle=True)
+    buttons["wall"] = Button((pad + bw + 8, y, bw, 34), "添加墙体", "wall")
     y += 42
     buttons["add"] = Button((pad, y, w, 40), "＋ 添加到画布", "add", primary=True)
     y += 48
@@ -1490,7 +1698,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.rect.y = 58
     input_box.draw(surface)
 
-    for key in ("save", "home", "rename_store", "store", "obstacle", "add", "rotate_l", "rotate_r", "rename", "delete"):
+    for key in ("save", "home", "rename_store", "store", "obstacle", "wall", "add", "rotate_l", "rotate_r", "rename", "delete"):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
 
@@ -1526,7 +1734,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "右键拖动画布 | 滚轮缩放 | 浅色=可行走 | 红色=刨除障碍"
+    hints = "右键拖动画布 | 滚轮缩放 | 障碍可在画布外画，结算裁切到店内"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -1551,6 +1759,8 @@ def handle_toolbar_click(action, buttons):
     elif action == "obstacle":
         toggle_draw_obstacle()
         buttons["obstacle"].active = drawing_polygon
+    elif action == "wall":
+        start_edit_wall_size()
     elif action == "add":
         add_furniture_to_canvas()
     elif action == "rotate_l":
@@ -1602,9 +1812,6 @@ def handle_canvas_click(mx, my, button):
         return "pan"
 
     if drawing_polygon:
-        if not point_in_store(wx, wy):
-            show_toast("请在门店画布内绘制障碍区域")
-            return
         if current_polygon:
             last = current_polygon[-1]
             keys = pygame.key.get_pressed()
@@ -1649,6 +1856,7 @@ def main():
     global renaming_obstacle, renaming_store, input_text, search_text, search_box_active, mouse_pos
     global furniture_templates, startup_active, store_picker_active
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
+    global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus
     global startup_buttons, _catalog_refresh_ready
 
     try:
@@ -1700,6 +1908,36 @@ def main():
                     handle_store_picker_mouseup(*event.pos, store_picker_buttons)
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     close_store_picker()
+                continue
+
+            if editing_wall_size and not startup_active:
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_wall_size_click(*event.pos)
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        cancel_wall_size_edit()
+                    elif event.key == pygame.K_TAB:
+                        wall_size_focus = "width" if wall_size_focus == "length" else "length"
+                    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        apply_wall_obstacle()
+                    elif event.key == pygame.K_BACKSPACE:
+                        if wall_size_focus == "length":
+                            wall_length_text = wall_length_text[:-1]
+                        else:
+                            wall_width_text = wall_width_text[:-1]
+                    elif event.unicode:
+                        field = wall_length_text if wall_size_focus == "length" else wall_width_text
+                        ch = event.unicode
+                        if ch.isdigit() and len(field) < 5:
+                            if wall_size_focus == "length":
+                                wall_length_text += ch
+                            else:
+                                wall_width_text += ch
+                        elif ch == "." and "." not in field and len(field) < 5:
+                            if wall_size_focus == "length":
+                                wall_length_text += ch
+                            else:
+                                wall_width_text += ch
                 continue
 
             if editing_canvas_size and not startup_active:
@@ -1775,6 +2013,13 @@ def main():
                     if dragging_furniture:
                         dragging_furniture.dragging = False
                         dragging_furniture = None
+                    if selected_collision is not None and not drawing_polygon:
+                        was_dragging = dragging_collision
+                        clipped = clip_obstacle_points(collision_polygons[selected_collision]["points"])
+                        if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
+                            collision_polygons[selected_collision]["points"] = clipped
+                        elif was_dragging:
+                            show_toast("障碍物已移出画布，请拖回店内")
                     dragging_collision = False
 
             elif event.type == pygame.MOUSEMOTION:
@@ -1896,6 +2141,8 @@ def main():
                 store_picker_buttons = None
             if editing_canvas_size:
                 draw_canvas_size_dialog(screen)
+            if editing_wall_size:
+                draw_wall_size_dialog(screen)
         pygame.display.flip()
         flush_deferred_save()
         if startup_active and _catalog_refresh_ready:
