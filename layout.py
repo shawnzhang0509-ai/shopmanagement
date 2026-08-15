@@ -86,6 +86,8 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
+APP_VERSION = "1.4.1"
+EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
 FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
@@ -520,6 +522,17 @@ def remember_store_summary(path, *, width_m, height_m, furniture_count=0, obstac
         "furniture_count": furniture_count,
         "obstacle_count": obstacle_count,
     }
+
+
+def catalog_detail_from_cache(path):
+    """Build store button detail from in-memory cache only (no disk access)."""
+    info = _store_summary_cache.get(path)
+    if not info:
+        return "点击打开"
+    detail = f"{info['width']:g}×{info['height']:g}m"
+    if info["furniture_count"] or info["obstacle_count"]:
+        detail += f" · 家具{info['furniture_count']} 障碍{info['obstacle_count']}"
+    return detail
 
 
 def catalog_detail_for_path(path):
@@ -1019,7 +1032,7 @@ def draw_canvas_size_dialog(surface):
 
 def go_to_store_home():
     global startup_active, store_picker_active, force_rebuild_startup, editing_canvas_size
-    global startup_buttons, _catalog_refresh_ready
+    global startup_buttons
     startup_active = True
     store_picker_active = False
     editing_canvas_size = False
@@ -1032,14 +1045,18 @@ def go_to_store_home():
             furniture_count=len(placed_furnitures),
             obstacle_count=len(collision_polygons),
         )
-        schedule_deferred_save()
-    startup_buttons = build_store_catalog_ui(fast=True)
-    _catalog_refresh_ready = False
-    refresh_catalog_cache_async()
+    startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
     show_toast("请选择门店")
+    pygame.event.post(pygame.event.Event(EVENT_HOME_DEFERRED))
 
 
-def build_store_catalog_ui(*, picker_mode=False, fast=False):
+def handle_home_deferred():
+    if current_layout_path:
+        schedule_deferred_save()
+    refresh_catalog_cache_async()
+
+
+def build_store_catalog_ui(*, picker_mode=False, fast=False, cache_only=False):
     cx = SCREEN_WIDTH // 2
     btn_w = 400 if picker_mode else 360
     btn_h = 44
@@ -1048,8 +1065,8 @@ def build_store_catalog_ui(*, picker_mode=False, fast=False):
     buttons = {}
     for i, (name, slug) in enumerate(STORE_CATALOG):
         path = layout_path_for_slug(slug)
-        if fast:
-            detail = catalog_detail_for_path(path)
+        if cache_only or fast:
+            detail = catalog_detail_from_cache(path)
         else:
             info = read_store_summary(path)
             if info:
@@ -1089,6 +1106,8 @@ def draw_startup_screen(surface, buttons):
     surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 108)))
     for btn in buttons.values():
         btn.draw(surface)
+    ver = FONT_MARK.render(f"v{APP_VERSION}", True, C_MUTED)
+    surface.blit(ver, (SCREEN_WIDTH - ver.get_width() - 12, SCREEN_HEIGHT - ver.get_height() - 8))
 
 
 def _startup_hit_button(mx, my, btn):
@@ -1512,7 +1531,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     y += 18
     surface.blit(
         FONT_SMALL.render(
-            f"{store_name}  |  {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}",
+            f"{store_name}  |  {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}  |  v{APP_VERSION}",
             True,
             C_MUTED,
         ),
@@ -1641,6 +1660,7 @@ def main():
     ensure_layouts_dir()
     init_display()
     print("坪效布局编辑器已启动。")
+    refresh_catalog_cache_async()
 
     last_path = load_last_store_path()
     if last_path:
@@ -1655,7 +1675,7 @@ def main():
         startup_active = True
         print("请选择门店。")
 
-    startup_buttons = build_store_catalog_ui(fast=True) if startup_active else None
+    startup_buttons = build_store_catalog_ui(fast=True, cache_only=True) if startup_active else None
     store_picker_buttons = None
     editor_buttons, input_box, template_list_top = (None, None, 0)
     if not startup_active:
@@ -1669,6 +1689,10 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+                continue
+
+            if event.type == EVENT_HOME_DEFERRED:
+                handle_home_deferred()
                 continue
 
             if store_picker_active:
@@ -1722,6 +1746,11 @@ def main():
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = ui_pos(event.pos)
+                if mx < SIDEBAR_WIDTH and event.button == 1 and editor_buttons:
+                    home_btn = editor_buttons.get("home")
+                    if home_btn and home_btn.contains((mx, my)):
+                        go_to_store_home()
+                        continue
                 if mx >= SIDEBAR_WIDTH and event.button == 1:
                     result = handle_canvas_click(mx, my, event.button)
                     if result == "pan":
@@ -1735,7 +1764,11 @@ def main():
                 if event.button == 1:
                     mx, my = ui_pos(event.pos)
                     if mx < SIDEBAR_WIDTH:
-                        handle_sidebar_click(mx, my, editor_buttons, input_box, template_list_top)
+                        home_btn = editor_buttons.get("home") if editor_buttons else None
+                        if home_btn and home_btn.contains((mx, my)):
+                            pass
+                        else:
+                            handle_sidebar_click(mx, my, editor_buttons, input_box, template_list_top)
                 if event.button in (1, 3):
                     dragging_view = False
                 if event.button == 1:
@@ -1835,7 +1868,7 @@ def main():
 
         if startup_active:
             if force_rebuild_startup or startup_buttons is None:
-                startup_buttons = build_store_catalog_ui(fast=True)
+                startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
                 force_rebuild_startup = False
                 editor_buttons = None
             draw_startup_screen(screen, startup_buttons)
@@ -1867,7 +1900,7 @@ def main():
         flush_deferred_save()
         if startup_active and _catalog_refresh_ready:
             _catalog_refresh_ready = False
-            startup_buttons = build_store_catalog_ui(fast=True)
+            startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
         clock.tick(60)
 
     pygame.quit()
