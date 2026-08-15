@@ -18,6 +18,8 @@ from roi_lookup import lookup_roi
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 
+os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+
 pygame.init()
 
 root = tk.Tk()
@@ -118,6 +120,8 @@ toast_until = 0
 mouse_pos = (0, 0)
 store_width_mm = int(DEFAULT_STORE_WIDTH_M * 1000)
 store_height_mm = int(DEFAULT_STORE_HEIGHT_M * 1000)
+startup_active = True
+has_saved_layout = False
 
 
 def show_toast(msg, duration_ms=2500):
@@ -387,12 +391,16 @@ def load_layout(filepath="saved_layout.json"):
 
 
 def popup_save_dialog():
+    pygame.event.pump()
+    root.update()
     path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="保存布局")
     if path:
         save_layout(path)
 
 
 def popup_load_dialog():
+    pygame.event.pump()
+    root.update()
     path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="加载布局")
     if path:
         try:
@@ -504,6 +512,8 @@ def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=No
 
 def popup_store_size_dialog():
     try:
+        pygame.event.pump()
+        root.update()
         result = show_store_size_dialog(
             title="调整门店画布",
             width_m=store_width_mm / 1000,
@@ -516,80 +526,109 @@ def popup_store_size_dialog():
         show_toast(f"设置失败: {e}")
 
 
-def show_quick_start_dialog(has_saved=False):
-    result = {"action": None, "width_m": DEFAULT_STORE_WIDTH_M, "height_m": DEFAULT_STORE_HEIGHT_M}
+def build_startup_ui():
+    cx = SCREEN_WIDTH // 2
+    btn_w, btn_h = 300, 42
+    gap = 10
+    y = 170
+    buttons = {}
+    for i, (label, w_m, h_m) in enumerate(STORE_PRESETS):
+        if w_m is None:
+            continue
+        buttons[f"preset_{i}"] = Button(
+            (cx - btn_w // 2, y, btn_w, btn_h),
+            label,
+            f"preset:{w_m}:{h_m}",
+            primary=(i == 1),
+        )
+        y += btn_h + gap
+    buttons["custom"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "自定义尺寸...", "custom")
+    y += btn_h + gap + 6
+    if has_saved_layout:
+        buttons["load_saved"] = Button(
+            (cx - btn_w // 2, y, btn_w, btn_h),
+            "加载上次布局 (saved_layout.json)",
+            "load_saved",
+            primary=True,
+        )
+        y += btn_h + gap
+    buttons["load_file"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "打开其他布局文件...", "load_file")
+    return buttons
 
-    win = tk.Toplevel(root)
-    win.title("坪效布局 - 快速开始")
-    win.resizable(False, False)
-    win.transient(root)
-    win.grab_set()
 
-    tk.Label(win, text="选择门店画布尺寸，再用刨除方式绘制障碍物", font=("", 12, "bold")).pack(pady=(18, 6))
-    tk.Label(
-        win,
-        text="先定义店铺外框，再在可行走区域内画出要挖掉的墙体/柱位等区域。",
-        wraplength=380,
-        justify="left",
-        fg="#475569",
-    ).pack(padx=20, pady=(0, 12))
+def draw_startup_screen(surface, buttons):
+    surface.fill(C_BG)
+    title = FONT_TITLE.render("坪效布局 - 快速开始", True, C_TEXT)
+    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 72)))
+    lines = [
+        "1. 选择门店画布尺寸（浅色可行走区域）",
+        "2. 点击「刨除障碍」画出墙体 / 柱位等不可摆放区域",
+        "3. 从左侧模板添加家具并摆放",
+    ]
+    for i, line in enumerate(lines):
+        surf = FONT_SMALL.render(line, True, C_MUTED)
+        surface.blit(surf, surf.get_rect(center=(SCREEN_WIDTH // 2, 108 + i * 22)))
+    for btn in buttons.values():
+        btn.draw(surface)
 
-    preset_var = tk.StringVar(value=STORE_PRESETS[1][0])
-    width_var = tk.StringVar(value=f"{DEFAULT_STORE_WIDTH_M:g}")
-    height_var = tk.StringVar(value=f"{DEFAULT_STORE_HEIGHT_M:g}")
 
-    preset_frame = tk.Frame(win)
-    preset_frame.pack(fill="x", padx=20, pady=(0, 8))
-    tk.Label(preset_frame, text="预设:").pack(side="left")
-    tk.OptionMenu(preset_frame, preset_var, *[label for label, _, _ in STORE_PRESETS]).pack(side="left", padx=(8, 0))
+def handle_startup_click(mx, my, buttons):
+    for btn in buttons.values():
+        if btn.contains((mx, my)):
+            handle_startup_action(btn.action)
+            return
 
-    def apply_preset(*_):
-        for label, w, h in STORE_PRESETS:
-            if preset_var.get() == label and w is not None and h is not None:
-                width_var.set(f"{w:g}")
-                height_var.set(f"{h:g}")
-                break
 
-    preset_var.trace_add("write", apply_preset)
+def handle_startup_action(action):
+    global startup_active, placed_furnitures, collision_polygons
 
-    size_frame = tk.Frame(win)
-    size_frame.pack(fill="x", padx=20, pady=8)
-    tk.Label(size_frame, text="宽 (m):").grid(row=0, column=0, sticky="w")
-    tk.Entry(size_frame, textvariable=width_var, width=12).grid(row=0, column=1, padx=(8, 24))
-    tk.Label(size_frame, text="深 (m):").grid(row=0, column=2, sticky="w")
-    tk.Entry(size_frame, textvariable=height_var, width=12).grid(row=0, column=3, padx=(8, 0))
+    if action.startswith("preset:"):
+        _, w_m, h_m = action.split(":")
+        set_store_size(float(w_m), float(h_m))
+        placed_furnitures.clear()
+        collision_polygons.clear()
+        startup_active = False
+        show_toast(f"画布 {w_m}×{h_m} m")
+        return
 
-    btn_frame = tk.Frame(win)
-    btn_frame.pack(fill="x", padx=20, pady=(14, 18))
+    if action == "custom":
+        pygame.event.pump()
+        root.update()
+        result = show_store_size_dialog(title="自定义门店画布")
+        if not result.get("ok"):
+            return
+        set_store_size(result["width_m"], result["height_m"])
+        placed_furnitures.clear()
+        collision_polygons.clear()
+        startup_active = False
+        show_toast(f"画布 {result['width_m']:g}×{result['height_m']:g} m")
+        return
 
-    def on_new():
+    if action == "load_saved":
         try:
-            result["width_m"], result["height_m"] = _parse_store_size_fields(width_var, height_var, win)
-            result["action"] = "new"
-            win.destroy()
-        except ValueError as exc:
-            messagebox.showerror("输入错误", str(exc), parent=win)
+            load_layout("saved_layout.json")
+            fit_view_to_store()
+            startup_active = False
+        except Exception as e:
+            messagebox.showerror("加载失败", str(e), parent=root)
+        return
 
-    def on_load_saved():
-        result["action"] = "load_saved"
-        win.destroy()
-
-    def on_load_file():
-        result["action"] = "load_file"
-        win.destroy()
-
-    tk.Button(btn_frame, text="新建门店", width=12, command=on_new).pack(side="left")
-    if has_saved:
-        tk.Button(btn_frame, text="加载上次布局", width=14, command=on_load_saved).pack(side="left", padx=(8, 0))
-    tk.Button(btn_frame, text="打开文件...", width=12, command=on_load_file).pack(side="left", padx=(8, 0))
-    tk.Button(btn_frame, text="取消", width=8, command=win.destroy).pack(side="right")
-
-    _raise_tk_window(win)
-
-    root.wait_window(win)
-    if not result.get("action"):
-        result["action"] = "cancel"
-    return result
+    if action == "load_file":
+        pygame.event.pump()
+        root.update()
+        path = filedialog.askopenfilename(
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            title="加载布局",
+        )
+        if not path:
+            return
+        try:
+            load_layout(path)
+            fit_view_to_store()
+            startup_active = False
+        except Exception as e:
+            messagebox.showerror("加载失败", str(e), parent=root)
 
 
 # ── 操作 ────────────────────────────────────────────────────
@@ -981,7 +1020,7 @@ def main():
     global selected_collision, selected_furniture, dragging_furniture, selected_feature
     global placed_furnitures, collision_polygons, selected_template_index, dragging_collision, collision_drag_offset
     global renaming_obstacle, input_text, search_text, search_box_active, mouse_pos
-    global furniture_templates
+    global furniture_templates, startup_active, has_saved_layout
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -989,36 +1028,14 @@ def main():
         messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
         raise SystemExit(1) from e
 
-    offset_x = -((SCREEN_WIDTH - SIDEBAR_WIDTH) / 2) / scale
-    offset_y = -SCREEN_HEIGHT / 2 / scale
-
-    has_saved = os.path.exists("saved_layout.json")
-    quick = show_quick_start_dialog(has_saved=has_saved)
-    if quick.get("action") == "cancel":
-        return
-    if quick.get("action") == "load_saved":
-        try:
-            load_layout("saved_layout.json")
-        except Exception as e:
-            messagebox.showerror("加载失败", str(e), parent=root)
-            return
-    elif quick.get("action") == "load_file":
-        path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="加载布局")
-        if not path:
-            return
-        try:
-            load_layout(path)
-        except Exception as e:
-            messagebox.showerror("加载失败", str(e), parent=root)
-            return
-    else:
-        set_store_size(quick["width_m"], quick["height_m"])
-        placed_furnitures.clear()
-        collision_polygons.clear()
-
-    fit_view_to_store()
+    has_saved_layout = os.path.exists("saved_layout.json")
     init_display()
-    buttons, input_box, template_list_top = build_sidebar_ui()
+    print("坪效布局编辑器已启动，请在窗口中选择门店画布尺寸。")
+
+    startup_buttons = build_startup_ui()
+    editor_buttons = None
+    input_box = None
+    template_list_top = 0
     running = True
 
     while running:
@@ -1026,6 +1043,10 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+
+            elif startup_active:
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    handle_startup_click(*event.pos, startup_buttons)
 
             elif event.type == pygame.MOUSEWHEEL:
                 mx, my = mouse_pos
@@ -1037,7 +1058,7 @@ def main():
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = event.pos
                 if mx < SIDEBAR_WIDTH:
-                    handle_sidebar_click(mx, my, buttons, input_box, template_list_top)
+                    handle_sidebar_click(mx, my, editor_buttons, input_box, template_list_top)
                 elif event.button == 1:
                     result = handle_canvas_click(mx, my, event.button)
                     if result == "pan":
@@ -1113,10 +1134,10 @@ def main():
                 elif drawing_polygon:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         finish_obstacle()
-                        buttons["obstacle"].active = False
+                        editor_buttons["obstacle"].active = False
                     elif event.key == pygame.K_ESCAPE:
                         toggle_draw_obstacle(False)
-                        buttons["obstacle"].active = False
+                        editor_buttons["obstacle"].active = False
                 else:
                     mods = pygame.key.get_mods()
                     if event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
@@ -1131,21 +1152,26 @@ def main():
                         rotate_selected(15)
                     elif event.key == pygame.K_p:
                         toggle_draw_obstacle()
-                        buttons["obstacle"].active = drawing_polygon
+                        editor_buttons["obstacle"].active = drawing_polygon
 
-        screen.fill(C_OUTSIDE)
-        pygame.draw.rect(screen, C_OUTSIDE, CANVAS_RECT)
-        draw_grid(screen)
-        draw_store_floor(screen)
-        for f in placed_furnitures:
-            f.draw(screen, selected=(f is selected_furniture))
-        draw_obstacles(screen)
-        draw_polygon_preview(screen)
-        draw_scale_bar(screen)
-        draw_banner(screen)
-        draw_rename_dialog(screen)
-        draw_sidebar(buttons, input_box, template_list_top)
-        draw_toast(screen)
+        if startup_active:
+            draw_startup_screen(screen, startup_buttons)
+        else:
+            if editor_buttons is None:
+                editor_buttons, input_box, template_list_top = build_sidebar_ui()
+            screen.fill(C_OUTSIDE)
+            pygame.draw.rect(screen, C_OUTSIDE, CANVAS_RECT)
+            draw_grid(screen)
+            draw_store_floor(screen)
+            for f in placed_furnitures:
+                f.draw(screen, selected=(f is selected_furniture))
+            draw_obstacles(screen)
+            draw_polygon_preview(screen)
+            draw_scale_bar(screen)
+            draw_banner(screen)
+            draw_rename_dialog(screen)
+            draw_sidebar(editor_buttons, input_box, template_list_top)
+            draw_toast(screen)
         pygame.display.flip()
         clock.tick(60)
 
