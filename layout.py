@@ -791,7 +791,7 @@ def build_canvas_size_dialog_buttons():
         x += bw + gap
     y += bh + 14
     buttons["ok"] = Button((cx - bw - 6, y, bw, bh), "确定", "size_ok", primary=True)
-    buttons["cancel"] = Button((cx + 6, y, bw, bh), "size_cancel")
+    buttons["cancel"] = Button((cx + 6, y, bw, bh), "取消", "size_cancel")
     return buttons
 
 
