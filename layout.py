@@ -111,21 +111,9 @@ def init_display():
     pygame.event.clear()
 
 
-def to_surface_pos(pos):
-    """Windows 高 DPI 下窗口坐标与画布坐标可能不一致，统一转换。"""
-    if screen is None:
-        return int(pos[0]), int(pos[1])
-    try:
-        win_w, win_h = pygame.display.get_window_size()
-        surf_w, surf_h = screen.get_size()
-        if win_w > 0 and win_h > 0 and (win_w, win_h) != (surf_w, surf_h):
-            return (
-                int(pos[0] * surf_w / win_w),
-                int(pos[1] * surf_h / win_h),
-            )
-    except (AttributeError, pygame.error):
-        pass
+def ui_pos(pos):
     return int(pos[0]), int(pos[1])
+
 
 # ── 状态 ────────────────────────────────────────────────────
 offset_x, offset_y = 0.0, 0.0
@@ -182,11 +170,10 @@ class Button:
     def contains(self, pos):
         if not self.enabled:
             return False
-        mx, my = to_surface_pos(pos)
-        return self.rect.collidepoint(mx, my)
+        return self.rect.collidepoint(ui_pos(pos))
 
     def draw(self, surface):
-        hover = self.enabled and self.rect.collidepoint(to_surface_pos(mouse_pos))
+        hover = self.enabled and self.rect.collidepoint(ui_pos(mouse_pos))
         if self.toggle and self.active:
             bg, fg, border = C_ACCENT, (255, 255, 255), C_ACCENT
         elif self.danger:
@@ -219,7 +206,7 @@ class InputBox:
         self.active = False
 
     def contains(self, pos):
-        return self.rect.collidepoint(pos)
+        return self.rect.collidepoint(ui_pos(pos))
 
     def draw(self, surface):
         bg = (255, 255, 255) if self.active else (248, 250, 252)
@@ -757,12 +744,7 @@ def draw_startup_screen(surface, buttons):
 
 
 def _startup_hit_button(mx, my, btn):
-    mx, my = int(mx), int(my)
-    hit = btn.rect.inflate(20, 16)
-    if hit.collidepoint(mx, my):
-        return True
-    sx, sy = to_surface_pos((mx, my))
-    return hit.collidepoint(sx, sy)
+    return btn.rect.inflate(20, 16).collidepoint(ui_pos((mx, my)))
 
 
 def handle_startup_mouseup(mx, my, buttons):
@@ -1216,6 +1198,11 @@ def handle_toolbar_click(action, buttons):
 def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
     global search_box_active, selected_template_index
 
+    if buttons is None or input_box is None:
+        return
+
+    mx, my = ui_pos((mx, my))
+
     if input_box.contains((mx, my)):
         search_box_active = True
         return
@@ -1319,16 +1306,15 @@ def main():
 
     startup_buttons = build_startup_ui() if startup_active else None
     store_picker_buttons = None
-    editor_buttons = None
-    input_box = None
-    template_list_top = 0
+    editor_buttons, input_box, template_list_top = (None, None, 0)
+    if not startup_active:
+        editor_buttons, input_box, template_list_top = build_sidebar_ui()
     running = True
 
     while running:
-        if startup_active or store_picker_active:
-            mouse_pos = pygame.mouse.get_pos()
-        else:
-            mouse_pos = to_surface_pos(pygame.mouse.get_pos())
+        mouse_pos = pygame.mouse.get_pos()
+        if not startup_active and editor_buttons is None:
+            editor_buttons, input_box, template_list_top = build_sidebar_ui()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -1354,10 +1340,8 @@ def main():
                 offset_y = wy - my / scale
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                mx, my = event.pos
-                if mx < SIDEBAR_WIDTH:
-                    handle_sidebar_click(mx, my, editor_buttons, input_box, template_list_top)
-                elif event.button == 1:
+                mx, my = ui_pos(event.pos)
+                if mx >= SIDEBAR_WIDTH and event.button == 1:
                     result = handle_canvas_click(mx, my, event.button)
                     if result == "pan":
                         dragging_view = True
@@ -1367,6 +1351,10 @@ def main():
                     last_mouse_pos = event.pos
 
             elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    mx, my = ui_pos(event.pos)
+                    if mx < SIDEBAR_WIDTH:
+                        handle_sidebar_click(mx, my, editor_buttons, input_box, template_list_top)
                 if event.button in (1, 3):
                     dragging_view = False
                 if event.button == 1:
