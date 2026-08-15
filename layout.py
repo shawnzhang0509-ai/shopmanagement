@@ -946,16 +946,12 @@ def draw_store_picker(surface, buttons):
         btn.draw(surface)
 
 
-def handle_store_picker_click(mx, my, buttons):
+def handle_store_picker_mouseup(mx, my, buttons):
     for btn in buttons.values():
         if _startup_hit_button(mx, my, btn):
             handle_store_picker_action(btn.action)
             return True
     return False
-
-
-def handle_store_picker_mouseup(mx, my, buttons):
-    return handle_store_picker_click(mx, my, buttons)
 
 
 def handle_store_picker_action(action):
