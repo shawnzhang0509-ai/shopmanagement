@@ -70,6 +70,15 @@ DEFAULT_STORE_WIDTH_M = 20.0
 DEFAULT_STORE_HEIGHT_M = 15.0
 LAYOUTS_DIR = os.path.join(SCRIPT_DIR, "data", "layouts")
 LEGACY_LAYOUT_FILE = os.path.join(SCRIPT_DIR, "saved_layout.json")
+LAST_STORE_FILE = os.path.join(LAYOUTS_DIR, "_last.json")
+# 固定门店列表：(显示名称, 文件标识)
+STORE_CATALOG = [
+    ("Onehunga店", "onehunga"),
+    ("Hamilton店", "hamilton"),
+    ("Westgate店", "westgate"),
+    ("基督城 Colombo店", "christchurch_colombo"),
+    ("基督城 Bleiham店", "christchurch_bleiham"),
+]
 STORE_PRESETS = [
     ("小型店 12×8 m", 12.0, 8.0),
     ("中型店 20×15 m", 20.0, 15.0),
@@ -403,6 +412,52 @@ def unique_layout_path(display_name):
     return os.path.join(LAYOUTS_DIR, f"{base}_{n}.json")
 
 
+def layout_path_for_slug(slug):
+    return os.path.join(LAYOUTS_DIR, f"{slug}.json")
+
+
+def catalog_name_for_slug(slug):
+    for name, catalog_slug in STORE_CATALOG:
+        if catalog_slug == slug:
+            return name
+    return slug
+
+
+def catalog_slug_for_path(path):
+    if not path:
+        return None
+    for _, slug in STORE_CATALOG:
+        if os.path.abspath(path) == os.path.abspath(layout_path_for_slug(slug)):
+            return slug
+    return None
+
+
+def remember_last_store(path):
+    if not path:
+        return
+    try:
+        with open(LAST_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"path": path}, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def load_last_store_path():
+    if not os.path.isfile(LAST_STORE_FILE):
+        return None
+    try:
+        with open(LAST_STORE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        path = data.get("path")
+        return path if path and os.path.isfile(path) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def store_info_map():
+    return {s["path"]: s for s in list_store_layouts()}
+
+
 def migrate_legacy_layout():
     if not os.path.isfile(LEGACY_LAYOUT_FILE):
         return None
@@ -460,6 +515,7 @@ def save_layout(filepath=None):
     ensure_layouts_dir()
     data = {
         "name": store_name,
+        "store_slug": catalog_slug_for_path(filepath),
         "store": {"width_mm": store_width_mm, "height_mm": store_height_mm},
         "furnitures": [
             {"name": f.name, "roi": f.roi, "x": f.x, "y": f.y, "rotation": f.rotation, "points": f.points}
@@ -498,16 +554,26 @@ def load_layout(filepath):
     )
 
 
-def create_store_layout(name, width_m, height_m):
+def create_store_layout(name, width_m, height_m, filepath=None):
     global store_name, current_layout_path, placed_furnitures, collision_polygons, startup_active
     store_name = (name or "新门店").strip() or "新门店"
-    current_layout_path = unique_layout_path(store_name)
+    current_layout_path = filepath or unique_layout_path(store_name)
     placed_furnitures = []
     collision_polygons = []
     set_store_size(width_m, height_m)
     save_layout(current_layout_path)
+    remember_last_store(current_layout_path)
     startup_active = False
     show_toast(f"已创建门店: {store_name}")
+
+
+def open_catalog_store(slug):
+    name = catalog_name_for_slug(slug)
+    path = layout_path_for_slug(slug)
+    if os.path.isfile(path):
+        switch_store_layout(path)
+    else:
+        create_store_layout(name, DEFAULT_STORE_WIDTH_M, DEFAULT_STORE_HEIGHT_M, filepath=path)
 
 
 def switch_store_layout(path):
@@ -518,6 +584,7 @@ def switch_store_layout(path):
             pass
     load_layout(path)
     fit_view_to_store()
+    remember_last_store(path)
 
 
 def rename_current_store(new_name):
@@ -525,6 +592,11 @@ def rename_current_store(new_name):
     new_name = (new_name or "").strip()
     if not new_name:
         show_toast("门店名称不能为空")
+        return
+    if catalog_slug_for_path(current_layout_path):
+        store_name = new_name
+        save_layout(current_layout_path)
+        show_toast(f"门店显示名称已改为: {store_name}")
         return
     old_path = current_layout_path
     store_name = new_name
@@ -698,47 +770,50 @@ def popup_store_size_dialog():
         show_toast(f"设置失败: {e}")
 
 
-def build_startup_ui():
+def build_store_catalog_ui(*, picker_mode=False):
     cx = SCREEN_WIDTH // 2
-    btn_w, btn_h = 320, 48
-    gap = 12
-    y = 160
+    btn_w = 400 if picker_mode else 360
+    btn_h = 44
+    gap = 10
+    y = 118 if picker_mode else 130
     buttons = {}
-    stores = list_store_layouts()
-    if stores:
-        for i, store in enumerate(stores[:6]):
-            label = f"{store['name']}  ({store['width']:g}×{store['height']:g} m)"
-            buttons[f"open_{i}"] = Button(
-                (cx - btn_w // 2, y, btn_w, btn_h),
-                label,
-                f"open:{store['path']}",
-                primary=(i == 0),
-            )
-            y += btn_h + gap
-        y += 8
-    for i, (label, w_m, h_m) in enumerate(STORE_PRESETS):
-        if w_m is None:
-            continue
-        short = label.split()[0]
-        buttons[f"preset_{i}"] = Button(
+    by_path = store_info_map()
+    for i, (name, slug) in enumerate(STORE_CATALOG):
+        path = layout_path_for_slug(slug)
+        info = by_path.get(path)
+        mark = " ●" if picker_mode and path == current_layout_path else ""
+        if info:
+            detail = f"{info['width']:g}×{info['height']:g}m"
+            if info["furniture_count"] or info["obstacle_count"]:
+                detail += f" · 家具{info['furniture_count']} 障碍{info['obstacle_count']}"
+        else:
+            detail = "新建 20×15m"
+        label = f"{name}{mark}  ({detail})"
+        buttons[f"cat_{i}"] = Button(
             (cx - btn_w // 2, y, btn_w, btn_h),
             label,
-            f"preset:{w_m}:{h_m}:{short}",
-            primary=(i == 1 and not stores),
+            f"catalog:{slug}",
+            primary=(path == current_layout_path),
         )
         y += btn_h + gap
-    buttons["custom"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "自定义尺寸...", "custom")
-    y += btn_h + gap
-    buttons["load_file"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "打开其他文件...", "load_file")
+    if picker_mode:
+        buttons["picker_close"] = Button((cx - btn_w // 2, SCREEN_HEIGHT - 64, btn_w, 38), "关闭", "picker_close")
+    else:
+        y += 6
+        buttons["custom"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "其他尺寸 / 自定义门店...", "custom")
     return buttons
+
+
+def build_startup_ui():
+    return build_store_catalog_ui(picker_mode=False)
 
 
 def draw_startup_screen(surface, buttons):
     surface.fill(C_BG)
-    title = FONT_TITLE.render("新建门店画布", True, C_TEXT)
-    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 72)))
-    hint = FONT_BODY.render("单击按钮进入（双击也可以）", True, C_MUTED)
-    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 118)))
+    title = FONT_TITLE.render("选择门店", True, C_TEXT)
+    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 56)))
+    hint = FONT_BODY.render("单击门店名称进入；首次打开会自动创建 20×15 m 画布", True, C_MUTED)
+    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 92)))
     for btn in buttons.values():
         btn.draw(surface)
 
@@ -758,6 +833,11 @@ def handle_startup_mouseup(mx, my, buttons):
 
 def handle_startup_action(action):
     global startup_active, placed_furnitures, collision_polygons
+
+    if action.startswith("catalog:"):
+        open_catalog_store(action.split(":", 1)[1])
+        startup_active = False
+        return
 
     if action.startswith("open:"):
         path = action[5:]
@@ -895,25 +975,7 @@ def close_store_picker():
 
 
 def build_store_picker_ui():
-    stores = list_store_layouts()
-    cx = SCREEN_WIDTH // 2
-    btn_w, btn_h = 420, 40
-    gap = 8
-    y = 130
-    buttons = {}
-    buttons["picker_new"] = Button((cx - btn_w // 2, y, btn_w, btn_h), "＋ 新建门店", "picker_new", primary=True)
-    y += btn_h + gap + 8
-    for i, store in enumerate(stores[:10]):
-        mark = " ●" if store["path"] == current_layout_path else ""
-        label = f"{store['name']}{mark}  ({store['width']:g}×{store['height']:g}m)"
-        buttons[f"picker_{i}"] = Button(
-            (cx - btn_w // 2, y, btn_w, btn_h),
-            label,
-            f"picker_open:{store['path']}",
-        )
-        y += btn_h + gap
-    buttons["picker_close"] = Button((cx - btn_w // 2, SCREEN_HEIGHT - 70, btn_w, 36), "关闭", "picker_close")
-    return buttons
+    return build_store_catalog_ui(picker_mode=True)
 
 
 def draw_store_picker(surface, buttons):
@@ -940,12 +1002,8 @@ def handle_store_picker_action(action):
     global store_picker_active, startup_active
     if action == "picker_close":
         close_store_picker()
-    elif action == "picker_new":
-        close_store_picker()
-        startup_active = True
-    elif action.startswith("picker_open:"):
-        path = action[len("picker_open:"):]
-        switch_store_layout(path)
+    elif action.startswith("catalog:"):
+        open_catalog_store(action.split(":", 1)[1])
         close_store_picker()
 
 
@@ -1291,18 +1349,18 @@ def main():
     init_display()
     print("坪效布局编辑器已启动。")
 
-    stores = list_store_layouts()
-    if stores:
+    last_path = load_last_store_path()
+    if last_path:
         try:
-            switch_store_layout(stores[0]["path"])
+            switch_store_layout(last_path)
             startup_active = False
-            print(f"已自动打开最近门店: {stores[0]['name']}")
+            print(f"已打开上次门店: {store_name}")
         except Exception as e:
-            print(f"自动打开门店失败: {e}")
-            create_store_layout("中型店", DEFAULT_STORE_WIDTH_M, DEFAULT_STORE_HEIGHT_M)
+            print(f"打开上次门店失败: {e}")
+            startup_active = True
     else:
-        create_store_layout("中型店", DEFAULT_STORE_WIDTH_M, DEFAULT_STORE_HEIGHT_M)
-        print("已自动创建中型店画布，可直接开始编辑。")
+        startup_active = True
+        print("请选择门店。")
 
     startup_buttons = build_startup_ui() if startup_active else None
     store_picker_buttons = None
