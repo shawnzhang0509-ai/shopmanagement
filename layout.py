@@ -155,6 +155,14 @@ store_name = "新门店"
 current_layout_path = None
 store_picker_active = False
 renaming_store = False
+editing_canvas_size = False
+canvas_w_text = ""
+canvas_h_text = ""
+canvas_size_focus = "width"
+canvas_size_buttons = {}
+canvas_size_width_rect = None
+canvas_size_height_rect = None
+force_rebuild_startup = False
 
 
 def show_toast(msg, duration_ms=2500):
@@ -755,19 +763,126 @@ def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=No
 
 
 def popup_store_size_dialog():
+    start_edit_canvas_size()
+
+
+def start_edit_canvas_size():
+    global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, canvas_size_buttons
+    global renaming_store, renaming_obstacle
+    editing_canvas_size = True
+    renaming_store = renaming_obstacle = False
+    canvas_w_text = f"{store_width_mm / 1000:g}"
+    canvas_h_text = f"{store_height_mm / 1000:g}"
+    canvas_size_focus = "width"
+    canvas_size_buttons = build_canvas_size_dialog_buttons()
+
+
+def build_canvas_size_dialog_buttons():
+    cx = SCREEN_WIDTH // 2
+    bw, bh = 88, 34
+    gap = 8
+    y = SCREEN_HEIGHT // 2 + 36
+    buttons = {}
+    presets = [("12×8", 12, 8), ("20×15", 20, 15), ("30×20", 30, 20)]
+    total_w = len(presets) * bw + (len(presets) - 1) * gap
+    x = cx - total_w // 2
+    for i, (label, w, h) in enumerate(presets):
+        buttons[f"preset_{i}"] = Button((x, y, bw, bh), label, f"size_preset:{w}:{h}")
+        x += bw + gap
+    y += bh + 14
+    buttons["ok"] = Button((cx - bw - 6, y, bw, bh), "确定", "size_ok", primary=True)
+    buttons["cancel"] = Button((cx + 6, y, bw, bh), "size_cancel")
+    return buttons
+
+
+def apply_canvas_size():
+    global editing_canvas_size
     try:
-        pygame.event.pump()
-        get_tk_root().update()
-        result = show_store_size_dialog(
-            title="调整门店画布",
-            width_m=store_width_mm / 1000,
-            height_m=store_height_mm / 1000,
-        )
-        if result.get("ok"):
-            set_store_size(result["width_m"], result["height_m"])
-            show_toast(f"画布已设为 {result['width_m']:g}×{result['height_m']:g} m")
-    except Exception as e:
-        show_toast(f"设置失败: {e}")
+        w = float(canvas_w_text.strip())
+        h = float(canvas_h_text.strip())
+    except ValueError:
+        show_toast("请输入有效的宽高数字（米）")
+        return
+    if w <= 0 or h <= 0:
+        show_toast("宽高必须大于 0")
+        return
+    set_store_size(w, h)
+    save_current_layout()
+    editing_canvas_size = False
+    show_toast(f"画布已改为 {w:g}×{h:g} m")
+
+
+def cancel_canvas_size_edit():
+    global editing_canvas_size
+    editing_canvas_size = False
+
+
+def handle_canvas_size_action(action):
+    if action == "size_ok":
+        apply_canvas_size()
+    elif action == "size_cancel":
+        cancel_canvas_size_edit()
+    elif action.startswith("size_preset:"):
+        _, w, h = action.split(":")
+        global canvas_w_text, canvas_h_text
+        canvas_w_text = w
+        canvas_h_text = h
+        apply_canvas_size()
+
+
+def handle_canvas_size_click(mx, my):
+    global canvas_size_focus, canvas_w_text, canvas_h_text
+    mx, my = ui_pos((mx, my))
+    if canvas_size_width_rect and canvas_size_width_rect.collidepoint(mx, my):
+        canvas_size_focus = "width"
+        return True
+    if canvas_size_height_rect and canvas_size_height_rect.collidepoint(mx, my):
+        canvas_size_focus = "height"
+        return True
+    for btn in canvas_size_buttons.values():
+        if btn.contains((mx, my)):
+            handle_canvas_size_action(btn.action)
+            return True
+    return False
+
+
+def draw_canvas_size_dialog(surface):
+    global canvas_size_width_rect, canvas_size_height_rect
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 120))
+    surface.blit(overlay, (0, 0))
+    box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 130, 440, 260)
+    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
+    surface.blit(FONT_LABEL.render("修改画布尺寸", True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(
+        FONT_SMALL.render(f"门店: {store_name}  |  单位: 米", True, C_MUTED),
+        (box.x + 20, box.y + 44),
+    )
+    surface.blit(FONT_SMALL.render("宽 (m)", True, C_TEXT), (box.x + 20, box.y + 78))
+    canvas_size_width_rect = pygame.Rect(box.x + 20, box.y + 100, 180, 36)
+    surface.blit(FONT_SMALL.render("深 (m)", True, C_TEXT), (box.x + 220, box.y + 78))
+    canvas_size_height_rect = pygame.Rect(box.x + 220, box.y + 100, 180, 36)
+    for rect, text, focused in (
+        (canvas_size_width_rect, canvas_w_text, canvas_size_focus == "width"),
+        (canvas_size_height_rect, canvas_h_text, canvas_size_focus == "height"),
+    ):
+        pygame.draw.rect(surface, (248, 250, 252), rect, border_radius=8)
+        pygame.draw.rect(surface, C_ACCENT if focused else C_BORDER, rect, 2 if focused else 1, border_radius=8)
+        surface.blit(FONT_BODY.render(text + ("|" if focused else ""), True, C_TEXT), (rect.x + 10, rect.y + 8))
+    for btn in canvas_size_buttons.values():
+        btn.draw(surface)
+
+
+def go_to_store_home():
+    global startup_active, store_picker_active, force_rebuild_startup, editing_canvas_size
+    if current_layout_path:
+        save_current_layout()
+    startup_active = True
+    store_picker_active = False
+    editing_canvas_size = False
+    force_rebuild_startup = True
+    show_toast("已保存，请选择门店")
 
 
 def build_store_catalog_ui(*, picker_mode=False):
@@ -811,9 +926,11 @@ def build_startup_ui():
 def draw_startup_screen(surface, buttons):
     surface.fill(C_BG)
     title = FONT_TITLE.render("选择门店", True, C_TEXT)
-    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 56)))
-    hint = FONT_BODY.render("单击门店名称进入；首次打开会自动创建 20×15 m 画布", True, C_MUTED)
-    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 92)))
+    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 48)))
+    sub = FONT_SMALL.render("单击门店进入编辑  |  返回前已自动保存", True, C_MUTED)
+    surface.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 82)))
+    hint = FONT_BODY.render("单击门店名称进入", True, C_ACCENT)
+    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 108)))
     for btn in buttons.values():
         btn.draw(surface)
 
@@ -1149,11 +1266,11 @@ def build_sidebar_ui():
     # toolbar row 1
     bw = (w - 8) // 2
     buttons["save"] = Button((pad, y, bw, 34), "保存", "save")
-    buttons["switch"] = Button((pad + bw + 8, y, bw, 34), "切换门店", "switch")
+    buttons["home"] = Button((pad + bw + 8, y, bw, 34), "返回门店选择", "home")
     y += 42
     buttons["rename_store"] = Button((pad, y, w, 34), "重命名门店", "rename_store")
     y += 42
-    buttons["store"] = Button((pad, y, w, 34), "门店画布尺寸", "store")
+    buttons["store"] = Button((pad, y, w, 34), "修改画布尺寸", "store")
     y += 42
     buttons["obstacle"] = Button((pad, y, w, 34), "刨除障碍", "obstacle", toggle=True)
     y += 42
@@ -1180,7 +1297,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.rect.y = 58
     input_box.draw(surface)
 
-    for key in ("save", "switch", "rename_store", "store", "obstacle", "add", "rotate_l", "rotate_r", "rename", "delete"):
+    for key in ("save", "home", "rename_store", "store", "obstacle", "add", "rotate_l", "rotate_r", "rename", "delete"):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
 
@@ -1232,12 +1349,12 @@ def draw_sidebar(buttons, input_box, template_list_top):
 def handle_toolbar_click(action, buttons):
     if action == "save":
         save_current_layout()
-    elif action == "switch":
-        open_store_picker()
+    elif action == "home":
+        go_to_store_home()
     elif action == "rename_store":
         start_rename_store()
     elif action == "store":
-        popup_store_size_dialog()
+        start_edit_canvas_size()
     elif action == "obstacle":
         toggle_draw_obstacle()
         buttons["obstacle"].active = drawing_polygon
@@ -1338,6 +1455,7 @@ def main():
     global placed_furnitures, collision_polygons, selected_template_index, dragging_collision, collision_drag_offset
     global renaming_obstacle, renaming_store, input_text, search_text, search_box_active, mouse_pos
     global furniture_templates, startup_active, store_picker_active
+    global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -1383,6 +1501,36 @@ def main():
                     handle_store_picker_mouseup(*event.pos, store_picker_buttons)
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     close_store_picker()
+                continue
+
+            if editing_canvas_size and not startup_active:
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_canvas_size_click(*event.pos)
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        cancel_canvas_size_edit()
+                    elif event.key == pygame.K_TAB:
+                        canvas_size_focus = "height" if canvas_size_focus == "width" else "width"
+                    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        apply_canvas_size()
+                    elif event.key == pygame.K_BACKSPACE:
+                        if canvas_size_focus == "width":
+                            canvas_w_text = canvas_w_text[:-1]
+                        else:
+                            canvas_h_text = canvas_h_text[:-1]
+                    elif event.unicode:
+                        field = canvas_w_text if canvas_size_focus == "width" else canvas_h_text
+                        ch = event.unicode
+                        if ch.isdigit() and len(field) < 5:
+                            if canvas_size_focus == "width":
+                                canvas_w_text += ch
+                            else:
+                                canvas_h_text += ch
+                        elif ch == "." and "." not in field and len(field) < 5:
+                            if canvas_size_focus == "width":
+                                canvas_w_text += ch
+                            else:
+                                canvas_h_text += ch
                 continue
 
             if startup_active:
@@ -1511,8 +1659,10 @@ def main():
                         editor_buttons["obstacle"].active = drawing_polygon
 
         if startup_active:
-            if startup_buttons is None:
+            if force_rebuild_startup or startup_buttons is None:
                 startup_buttons = build_startup_ui()
+                force_rebuild_startup = False
+                editor_buttons = None
             draw_startup_screen(screen, startup_buttons)
         else:
             if editor_buttons is None:
@@ -1536,6 +1686,8 @@ def main():
                 draw_store_picker(screen, store_picker_buttons)
             else:
                 store_picker_buttons = None
+            if editing_canvas_size:
+                draw_canvas_size_dialog(screen)
         pygame.display.flip()
         clock.tick(60)
 
