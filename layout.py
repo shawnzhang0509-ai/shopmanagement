@@ -102,6 +102,26 @@ def init_display():
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("坪效布局编辑器")
     clock = pygame.time.Clock()
+    pygame.mouse.set_visible(True)
+    pygame.event.set_grab(False)
+    pygame.event.clear()
+
+
+def to_surface_pos(pos):
+    """Windows 高 DPI 下窗口坐标与画布坐标可能不一致，统一转换。"""
+    if screen is None:
+        return int(pos[0]), int(pos[1])
+    try:
+        win_w, win_h = pygame.display.get_window_size()
+        surf_w, surf_h = screen.get_size()
+        if win_w > 0 and win_h > 0 and (win_w, win_h) != (surf_w, surf_h):
+            return (
+                int(pos[0] * surf_w / win_w),
+                int(pos[1] * surf_h / win_h),
+            )
+    except (AttributeError, pygame.error):
+        pass
+    return int(pos[0]), int(pos[1])
 
 # ── 状态 ────────────────────────────────────────────────────
 offset_x, offset_y = 0.0, 0.0
@@ -153,10 +173,13 @@ class Button:
         self.enabled = True
 
     def contains(self, pos):
-        return self.enabled and self.rect.collidepoint(pos)
+        if not self.enabled:
+            return False
+        mx, my = to_surface_pos(pos)
+        return self.rect.collidepoint(mx, my)
 
     def draw(self, surface):
-        hover = self.enabled and self.rect.collidepoint(mouse_pos)
+        hover = self.enabled and self.rect.collidepoint(to_surface_pos(mouse_pos))
         if self.toggle and self.active:
             bg, fg, border = C_ACCENT, (255, 255, 255), C_ACCENT
         elif self.danger:
@@ -577,7 +600,7 @@ def draw_startup_screen(surface, buttons):
     for i, line in enumerate(lines):
         surf = FONT_SMALL.render(line, True, C_MUTED)
         surface.blit(surf, surf.get_rect(center=(SCREEN_WIDTH // 2, 108 + i * 22)))
-    hint = FONT_SMALL.render("快捷键: 1/2/3 选预设 | Enter 中型店", True, C_ACCENT)
+    hint = FONT_SMALL.render("快捷键: 1/2/3 选预设 | Enter/Space 中型店 | 点空白处也可进入", True, C_ACCENT)
     surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 178)))
     for btn in buttons.values():
         btn.draw(surface)
@@ -591,18 +614,58 @@ def handle_startup_key(event):
     }
     if event.key in key_map:
         handle_startup_action(key_map[event.key])
-    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
         handle_startup_action("preset:20.0:15.0")
 
 
-def handle_startup_click(mx, my, buttons):
-    mx, my = int(mx), int(my)
+def handle_startup_click(mx, my, buttons, allow_fallback=True):
+    mx, my = to_surface_pos((mx, my))
     for btn in buttons.values():
-        if btn.contains((mx, my)):
+        hit = btn.rect.inflate(12, 12)
+        if hit.collidepoint(mx, my):
             print(f"启动选项: {btn.label}")
             handle_startup_action(btn.action)
             return True
+    if allow_fallback and my >= 190:
+        print("启动选项: 默认中型店 20×15 m（点击兜底）")
+        handle_startup_action("preset:20.0:15.0")
+        return True
     return False
+
+
+_startup_keys_prev = set()
+_startup_mouse_prev = False
+
+
+def poll_startup_input(buttons):
+    """每帧轮询键鼠，不依赖事件队列（Windows 上更可靠）。"""
+    global _startup_keys_prev, _startup_mouse_prev
+
+    pygame.event.pump()
+    mouse_pos_now = to_surface_pos(pygame.mouse.get_pos())
+    mouse_down = pygame.mouse.get_pressed(3)[0]
+    if mouse_down and not _startup_mouse_prev:
+        handle_startup_click(mouse_pos_now[0], mouse_pos_now[1], buttons, allow_fallback=True)
+    _startup_mouse_prev = mouse_down
+
+    key_actions = {
+        pygame.K_1: "preset:12.0:8.0",
+        pygame.K_2: "preset:20.0:15.0",
+        pygame.K_3: "preset:30.0:20.0",
+        pygame.K_RETURN: "preset:20.0:15.0",
+        pygame.K_KP_ENTER: "preset:20.0:15.0",
+        pygame.K_SPACE: "preset:20.0:15.0",
+    }
+    pressed_now = set()
+    keys = pygame.key.get_pressed()
+    for key, action in key_actions.items():
+        if keys[key]:
+            pressed_now.add(key)
+            if key not in _startup_keys_prev:
+                print(f"启动选项: 键盘 {pygame.key.name(key)}")
+                handle_startup_action(action)
+                return
+    _startup_keys_prev = pressed_now
 
 
 def handle_startup_action(action):
@@ -643,6 +706,7 @@ def handle_startup_action(action):
         pygame.event.pump()
         get_tk_root().update()
         path = filedialog.askopenfilename(
+            parent=get_tk_root(),
             defaultextension=".json",
             filetypes=[("JSON", "*.json")],
             title="加载布局",
@@ -1057,26 +1121,36 @@ def main():
     has_saved_layout = os.path.exists("saved_layout.json")
     init_display()
     print("坪效布局编辑器已启动，请在窗口中选择门店画布尺寸。")
+    print("提示: 按 2 或 Enter 可快速进入中型店；也可直接点击按钮。")
 
-    startup_buttons = build_startup_ui()
+    if has_saved_layout:
+        try:
+            load_layout("saved_layout.json")
+            fit_view_to_store()
+            startup_active = False
+            print("已自动加载 saved_layout.json")
+        except Exception as e:
+            print(f"自动加载失败，请手动选择: {e}")
+            startup_active = True
+    else:
+        startup_active = True
+
+    startup_buttons = build_startup_ui() if startup_active else None
     editor_buttons = None
     input_box = None
     template_list_top = 0
-    startup_mouse_was_down = False
     running = True
 
     while running:
-        mouse_pos = pygame.mouse.get_pos()
+        mouse_pos = to_surface_pos(pygame.mouse.get_pos())
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
                 continue
 
             if startup_active:
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    handle_startup_click(*event.pos, startup_buttons)
-                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                    handle_startup_click(*event.pos, startup_buttons)
+                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and event.button == 1:
+                    handle_startup_click(*event.pos, startup_buttons, allow_fallback=False)
                 elif event.type == pygame.KEYDOWN:
                     handle_startup_key(event)
                 continue
@@ -1188,13 +1262,9 @@ def main():
                         editor_buttons["obstacle"].active = drawing_polygon
 
         if startup_active:
-            mouse_down = pygame.mouse.get_pressed(3)[0]
-            if mouse_down and not startup_mouse_was_down:
-                handle_startup_click(*mouse_pos, startup_buttons)
-            startup_mouse_was_down = mouse_down
+            poll_startup_input(startup_buttons)
             draw_startup_screen(screen, startup_buttons)
         else:
-            startup_mouse_was_down = False
             if editor_buttons is None:
                 editor_buttons, input_box, template_list_top = build_sidebar_ui()
             screen.fill(C_OUTSIDE)
