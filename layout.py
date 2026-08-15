@@ -19,11 +19,20 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 
 os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+if sys.platform == "win32":
+    os.environ.setdefault("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")
 
 pygame.init()
 
-root = tk.Tk()
-root.withdraw()
+_tk_root = None
+
+
+def get_tk_root():
+    global _tk_root
+    if _tk_root is None:
+        _tk_root = tk.Tk()
+        _tk_root.withdraw()
+    return _tk_root
 
 # ── 窗口与布局 ──────────────────────────────────────────────
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 800
@@ -392,16 +401,16 @@ def load_layout(filepath="saved_layout.json"):
 
 def popup_save_dialog():
     pygame.event.pump()
-    root.update()
-    path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="保存布局")
+    get_tk_root().update()
+    path = filedialog.asksaveasfilename(parent=get_tk_root(), defaultextension=".json", filetypes=[("JSON", "*.json")], title="保存布局")
     if path:
         save_layout(path)
 
 
 def popup_load_dialog():
     pygame.event.pump()
-    root.update()
-    path = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], title="加载布局")
+    get_tk_root().update()
+    path = filedialog.askopenfilename(parent=get_tk_root(), defaultextension=".json", filetypes=[("JSON", "*.json")], title="加载布局")
     if path:
         try:
             load_layout(path)
@@ -442,10 +451,10 @@ def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=No
     height_m = DEFAULT_STORE_HEIGHT_M if height_m is None else float(height_m)
     result = {"ok": False}
 
-    win = tk.Toplevel(root)
+    win = tk.Toplevel(get_tk_root())
     win.title(title)
     win.resizable(False, False)
-    win.transient(root)
+    win.transient(get_tk_root())
     win.grab_set()
 
     tk.Label(
@@ -506,14 +515,14 @@ def show_store_size_dialog(title="门店画布尺寸", width_m=None, height_m=No
 
     _raise_tk_window(win)
 
-    root.wait_window(win)
+    get_tk_root().wait_window(win)
     return result
 
 
 def popup_store_size_dialog():
     try:
         pygame.event.pump()
-        root.update()
+        get_tk_root().update()
         result = show_store_size_dialog(
             title="调整门店画布",
             width_m=store_width_mm / 1000,
@@ -530,7 +539,7 @@ def build_startup_ui():
     cx = SCREEN_WIDTH // 2
     btn_w, btn_h = 300, 42
     gap = 10
-    y = 170
+    y = 200
     buttons = {}
     for i, (label, w_m, h_m) in enumerate(STORE_PRESETS):
         if w_m is None:
@@ -568,22 +577,39 @@ def draw_startup_screen(surface, buttons):
     for i, line in enumerate(lines):
         surf = FONT_SMALL.render(line, True, C_MUTED)
         surface.blit(surf, surf.get_rect(center=(SCREEN_WIDTH // 2, 108 + i * 22)))
+    hint = FONT_SMALL.render("快捷键: 1/2/3 选预设 | Enter 中型店", True, C_ACCENT)
+    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 178)))
     for btn in buttons.values():
         btn.draw(surface)
 
 
+def handle_startup_key(event):
+    key_map = {
+        pygame.K_1: "preset:12.0:8.0",
+        pygame.K_2: "preset:20.0:15.0",
+        pygame.K_3: "preset:30.0:20.0",
+    }
+    if event.key in key_map:
+        handle_startup_action(key_map[event.key])
+    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+        handle_startup_action("preset:20.0:15.0")
+
+
 def handle_startup_click(mx, my, buttons):
+    mx, my = int(mx), int(my)
     for btn in buttons.values():
         if btn.contains((mx, my)):
+            print(f"启动选项: {btn.label}")
             handle_startup_action(btn.action)
-            return
+            return True
+    return False
 
 
 def handle_startup_action(action):
     global startup_active, placed_furnitures, collision_polygons
 
     if action.startswith("preset:"):
-        _, w_m, h_m = action.split(":")
+        _, w_m, h_m = action.split(":", 2)
         set_store_size(float(w_m), float(h_m))
         placed_furnitures.clear()
         collision_polygons.clear()
@@ -593,7 +619,7 @@ def handle_startup_action(action):
 
     if action == "custom":
         pygame.event.pump()
-        root.update()
+        get_tk_root().update()
         result = show_store_size_dialog(title="自定义门店画布")
         if not result.get("ok"):
             return
@@ -610,12 +636,12 @@ def handle_startup_action(action):
             fit_view_to_store()
             startup_active = False
         except Exception as e:
-            messagebox.showerror("加载失败", str(e), parent=root)
+            messagebox.showerror("加载失败", str(e), parent=get_tk_root())
         return
 
     if action == "load_file":
         pygame.event.pump()
-        root.update()
+        get_tk_root().update()
         path = filedialog.askopenfilename(
             defaultextension=".json",
             filetypes=[("JSON", "*.json")],
@@ -628,7 +654,7 @@ def handle_startup_action(action):
             fit_view_to_store()
             startup_active = False
         except Exception as e:
-            messagebox.showerror("加载失败", str(e), parent=root)
+            messagebox.showerror("加载失败", str(e), parent=get_tk_root())
 
 
 # ── 操作 ────────────────────────────────────────────────────
@@ -1036,6 +1062,7 @@ def main():
     editor_buttons = None
     input_box = None
     template_list_top = 0
+    startup_mouse_was_down = False
     running = True
 
     while running:
@@ -1043,12 +1070,18 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+                continue
 
-            elif startup_active:
+            if startup_active:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     handle_startup_click(*event.pos, startup_buttons)
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_startup_click(*event.pos, startup_buttons)
+                elif event.type == pygame.KEYDOWN:
+                    handle_startup_key(event)
+                continue
 
-            elif event.type == pygame.MOUSEWHEEL:
+            if event.type == pygame.MOUSEWHEEL:
                 mx, my = mouse_pos
                 wx, wy = screen_to_world(mx, my)
                 scale = max(MIN_SCALE, min(MAX_SCALE, scale * (ZOOM_IN if event.y > 0 else ZOOM_OUT)))
@@ -1155,8 +1188,13 @@ def main():
                         editor_buttons["obstacle"].active = drawing_polygon
 
         if startup_active:
+            mouse_down = pygame.mouse.get_pressed(3)[0]
+            if mouse_down and not startup_mouse_was_down:
+                handle_startup_click(*mouse_pos, startup_buttons)
+            startup_mouse_was_down = mouse_down
             draw_startup_screen(screen, startup_buttons)
         else:
+            startup_mouse_was_down = False
             if editor_buttons is None:
                 editor_buttons, input_box, template_list_top = build_sidebar_ui()
             screen.fill(C_OUTSIDE)
