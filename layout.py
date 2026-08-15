@@ -86,7 +86,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -459,15 +459,43 @@ class Furniture:
         return point_in_poly(wx, wy, self.get_rotated_points())
 
 
+def _segments_intersect(a1, a2, b1, b2):
+    def ccw(a, b, c):
+        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+
+    return ccw(a1, b1, b2) != ccw(a2, b1, b2) and ccw(a1, a2, b1) != ccw(a1, a2, b2)
+
+
+def _polygon_edges(points):
+    for i in range(len(points)):
+        yield points[i], points[(i + 1) % len(points)]
+
+
+def polygons_overlap(poly_a, poly_b):
+    if len(poly_a) < 3 or len(poly_b) < 3:
+        return False
+    for px, py in poly_a:
+        if point_in_poly(px, py, poly_b):
+            return True
+    for px, py in poly_b:
+        if point_in_poly(px, py, poly_a):
+            return True
+    for a1, a2 in _polygon_edges(poly_a):
+        for b1, b2 in _polygon_edges(poly_b):
+            if _segments_intersect(a1, a2, b1, b2):
+                return True
+    return False
+
+
 def check_collision(furniture, obstacles):
     store_poly = store_rect_points()
-    for px, py in furniture.get_rotated_points():
+    furn_pts = furniture.get_rotated_points()
+    for px, py in furn_pts:
         if not point_in_poly(px, py, store_poly):
             return True
     for col in obstacles:
-        for px, py in furniture.get_rotated_points():
-            if point_in_poly(px, py, col["points"]):
-                return True
+        if polygons_overlap(furn_pts, col["points"]):
+            return True
     return False
 
 
@@ -1383,6 +1411,9 @@ def add_furniture_to_canvas():
     new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points])
     new_furn.x = store_width_mm / 2
     new_furn.y = store_height_mm / 2
+    if check_collision(new_furn, collision_polygons):
+        show_toast("无法放置：与墙体或障碍物重叠")
+        return
     placed_furnitures.append(new_furn)
     selected_furniture = new_furn
     selected_feature = new_furn
@@ -1557,33 +1588,24 @@ def draw_store_floor(surface):
     surface.blit(label, (tl[0] + 8, tl[1] + 8))
 
 
-def _draw_excavation_hatch(surface, pts):
-    if len(pts) < 3:
-        return
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    min_x, max_x = int(min(xs)), int(max(xs))
-    min_y, max_y = int(min(ys)), int(max(ys))
-    step = 14
-    hatch_color = (185, 28, 28, 80)
-    for i in range(min_x - max_y, max_x + max_y, step):
-        line = [(i, min_y - 20), (i + (max_y - min_y) + 40, max_y + 20)]
-        pygame.draw.lines(surface, hatch_color[:3], False, line, 1)
-
-
 def draw_obstacles(surface):
     for idx, col in enumerate(collision_polygons):
         pts = [world_to_screen(x, y) for x, y in col["points"]]
         selected = idx == selected_collision
         is_wall = col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
-        fill = C_OBSTACLE_SEL if selected else ((200, 210, 220) if is_wall else (254, 202, 202))
-        border = C_WALL if is_wall else (C_DANGER if selected else (185, 28, 28))
+        if is_wall:
+            fill = (210, 218, 228) if not selected else (180, 195, 215)
+            border = C_WALL
+            label_color = C_WALL
+        else:
+            fill = C_OBSTACLE_SEL if selected else (254, 202, 202)
+            border = C_DANGER if selected else (185, 28, 28)
+            label_color = (127, 29, 29)
         pygame.draw.polygon(surface, fill, pts)
-        _draw_excavation_hatch(surface, pts)
         pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
-        label = FONT_BODY.render(col["name"], True, (127, 29, 29))
+        label = FONT_BODY.render(col["name"], True, label_color)
         surface.blit(label, label.get_rect(center=(cx, cy)))
 
 
@@ -1734,7 +1756,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "右键拖动画布 | 滚轮缩放 | 障碍可在画布外画，结算裁切到店内"
+    hints = "右键拖动画布 | 滚轮缩放 | 红色=障碍 灰色=墙体 | 家具不可重叠"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
