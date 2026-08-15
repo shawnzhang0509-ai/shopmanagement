@@ -86,7 +86,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -177,6 +177,7 @@ force_rebuild_startup = False
 _store_summary_cache = {}
 _pending_save_snapshot = None
 _save_thread = None
+_save_generation = 0
 _catalog_refresh_thread = None
 _catalog_refresh_ready = False
 
@@ -566,8 +567,11 @@ def remember_last_store(path):
     if not path:
         return
     try:
+        payload = {"path": path, "slug": catalog_slug_for_path(path)}
         with open(LAST_STORE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"path": path}, f, ensure_ascii=False)
+            json.dump(payload, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
     except OSError:
         pass
 
@@ -579,7 +583,14 @@ def load_last_store_path():
         with open(LAST_STORE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         path = data.get("path")
-        return path if path and os.path.isfile(path) else None
+        if path and os.path.isfile(path):
+            return path
+        slug = data.get("slug")
+        if slug:
+            slug_path = layout_path_for_slug(slug)
+            if os.path.isfile(slug_path):
+                return slug_path
+        return None
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -727,6 +738,11 @@ def write_layout_data(filepath, data):
     ensure_layouts_dir()
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
     store = data.get("store", {})
     remember_store_summary(
         filepath,
@@ -738,12 +754,15 @@ def write_layout_data(filepath, data):
 
 
 def save_layout(filepath=None, *, quiet=False):
-    global current_layout_path
+    global current_layout_path, _pending_save_snapshot, _save_generation
+    _save_generation += 1
+    _pending_save_snapshot = None
     filepath = filepath or current_layout_path
     if not filepath:
         filepath = unique_layout_path(store_name)
     write_layout_data(filepath, build_layout_data(filepath))
     current_layout_path = filepath
+    remember_last_store(filepath)
     if not quiet:
         show_toast(f"已保存门店: {store_name}")
 
@@ -752,13 +771,20 @@ def schedule_deferred_save():
     global _pending_save_snapshot
     if not current_layout_path:
         return
-    _pending_save_snapshot = (current_layout_path, build_layout_data(current_layout_path))
+    _pending_save_snapshot = (
+        current_layout_path,
+        build_layout_data(current_layout_path),
+        _save_generation,
+    )
 
 
 def _run_deferred_save(snapshot):
-    filepath, data = snapshot
+    filepath, data, generation = snapshot
+    if generation != _save_generation:
+        return
     try:
         write_layout_data(filepath, data)
+        remember_last_store(filepath)
     except Exception as exc:
         print(f"后台保存失败: {exc}")
 
@@ -1411,14 +1437,11 @@ def add_furniture_to_canvas():
     new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points])
     new_furn.x = store_width_mm / 2
     new_furn.y = store_height_mm / 2
-    if check_collision(new_furn, collision_polygons):
-        show_toast("无法放置：与墙体或障碍物重叠")
-        return
     placed_furnitures.append(new_furn)
     selected_furniture = new_furn
     selected_feature = new_furn
     selected_collision = None
-    show_toast(f"已添加: {tpl.name}")
+    show_toast(f"已添加: {tpl.name}（可拖动到合适位置）")
 
 
 def delete_selected():
@@ -1699,8 +1722,8 @@ def build_sidebar_ui():
     y += 42
     buttons["add"] = Button((pad, y, w, 40), "＋ 添加到画布", "add", primary=True)
     y += 48
-    buttons["rotate_l"] = Button((pad, y, bw, 34), "↺ 左转", "rotate_l")
-    buttons["rotate_r"] = Button((pad + bw + 8, y, bw, 34), "↻ 右转", "rotate_r")
+    buttons["rotate_l"] = Button((pad, y, bw, 34), "左转", "rotate_l")
+    buttons["rotate_r"] = Button((pad + bw + 8, y, bw, 34), "右转", "rotate_r")
     y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
     buttons["delete"] = Button((pad + bw + 8, y, bw, 34), "删除", "delete", danger=True)
@@ -1918,6 +1941,8 @@ def main():
             editor_buttons, input_box, template_list_top = build_sidebar_ui()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                if current_layout_path and not startup_active:
+                    save_layout(current_layout_path, quiet=True)
                 running = False
                 continue
 
