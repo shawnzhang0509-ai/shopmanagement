@@ -163,6 +163,7 @@ canvas_size_buttons = {}
 canvas_size_width_rect = None
 canvas_size_height_rect = None
 force_rebuild_startup = False
+_store_summary_cache = {}
 
 
 def show_toast(msg, duration_ms=2500):
@@ -466,6 +467,42 @@ def store_info_map():
     return {s["path"]: s for s in list_store_layouts()}
 
 
+def read_store_summary(path):
+    """Read one layout file summary, with mtime cache for fast store home."""
+    if not path:
+        return None
+    try:
+        if not os.path.isfile(path):
+            return None
+        mtime = os.path.getmtime(path)
+        cached = _store_summary_cache.get(path)
+        if cached and cached.get("_mtime") == mtime:
+            return cached
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        store = data.get("store", {})
+        info = {
+            "_mtime": mtime,
+            "path": path,
+            "name": data.get("name") or os.path.splitext(os.path.basename(path))[0],
+            "width": int(store.get("width_mm", 0)) / 1000,
+            "height": int(store.get("height_mm", 0)) / 1000,
+            "furniture_count": len(data.get("furnitures", [])),
+            "obstacle_count": len(data.get("obstacles", [])),
+        }
+        _store_summary_cache[path] = info
+        return info
+    except Exception:
+        return None
+
+
+def invalidate_store_summary(path=None):
+    if path:
+        _store_summary_cache.pop(path, None)
+    else:
+        _store_summary_cache.clear()
+
+
 def migrate_legacy_layout():
     if not os.path.isfile(LEGACY_LAYOUT_FILE):
         return None
@@ -515,7 +552,7 @@ def list_store_layouts():
     return stores
 
 
-def save_layout(filepath=None):
+def save_layout(filepath=None, *, quiet=False):
     global current_layout_path
     filepath = filepath or current_layout_path
     if not filepath:
@@ -535,7 +572,9 @@ def save_layout(filepath=None):
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     current_layout_path = filepath
-    show_toast(f"已保存门店: {store_name}")
+    invalidate_store_summary(filepath)
+    if not quiet:
+        show_toast(f"已保存门店: {store_name}")
 
 
 def load_layout(filepath):
@@ -876,12 +915,12 @@ def draw_canvas_size_dialog(surface):
 
 def go_to_store_home():
     global startup_active, store_picker_active, force_rebuild_startup, editing_canvas_size
-    if current_layout_path:
-        save_current_layout()
     startup_active = True
     store_picker_active = False
     editing_canvas_size = False
     force_rebuild_startup = True
+    if current_layout_path:
+        save_layout(current_layout_path, quiet=True)
     show_toast("已保存，请选择门店")
 
 
@@ -892,10 +931,9 @@ def build_store_catalog_ui(*, picker_mode=False):
     gap = 10
     y = 118 if picker_mode else 130
     buttons = {}
-    by_path = store_info_map()
     for i, (name, slug) in enumerate(STORE_CATALOG):
         path = layout_path_for_slug(slug)
-        info = by_path.get(path)
+        info = read_store_summary(path)
         mark = " ●" if picker_mode and path == current_layout_path else ""
         if info:
             detail = f"{info['width']:g}×{info['height']:g}m"
@@ -1132,17 +1170,32 @@ def filtered_templates():
 
 
 # ── 绘制 ────────────────────────────────────────────────────
+def _grid_step(span_mm, max_lines=160):
+    step = GRID_SPACING
+    while span_mm > 0 and span_mm // step > max_lines:
+        step *= 2
+    return step
+
+
 def draw_grid(surface):
     start_x = int(offset_x // GRID_SPACING * GRID_SPACING)
     end_x = int((offset_x + CANVAS_RECT.width / scale) // GRID_SPACING * GRID_SPACING + GRID_SPACING)
     start_y = int(offset_y // GRID_SPACING * GRID_SPACING)
     end_y = int((offset_y + SCREEN_HEIGHT / scale) // GRID_SPACING * GRID_SPACING + GRID_SPACING)
-    for x in range(start_x, end_x, GRID_SPACING):
+    x_step = _grid_step(max(GRID_SPACING, end_x - start_x))
+    y_step = _grid_step(max(GRID_SPACING, end_y - start_y))
+    x = start_x - (start_x % x_step)
+    while x <= end_x:
         sx = world_to_screen(x, 0)[0]
-        pygame.draw.line(surface, C_GRID, (sx, 0), (sx, SCREEN_HEIGHT))
-    for y in range(start_y, end_y, GRID_SPACING):
+        if SIDEBAR_WIDTH <= sx <= SCREEN_WIDTH:
+            pygame.draw.line(surface, C_GRID, (sx, 0), (sx, SCREEN_HEIGHT))
+        x += x_step
+    y = start_y - (start_y % y_step)
+    while y <= end_y:
         sy = world_to_screen(0, y)[1]
-        pygame.draw.line(surface, C_GRID, (SIDEBAR_WIDTH, sy), (SCREEN_WIDTH, sy))
+        if 0 <= sy <= SCREEN_HEIGHT:
+            pygame.draw.line(surface, C_GRID, (SIDEBAR_WIDTH, sy), (SCREEN_WIDTH, sy))
+        y += y_step
 
 
 def draw_store_floor(surface):
