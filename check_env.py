@@ -8,7 +8,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 
 REQUIRED_FILES = ["layout.py", "furniture_templates.json", "furniture_sim.py", "ui_common.py"]
-OPTIONAL_FILES = ["start_furniture_sim.bat", "start_template.bat", "grab_display.bat"]
+OPTIONAL_FILES = ["start.bat", "start_furniture_sim.bat", "grab_display.bat", "install.bat"]
 
 
 def ok(msg: str) -> None:
@@ -126,9 +126,9 @@ def main() -> int:
         print(f"检查未通过，共 {errors} 项问题。请按上面提示修复。")
         return 1
     print("全部通过！可以运行:")
-    print("  start_furniture_sim.bat  (家具模板 / Display 大库)")
-    print("  grab_display.bat         (抓取 Display 数据)")
-    print("  python layout.py         (坪效布局编辑器, 旧版)")
+    print("  start.bat                  (坪效布局编辑器 layout.py)")
+    print("  start_furniture_sim.bat    (家具模板 / Display 大库)")
+    print("  grab_display.bat           (抓取 Display 数据)")
     return 0
 
 
