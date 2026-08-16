@@ -86,7 +86,8 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
+OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -308,6 +309,91 @@ def fit_view_to_store():
     canvas_cy = SCREEN_HEIGHT / 2
     offset_x = store_cx - (canvas_cx - SIDEBAR_WIDTH) / scale
     offset_y = store_cy - canvas_cy / scale
+
+
+def snap_world_mm(value):
+    return round(value / OBSTACLE_SNAP_MM) * OBSTACLE_SNAP_MM
+
+
+def snap_world_point(wx, wy):
+    return snap_world_mm(wx), snap_world_mm(wy)
+
+
+def format_snap_m(mm_value):
+    return f"{snap_world_mm(mm_value) / 1000:.1f}"
+
+
+def store_edge_offsets_mm(x, y):
+    """Distances from a point to store edges in mm (for corner readout)."""
+    return (
+        snap_world_mm(x),
+        snap_world_mm(y),
+        snap_world_mm(store_width_mm - x),
+        snap_world_mm(store_height_mm - y),
+    )
+
+
+def boundary_corner_label(x, y):
+    """Human-readable distances to corners; emphasise top-right for layout work."""
+    left, top, right, bottom = store_edge_offsets_mm(x, y)
+    left_m = left / 1000
+    top_m = top / 1000
+    right_m = right / 1000
+    bottom_m = bottom / 1000
+    tol = OBSTACLE_SNAP_MM / 2
+    on_top = top <= tol
+    on_bottom = bottom <= tol
+    on_left = left <= tol
+    on_right = right <= tol
+    if on_top and not on_left and not on_right:
+        return f"距左上 {left_m:.1f}m · 距右上 {right_m:.1f}m"
+    if on_bottom and not on_left and not on_right:
+        return f"距左下 {left_m:.1f}m · 距右下 {right_m:.1f}m"
+    if on_left and not on_top and not on_bottom:
+        return f"距左上 {top_m:.1f}m · 距左下 {bottom_m:.1f}m"
+    if on_right and not on_top and not on_bottom:
+        return f"距右上 {top_m:.1f}m · 距右下 {bottom_m:.1f}m"
+    if on_top and on_left:
+        return f"左上角"
+    if on_top and on_right:
+        return f"右上角"
+    if on_bottom and on_left:
+        return f"左下角"
+    if on_bottom and on_right:
+        return f"右下角"
+    return f"←{left_m:.1f}m ↑{top_m:.1f}m →{right_m:.1f}m ↓{bottom_m:.1f}m"
+
+
+def segment_rect_crossings(p1, p2, xmin, ymin, xmax, ymax):
+    x1, y1 = p1
+    x2, y2 = p2
+    dx = x2 - x1
+    dy = y2 - y1
+    hits = []
+    if abs(dx) > 1e-9:
+        for x_edge in (xmin, xmax):
+            t = (x_edge - x1) / dx
+            if 0.0 <= t <= 1.0:
+                y = y1 + t * dy
+                if ymin - 1e-6 <= y <= ymax + 1e-6:
+                    hits.append((t, (snap_world_mm(x_edge), snap_world_mm(y))))
+    if abs(dy) > 1e-9:
+        for y_edge in (ymin, ymax):
+            t = (y_edge - y1) / dy
+            if 0.0 <= t <= 1.0:
+                x = x1 + t * dx
+                if xmin - 1e-6 <= x <= xmax + 1e-6:
+                    hits.append((t, (snap_world_mm(x), snap_world_mm(y_edge))))
+    hits.sort(key=lambda item: item[0])
+    unique = []
+    for _, pt in hits:
+        if not unique or math.hypot(pt[0] - unique[-1][0], pt[1] - unique[-1][1]) > 1:
+            unique.append(pt)
+    return unique
+
+
+def segment_store_boundary_crossings(p1, p2):
+    return segment_rect_crossings(p1, p2, 0, 0, store_width_mm, store_height_mm)
 
 
 def point_in_store(x, y):
@@ -1470,7 +1556,7 @@ def toggle_draw_obstacle(active=None):
         editing_wall_size = False
         current_polygon = []
         preview_point = None
-        show_toast("刨除障碍: 可在画布外勾勒，完成时自动裁切到门店内 | Enter 完成 | Esc 取消")
+        show_toast("刨除障碍: 顶点按 0.1m 对齐，边界切点显示距角距离 | Enter 完成 | Esc 取消")
     else:
         current_polygon = []
         preview_point = None
@@ -1478,15 +1564,16 @@ def toggle_draw_obstacle(active=None):
 
 def finish_obstacle():
     global drawing_polygon, current_polygon, preview_point, selected_collision
-    if len(current_polygon) >= 3:
-        clipped = clip_obstacle_points(current_polygon)
+    snapped = [snap_world_point(x, y) for x, y in current_polygon]
+    if len(snapped) >= 3:
+        clipped = clip_obstacle_points(snapped)
         if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
             collision_polygons.append({
                 "name": f"障碍物{len(collision_polygons) + 1}",
                 "points": clipped,
             })
             selected_collision = len(collision_polygons) - 1
-            show_toast(f"障碍区域已刨除（画布内有效区域 {len(clipped)} 个顶点）")
+            show_toast(f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）")
         else:
             show_toast("障碍区域与门店画布无有效重叠，请重新绘制")
     else:
@@ -1636,18 +1723,36 @@ def draw_polygon_preview(surface):
     if not drawing_polygon or not current_polygon:
         return
     screen_pts = [world_to_screen(x, y) for x, y in current_polygon]
-    if preview_point:
-        screen_pts.append(world_to_screen(*preview_point))
+    preview = preview_point
+    if preview:
+        screen_pts.append(world_to_screen(*preview))
     if len(screen_pts) >= 2:
         pygame.draw.lines(surface, C_ACCENT, False, screen_pts, 2)
     for pt in screen_pts:
         pygame.draw.circle(surface, C_ACCENT, (int(pt[0]), int(pt[1])), 5)
-    if len(current_polygon) >= 1 and preview_point:
+
+    for wx, wy in current_polygon:
+        if point_in_store(wx, wy) or min(
+            wx, wy, store_width_mm - wx, store_height_mm - wy
+        ) < OBSTACLE_SNAP_MM * 2:
+            sx, sy = world_to_screen(wx, wy)
+            pygame.draw.circle(surface, C_DANGER, (int(sx), int(sy)), 7, 2)
+            tag = FONT_SMALL.render(boundary_corner_label(wx, wy), True, C_DANGER)
+            surface.blit(tag, (sx + 8, sy - 18))
+
+    if len(current_polygon) >= 1 and preview:
         last = current_polygon[-1]
-        dist_m = math.hypot(preview_point[0] - last[0], preview_point[1] - last[1]) / 1000
-        mid = world_to_screen((last[0] + preview_point[0]) / 2, (last[1] + preview_point[1]) / 2)
-        tag = FONT_SMALL.render(f"{dist_m:.2f} m", True, C_ACCENT)
+        dist_m = snap_world_mm(math.hypot(preview[0] - last[0], preview[1] - last[1])) / 1000
+        mid = world_to_screen((last[0] + preview[0]) / 2, (last[1] + preview[1]) / 2)
+        tag = FONT_SMALL.render(f"{dist_m:.1f} m", True, C_ACCENT)
         surface.blit(tag, (mid[0] + 8, mid[1] - 10))
+
+        for cx, cy in segment_store_boundary_crossings(last, preview):
+            sx, sy = world_to_screen(cx, cy)
+            pygame.draw.circle(surface, C_DANGER, (int(sx), int(sy)), 8)
+            pygame.draw.circle(surface, (255, 255, 255), (int(sx), int(sy)), 8, 2)
+            label = FONT_SMALL.render(boundary_corner_label(cx, cy), True, C_DANGER)
+            surface.blit(label, label.get_rect(center=(sx, sy - 22)))
 
 
 def draw_scale_bar(surface):
@@ -1668,7 +1773,7 @@ def draw_banner(surface):
         rect = pygame.Rect(SIDEBAR_WIDTH + 16, 12, CANVAS_RECT.width - 32, 36)
         pygame.draw.rect(surface, C_ACCENT_LIGHT, rect, border_radius=8)
         pygame.draw.rect(surface, C_ACCENT, rect, 1, border_radius=8)
-        text = FONT_SMALL.render("刨除障碍中 — 可在画布外勾勒，完成时自动裁切到门店内 | Enter 完成 | Esc 取消", True, C_ACCENT)
+        text = FONT_SMALL.render("刨除障碍 — 0.1m 对齐 | 红线=边界切点距角 | Enter 完成 | Esc 取消", True, C_ACCENT)
         surface.blit(text, text.get_rect(center=rect.center))
 
 
@@ -1865,6 +1970,7 @@ def handle_canvas_click(mx, my, button):
                     wy = last[1]
                 else:
                     wx = last[0]
+        wx, wy = snap_world_point(wx, wy)
         current_polygon.append((wx, wy))
         return
 
@@ -2098,7 +2204,7 @@ def main():
                             wy = last[1]
                         else:
                             wx = last[0]
-                    preview_point = (wx, wy)
+                    preview_point = snap_world_point(wx, wy)
                 else:
                     preview_point = None
 
