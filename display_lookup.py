@@ -1286,3 +1286,38 @@ def find_template_index_by_id(templates: list[dict], tpl_id: str) -> int:
         if _normalize_key(tpl.get("id", "")) == key:
             return i
     return -1
+
+
+def template_matches_display_item(tpl: dict, item: DisplayItem) -> bool:
+    """模板 id 是否与 Display 产品的 SKU 或产品名一致。"""
+    tid = _normalize_key(tpl.get("id", ""))
+    if not tid:
+        return False
+    code = _normalize_key(item.product_code)
+    name = _normalize_key(item.product_name)
+    return (code and code == tid) or (name and name == tid)
+
+
+def find_display_item_for_template(
+    tpl: dict, items: list[DisplayItem]
+) -> DisplayItem | None:
+    for item in items:
+        if template_matches_display_item(tpl, item):
+            return item
+    return None
+
+
+def prune_orphan_templates(
+    templates: list[dict], items: list[DisplayItem]
+) -> tuple[list[dict], list[str]]:
+    """只保留能在 Display 库中匹配到的模板，删除手工测绘的游离项。"""
+    if not items:
+        return templates[:], []
+    kept: list[dict] = []
+    removed: list[str] = []
+    for tpl in templates:
+        if find_display_item_for_template(tpl, items):
+            kept.append(tpl)
+        else:
+            removed.append(str(tpl.get("id", "")))
+    return kept, removed
