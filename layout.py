@@ -86,8 +86,9 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.6.0"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
+LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -147,6 +148,10 @@ input_text = ""
 selected_template_index = 0
 dragging_collision = False
 collision_drag_offset = (0, 0)
+collision_drag_snapshot = None
+_last_furniture_pick = {"name": None, "time": 0}
+product_preview = None  # {"name", "url", "opened_at"}
+_display_items_cache = None
 search_text = ""
 search_box_active = False
 toast_message = ""
@@ -646,10 +651,19 @@ class Furniture:
         cy = sum(p[1] for p in pts) / len(pts)
         name_surf = FONT_MARK.render(self.name, True, C_TEXT)
         roi_surf = FONT_MARK.render(f"ROI {self.roi:.1f}", True, C_MUTED)
-        surface.blit(name_surf, name_surf.get_rect(midbottom=(cx, cy - 2)))
-        surface.blit(roi_surf, roi_surf.get_rect(midtop=(cx, cy + 2)))
+        name_rect = name_surf.get_rect(midbottom=(cx, cy - 2))
+        roi_rect = roi_surf.get_rect(midtop=(cx, cy + 2))
+        surface.blit(name_surf, name_rect)
+        surface.blit(roi_surf, roi_rect)
+        self._label_rect = name_rect.union(roi_rect).inflate(LABEL_HIT_PAD * 2, LABEL_HIT_PAD * 2)
+
+    def is_label_clicked(self, mx, my):
+        rect = getattr(self, "_label_rect", None)
+        return rect is not None and rect.collidepoint(mx, my)
 
     def is_clicked(self, mx, my):
+        if self.is_label_clicked(mx, my):
+            return True
         wx, wy = screen_to_world(mx, my)
         return point_in_poly(wx, wy, self.get_rotated_points())
 
@@ -680,6 +694,232 @@ def polygons_overlap(poly_a, poly_b):
             if _segments_intersect(a1, a2, b1, b2):
                 return True
     return False
+
+
+def _shrink_polygon(points, factor=0.985):
+    if len(points) < 3:
+        return points
+    cx = sum(p[0] for p in points) / len(points)
+    cy = sum(p[1] for p in points) / len(points)
+    return [(cx + (x - cx) * factor, cy + (y - cy) * factor) for x, y in points]
+
+
+def polygons_interior_overlap(poly_a, poly_b):
+    """仅检测面积重叠，贴边相邻不算重叠。"""
+    return polygons_overlap(_shrink_polygon(poly_a), _shrink_polygon(poly_b))
+
+
+def obstacle_overlaps_any(points, *ignore_indices):
+    ignore = set(ignore_indices)
+    for i, col in enumerate(collision_polygons):
+        if i in ignore:
+            continue
+        if polygons_interior_overlap(points, col["points"]):
+            return True, col.get("name", "")
+    return False, ""
+
+
+def _snap_vertex(p):
+    return snap_world_point(p[0], p[1])
+
+
+def _edge_is_axis_aligned(p1, p2, tol=5):
+    return abs(p1[0] - p2[0]) <= tol or abs(p1[1] - p2[1]) <= tol
+
+
+def is_orthogonal_polygon(points, tol=5):
+    if len(points) < 3:
+        return False
+    for p1, p2 in _polygon_edges(points):
+        if not _edge_is_axis_aligned(p1, p2, tol):
+            return False
+    return True
+
+
+def _undirected_edge_key(p1, p2):
+    a = _snap_vertex(p1)
+    b = _snap_vertex(p2)
+    return (a, b) if a <= b else (b, a)
+
+
+def _segment_overlap_on_axis(p1, p2, q1, q2, tol=OBSTACLE_SNAP_MM):
+    if abs(p1[1] - p2[1]) <= tol and abs(q1[1] - q2[1]) <= tol and abs(p1[1] - q1[1]) <= tol:
+        lo1, hi1 = sorted([p1[0], p2[0]])
+        lo2, hi2 = sorted([q1[0], q2[0]])
+        overlap = min(hi1, hi2) - max(lo1, lo2)
+        return max(0.0, overlap)
+    if abs(p1[0] - p2[0]) <= tol and abs(q1[0] - q2[0]) <= tol and abs(p1[0] - q1[0]) <= tol:
+        lo1, hi1 = sorted([p1[1], p2[1]])
+        lo2, hi2 = sorted([q1[1], q2[1]])
+        overlap = min(hi1, hi2) - max(lo1, lo2)
+        return max(0.0, overlap)
+    return 0.0
+
+
+def shared_edge_length(poly_a, poly_b):
+    total = 0.0
+    for a1, a2 in _polygon_edges(poly_a):
+        for b1, b2 in _polygon_edges(poly_b):
+            total += _segment_overlap_on_axis(a1, a2, b1, b2)
+    return total
+
+
+def union_orthogonal_polygons(poly_a, poly_b):
+    edges = []
+    for poly in (poly_a, poly_b):
+        n = len(poly)
+        for i in range(n):
+            p1 = _snap_vertex(poly[i])
+            p2 = _snap_vertex(poly[(i + 1) % n])
+            if p1 == p2:
+                continue
+            edges.append((p1, p2))
+    counts = {}
+    directed = {}
+    for p1, p2 in edges:
+        key = _undirected_edge_key(p1, p2)
+        counts[key] = counts.get(key, 0) + 1
+        directed[key] = (p1, p2)
+    outer = [directed[k] for k, c in counts.items() if c == 1]
+    if not outer:
+        return None
+    adj = {}
+    for p1, p2 in outer:
+        adj.setdefault(p1, []).append(p2)
+        adj.setdefault(p2, []).append(p1)
+    start = outer[0][0]
+    path = [start]
+    prev = None
+    cur = start
+    for _ in range(len(outer) + 8):
+        nbrs = [n for n in adj.get(cur, []) if n != prev]
+        if not nbrs:
+            break
+        nxt = nbrs[0]
+        if nxt == start and len(path) >= 3:
+            break
+        path.append(nxt)
+        prev, cur = cur, nxt
+    if len(path) < 3:
+        return None
+    clipped = clip_obstacle_points(path)
+    return clipped if len(clipped) >= 3 and polygon_area(clipped) > 1.0 else None
+
+
+def find_merge_partner(idx):
+    poly = collision_polygons[idx]["points"]
+    best_j = -1
+    best_len = OBSTACLE_SNAP_MM
+    for j, col in enumerate(collision_polygons):
+        if j == idx:
+            continue
+        other = col["points"]
+        if polygons_interior_overlap(poly, other):
+            continue
+        shared = shared_edge_length(poly, other)
+        if shared > best_len:
+            best_len = shared
+            best_j = j
+    return best_j, best_len
+
+
+def merge_selected_obstacle():
+    global selected_collision
+    if selected_collision is None:
+        show_toast("请先选中要融合的障碍或墙体")
+        return
+    idx = selected_collision
+    poly = collision_polygons[idx]["points"]
+    if not is_orthogonal_polygon(poly):
+        show_toast("仅支持直角多边形的融合（墙体或正交障碍）")
+        return
+    partner, shared = find_merge_partner(idx)
+    if partner < 0:
+        show_toast("未找到可贴边融合的相邻障碍/墙体")
+        return
+    other = collision_polygons[partner]["points"]
+    if not is_orthogonal_polygon(other):
+        show_toast("相邻对象不是直角多边形，无法融合")
+        return
+    merged = union_orthogonal_polygons(poly, other)
+    if not merged:
+        show_toast("融合失败，请确认两边贴边且无重叠")
+        return
+    overlaps, other_name = obstacle_overlaps_any(merged, idx, partner)
+    if overlaps:
+        show_toast(f"融合后会与「{other_name}」重叠，已取消")
+        return
+    base = collision_polygons[idx]
+    partner_name = collision_polygons[partner]["name"]
+    is_wall = base.get("kind") == "wall" or str(base.get("name", "")).startswith("墙体")
+    partner_wall = collision_polygons[partner].get("kind") == "wall" or str(
+        collision_polygons[partner].get("name", "")
+    ).startswith("墙体")
+    new_name = base["name"]
+    if partner_wall and not is_wall:
+        new_name = partner_name
+    for remove_idx in sorted((idx, partner), reverse=True):
+        collision_polygons.pop(remove_idx)
+    entry = {"name": new_name, "points": merged}
+    if is_wall or partner_wall:
+        entry["kind"] = "wall"
+    collision_polygons.append(entry)
+    selected_collision = len(collision_polygons) - 1
+    show_toast(f"已融合为 {new_name}（{len(merged)} 个顶点）")
+
+
+def obstacle_label_rect(col):
+    pts = col["points"]
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    sx, sy = world_to_screen(cx, cy)
+    label = FONT_BODY.render(col["name"], True, (0, 0, 0))
+    rect = label.get_rect(center=(sx, sy))
+    return rect.inflate(LABEL_HIT_PAD * 2, LABEL_HIT_PAD * 2)
+
+
+def _load_display_items_cache():
+    global _display_items_cache
+    if _display_items_cache is not None:
+        return _display_items_cache
+    try:
+        from display_lookup import load_display_items
+
+        _display_items_cache = load_display_items()
+    except Exception:
+        _display_items_cache = []
+    return _display_items_cache
+
+
+def image_url_for_product(name: str) -> str:
+    from display_lookup import _normalize_key
+
+    key = _normalize_key(name)
+    for item in _load_display_items_cache():
+        if _normalize_key(item.product_code) == key or _normalize_key(item.product_name) == key:
+            return getattr(item, "image_url", "") or ""
+    return ""
+
+
+def open_product_preview(name: str):
+    global product_preview
+    url = image_url_for_product(name)
+    if not url:
+        show_toast(f"未找到 {name} 的产品图（请先 grab_display）")
+        return
+    product_preview = {"name": name, "url": url, "opened_at": pygame.time.get_ticks()}
+    try:
+        from product_images import request_image
+
+        request_image(url, max_size=(480, 360))
+    except Exception:
+        pass
+    show_toast(f"加载产品图: {name}")
+
+
+def close_product_preview():
+    global product_preview
+    product_preview = None
 
 
 def check_collision(furniture, obstacles):
@@ -1406,6 +1646,10 @@ def apply_wall_obstacle():
     if len(points) < 3 or polygon_area(points) <= 1.0:
         show_toast("墙体与门店画布无有效重叠，请缩小尺寸")
         return
+    overlaps, other_name = obstacle_overlaps_any(points)
+    if overlaps:
+        show_toast(f"墙体不能与「{other_name}」重叠")
+        return
     wall_count = sum(1 for c in collision_polygons if c.get("kind") == "wall" or str(c.get("name", "")).startswith("墙体"))
     obstacle = {
         "name": f"墙体{wall_count + 1}",
@@ -1676,12 +1920,16 @@ def finish_obstacle():
     if len(snapped) >= 3:
         clipped = clip_obstacle_points(snapped)
         if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
-            collision_polygons.append({
-                "name": f"障碍物{len(collision_polygons) + 1}",
-                "points": clipped,
-            })
-            selected_collision = len(collision_polygons) - 1
-            show_toast(f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）")
+            overlaps, other_name = obstacle_overlaps_any(clipped)
+            if overlaps:
+                show_toast(f"障碍不能与「{other_name}」重叠")
+            else:
+                collision_polygons.append({
+                    "name": f"障碍物{len(collision_polygons) + 1}",
+                    "points": clipped,
+                })
+                selected_collision = len(collision_polygons) - 1
+                show_toast(f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）")
         else:
             show_toast("障碍区域与门店画布无有效重叠，请重新绘制")
     else:
@@ -1907,6 +2155,39 @@ def draw_toast(surface):
     surface.blit(text, (rect.x + pad, rect.y + pad // 2))
 
 
+def product_preview_box():
+    box_w, box_h = 520, 420
+    return pygame.Rect((SCREEN_WIDTH - box_w) // 2, (SCREEN_HEIGHT - box_h) // 2, box_w, box_h)
+
+
+def draw_product_preview_dialog(surface):
+    if not product_preview:
+        return
+    from product_images import is_image_failed, request_image
+
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 165))
+    surface.blit(overlay, (0, 0))
+    box = product_preview_box()
+    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
+    name = product_preview["name"]
+    url = product_preview["url"]
+    surface.blit(FONT_LABEL.render(name, True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(FONT_SMALL.render("Esc 或点击空白处关闭", True, C_MUTED), (box.x + 20, box.y + 42))
+    img_rect = pygame.Rect(box.x + 20, box.y + 72, box.width - 40, box.height - 110)
+    pygame.draw.rect(surface, (248, 250, 252), img_rect, border_radius=8)
+    surf = request_image(url, max_size=(img_rect.width, img_rect.height))
+    if surf is not None:
+        surface.blit(surf, surf.get_rect(center=img_rect.center))
+    elif is_image_failed(url):
+        msg = FONT_BODY.render("图片加载失败", True, C_DANGER)
+        surface.blit(msg, msg.get_rect(center=img_rect.center))
+    else:
+        msg = FONT_BODY.render("加载中…", True, C_MUTED)
+        surface.blit(msg, msg.get_rect(center=img_rect.center))
+
+
 def draw_rename_dialog(surface):
     if not renaming_obstacle and not renaming_store:
         return
@@ -1941,6 +2222,8 @@ def build_sidebar_ui():
     buttons["obstacle"] = Button((pad, y, bw, 34), "刨除障碍", "obstacle", toggle=True)
     buttons["wall"] = Button((pad + bw + 8, y, bw, 34), "添加墙体", "wall")
     y += 42
+    buttons["merge"] = Button((pad, y, w, 34), "融合相邻", "merge")
+    y += 42
     buttons["add"] = Button((pad, y, w, 40), "＋ 添加到画布", "add", primary=True)
     y += 48
     buttons["rotate_l"] = Button((pad, y, bw, 34), "左转", "rotate_l")
@@ -1964,7 +2247,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.rect.y = 58
     input_box.draw(surface)
 
-    for key in ("save", "home", "rename_store", "store", "obstacle", "wall", "add", "rotate_l", "rotate_r", "rename", "delete"):
+    for key in ("save", "home", "rename_store", "store", "obstacle", "wall", "merge", "add", "rotate_l", "rotate_r", "rename", "delete"):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
 
@@ -2000,7 +2283,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "右键拖动画布 | 滚轮缩放 | 红色=障碍 灰色=墙体 | 家具不可重叠"
+    hints = "右键拖动画布 | 滚轮缩放 | 点文字可选中 | 双击家具看图"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -2027,6 +2310,8 @@ def handle_toolbar_click(action, buttons):
         buttons["obstacle"].active = drawing_polygon
     elif action == "wall":
         start_edit_wall_size()
+    elif action == "merge":
+        merge_selected_obstacle()
     elif action == "add":
         add_furniture_to_canvas()
     elif action == "rotate_l":
@@ -2069,8 +2354,8 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
 
 def handle_canvas_click(mx, my, button):
     global selected_furniture, selected_feature, selected_collision
-    global dragging_furniture, dragging_collision, collision_drag_offset
-    global current_polygon, preview_point
+    global dragging_furniture, dragging_collision, collision_drag_offset, collision_drag_snapshot
+    global current_polygon, preview_point, _last_furniture_pick
 
     wx, wy = screen_to_world(mx, my)
 
@@ -2084,13 +2369,35 @@ def handle_canvas_click(mx, my, button):
         preview_point = None
         return
 
+    for i in reversed(range(len(collision_polygons))):
+        col = collision_polygons[i]
+        if obstacle_label_rect(col).collidepoint(mx, my):
+            selected_collision = i
+            selected_furniture = selected_feature = None
+            dragging_collision = True
+            collision_drag_snapshot = [tuple(p) for p in col["points"]]
+            pts = col["points"]
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            collision_drag_offset = (cx - wx, cy - wy)
+            show_toast(f"选中: {col['name']}")
+            return
+
     for f in reversed(placed_furnitures):
-        if f.is_clicked(mx, my):
+        if f.is_label_clicked(mx, my) or f.is_clicked(mx, my):
+            now = pygame.time.get_ticks()
+            is_double = (
+                f.name == _last_furniture_pick["name"]
+                and now - _last_furniture_pick["time"] < 400
+            )
+            _last_furniture_pick = {"name": f.name, "time": now}
             dragging_furniture = f
             f.dragging = True
             selected_furniture = f
             selected_feature = f
             selected_collision = None
+            if is_double:
+                open_product_preview(f.name)
             return
 
     for i, col in enumerate(collision_polygons):
@@ -2098,6 +2405,7 @@ def handle_canvas_click(mx, my, button):
             selected_collision = i
             selected_furniture = selected_feature = None
             dragging_collision = True
+            collision_drag_snapshot = [tuple(p) for p in col["points"]]
             pts = col["points"]
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
@@ -2107,6 +2415,7 @@ def handle_canvas_click(mx, my, button):
 
     selected_furniture = selected_feature = None
     selected_collision = None
+    _last_furniture_pick = {"name": None, "time": 0}
 
 
 def main():
@@ -2118,7 +2427,7 @@ def main():
     global furniture_templates, startup_active, store_picker_active
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus
-    global startup_buttons, _catalog_refresh_ready
+    global startup_buttons, _catalog_refresh_ready, product_preview, collision_drag_snapshot
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -2247,6 +2556,10 @@ def main():
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = ui_pos(event.pos)
+                if product_preview and event.button == 1:
+                    if not product_preview_box().collidepoint(mx, my):
+                        close_product_preview()
+                    continue
                 if mx < SIDEBAR_WIDTH and event.button == 1 and editor_buttons:
                     home_btn = editor_buttons.get("home")
                     if home_btn and home_btn.contains((mx, my)):
@@ -2278,12 +2591,22 @@ def main():
                         dragging_furniture = None
                     if selected_collision is not None and not drawing_polygon:
                         was_dragging = dragging_collision
-                        clipped = clip_obstacle_points(collision_polygons[selected_collision]["points"])
+                        poly = collision_polygons[selected_collision]
+                        clipped = clip_obstacle_points(poly["points"])
                         if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
-                            collision_polygons[selected_collision]["points"] = clipped
-                        elif was_dragging:
+                            overlaps, other_name = obstacle_overlaps_any(
+                                clipped, selected_collision
+                            )
+                            if overlaps and collision_drag_snapshot is not None:
+                                poly["points"] = collision_drag_snapshot
+                                show_toast(f"不能与「{other_name}」重叠")
+                            else:
+                                poly["points"] = clipped
+                        elif was_dragging and collision_drag_snapshot is not None:
+                            poly["points"] = collision_drag_snapshot
                             show_toast("障碍物已移出画布，请拖回店内")
                     dragging_collision = False
+                    collision_drag_snapshot = None
 
             elif event.type == pygame.MOUSEMOTION:
                 mx, my = event.pos
@@ -2313,6 +2636,9 @@ def main():
                     preview_point = None
 
             elif event.type == pygame.KEYDOWN:
+                if product_preview and event.key == pygame.K_ESCAPE:
+                    close_product_preview()
+                    continue
                 if renaming_store:
                     if event.key == pygame.K_RETURN and input_text.strip():
                         rename_current_store(input_text.strip())
@@ -2390,6 +2716,7 @@ def main():
             draw_rename_dialog(screen)
             draw_sidebar(editor_buttons, input_box, template_list_top)
             draw_toast(screen)
+            draw_product_preview_dialog(screen)
             if store_picker_active:
                 if store_picker_buttons is None:
                     store_picker_buttons = build_store_picker_ui()

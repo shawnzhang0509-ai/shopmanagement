@@ -185,25 +185,31 @@ def _load_worker(raw_key: str, candidates: list[str], disk_path: str) -> None:
 
 def request_thumbnail(url: str) -> object | None:
     """返回 pygame Surface 或 None（加载中/无图）。"""
+    return request_image(url, max_size=THUMB_SIZE)
+
+
+def request_image(url: str, max_size: tuple[int, int] = THUMB_SIZE) -> object | None:
+    """按指定尺寸返回 pygame Surface 或 None（加载中/无图）。"""
     raw = _clean_raw(url)
     if not raw:
         return None
+    cache_key = f"{raw}@{max_size[0]}x{max_size[1]}"
     with _lock:
-        if raw in _surface_cache:
-            return _surface_cache[raw]
+        if cache_key in _surface_cache:
+            return _surface_cache[cache_key]
         if raw in _failed:
             return None
-        if raw in _loading:
+        if cache_key in _loading:
             return None
 
     disk_path = _cache_path(raw)
     if os.path.isfile(disk_path):
         try:
             with open(disk_path, "rb") as f:
-                surf = _bytes_to_surface(f.read(), THUMB_SIZE)
+                surf = _bytes_to_surface(f.read(), max_size)
             if surf is not None:
                 with _lock:
-                    _surface_cache[raw] = surf
+                    _surface_cache[cache_key] = surf
                 return surf
         except Exception:
             pass
@@ -213,14 +219,40 @@ def request_thumbnail(url: str) -> object | None:
         return None
 
     with _lock:
-        if raw in _loading:
+        if cache_key in _loading:
             return None
-        _loading.add(raw)
-    threading.Thread(
-        target=_load_worker,
-        args=(raw, candidates, disk_path),
-        daemon=True,
-    ).start()
+        _loading.add(cache_key)
+
+    def _worker():
+        try:
+            try:
+                import pygame  # noqa: F401
+            except ImportError:
+                with _lock:
+                    _failed.add(raw)
+                return
+            last_error: Exception | None = None
+            for candidate in candidates:
+                try:
+                    data = _download_bytes(candidate)
+                    surf = _bytes_to_surface(data, max_size)
+                    if surf is None:
+                        continue
+                    with open(disk_path, "wb") as f:
+                        f.write(data)
+                    with _lock:
+                        _surface_cache[cache_key] = surf
+                    return
+                except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+                    last_error = exc
+            if last_error is not None:
+                with _lock:
+                    _failed.add(raw)
+        finally:
+            with _lock:
+                _loading.discard(cache_key)
+
+    threading.Thread(target=_worker, daemon=True).start()
     return None
 
 
