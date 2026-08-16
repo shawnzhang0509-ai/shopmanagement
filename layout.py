@@ -86,9 +86,10 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
+FURNITURE_IMAGE_MIN_SCALE = 0.032  # 放大到此比例以上时在家具上方显示产品图
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -149,8 +150,6 @@ selected_template_index = 0
 dragging_collision = False
 collision_drag_offset = (0, 0)
 collision_drag_snapshot = None
-_last_furniture_pick = {"name": None, "time": 0}
-product_preview = None  # {"name", "url", "opened_at"}
 _display_items_cache = None
 search_text = ""
 search_box_active = False
@@ -649,6 +648,19 @@ class Furniture:
         pygame.draw.polygon(surface, border_c, pts, border_w)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
+
+        if scale >= FURNITURE_IMAGE_MIN_SCALE:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            span = max(max(xs) - min(xs), max(ys) - min(ys), 24)
+            img = furniture_image_surface(self.name, max_px=min(180, int(span * 0.9)))
+            if img is not None:
+                img_rect = img.get_rect(midbottom=(int(cx), int(cy - 6)))
+                shadow_rect = img_rect.inflate(8, 8)
+                pygame.draw.rect(surface, (255, 255, 255), shadow_rect, border_radius=6)
+                pygame.draw.rect(surface, C_BORDER, shadow_rect, 1, border_radius=6)
+                surface.blit(img, img_rect)
+
         name_surf = FONT_MARK.render(self.name, True, C_TEXT)
         roi_surf = FONT_MARK.render(f"ROI {self.roi:.1f}", True, C_MUTED)
         name_rect = name_surf.get_rect(midbottom=(cx, cy - 2))
@@ -723,48 +735,45 @@ def _snap_vertex(p):
     return snap_world_point(p[0], p[1])
 
 
-def _edge_is_axis_aligned(p1, p2, tol=5):
-    return abs(p1[0] - p2[0]) <= tol or abs(p1[1] - p2[1]) <= tol
-
-
-def is_orthogonal_polygon(points, tol=5):
-    if len(points) < 3:
-        return False
-    for p1, p2 in _polygon_edges(points):
-        if not _edge_is_axis_aligned(p1, p2, tol):
-            return False
-    return True
-
-
 def _undirected_edge_key(p1, p2):
     a = _snap_vertex(p1)
     b = _snap_vertex(p2)
     return (a, b) if a <= b else (b, a)
 
 
-def _segment_overlap_on_axis(p1, p2, q1, q2, tol=OBSTACLE_SNAP_MM):
-    if abs(p1[1] - p2[1]) <= tol and abs(q1[1] - q2[1]) <= tol and abs(p1[1] - q1[1]) <= tol:
-        lo1, hi1 = sorted([p1[0], p2[0]])
-        lo2, hi2 = sorted([q1[0], q2[0]])
-        overlap = min(hi1, hi2) - max(lo1, lo2)
-        return max(0.0, overlap)
-    if abs(p1[0] - p2[0]) <= tol and abs(q1[0] - q2[0]) <= tol and abs(p1[0] - q1[0]) <= tol:
-        lo1, hi1 = sorted([p1[1], p2[1]])
-        lo2, hi2 = sorted([q1[1], q2[1]])
-        overlap = min(hi1, hi2) - max(lo1, lo2)
-        return max(0.0, overlap)
-    return 0.0
+def _segment_overlap_length(p1, p2, q1, q2, tol=OBSTACLE_SNAP_MM):
+    vx, vy = p2[0] - p1[0], p2[1] - p1[1]
+    len_v = math.hypot(vx, vy)
+    if len_v < 1:
+        return 0.0
+
+    def perp_dist(px, py):
+        return abs((px - p1[0]) * vy - (py - p1[1]) * vx) / len_v
+
+    for px, py in (q1, q2):
+        if perp_dist(px, py) > tol:
+            return 0.0
+
+    def proj_t(px, py):
+        return ((px - p1[0]) * vx + (py - p1[1]) * vy) / (len_v * len_v)
+
+    t_lo, t_hi = sorted([proj_t(q1[0], q1[1]), proj_t(q2[0], q2[1])])
+    overlap = min(1.0, t_hi) - max(0.0, t_lo)
+    if overlap <= 0:
+        return 0.0
+    return overlap * len_v
 
 
 def shared_edge_length(poly_a, poly_b):
     total = 0.0
     for a1, a2 in _polygon_edges(poly_a):
         for b1, b2 in _polygon_edges(poly_b):
-            total += _segment_overlap_on_axis(a1, a2, b1, b2)
+            total += _segment_overlap_length(a1, a2, b1, b2)
     return total
 
 
-def union_orthogonal_polygons(poly_a, poly_b):
+def union_polygons(poly_a, poly_b):
+    """共边抵消后取外轮廓（支持任意多边形，不限于直角）。"""
     edges = []
     for poly in (poly_a, poly_b):
         n = len(poly)
@@ -791,7 +800,7 @@ def union_orthogonal_polygons(poly_a, poly_b):
     path = [start]
     prev = None
     cur = start
-    for _ in range(len(outer) + 8):
+    for _ in range(len(outer) + 12):
         nbrs = [n for n in adj.get(cur, []) if n != prev]
         if not nbrs:
             break
@@ -800,10 +809,9 @@ def union_orthogonal_polygons(poly_a, poly_b):
             break
         path.append(nxt)
         prev, cur = cur, nxt
-    if len(path) < 3:
+    if len(path) < 3 or polygon_area(path) <= 1.0:
         return None
-    clipped = clip_obstacle_points(path)
-    return clipped if len(clipped) >= 3 and polygon_area(clipped) > 1.0 else None
+    return path
 
 
 def find_merge_partner(idx):
@@ -830,18 +838,12 @@ def merge_selected_obstacle():
         return
     idx = selected_collision
     poly = collision_polygons[idx]["points"]
-    if not is_orthogonal_polygon(poly):
-        show_toast("仅支持直角多边形的融合（墙体或正交障碍）")
-        return
     partner, shared = find_merge_partner(idx)
     if partner < 0:
         show_toast("未找到可贴边融合的相邻障碍/墙体")
         return
     other = collision_polygons[partner]["points"]
-    if not is_orthogonal_polygon(other):
-        show_toast("相邻对象不是直角多边形，无法融合")
-        return
-    merged = union_orthogonal_polygons(poly, other)
+    merged = union_polygons(poly, other)
     if not merged:
         show_toast("融合失败，请确认两边贴边且无重叠")
         return
@@ -901,25 +903,33 @@ def image_url_for_product(name: str) -> str:
     return ""
 
 
-def open_product_preview(name: str):
-    global product_preview
+def furniture_image_surface(name: str, max_px: int = 96):
     url = image_url_for_product(name)
     if not url:
-        show_toast(f"未找到 {name} 的产品图（请先 grab_display）")
-        return
-    product_preview = {"name": name, "url": url, "opened_at": pygame.time.get_ticks()}
+        return None
     try:
         from product_images import request_image
 
-        request_image(url, max_size=(480, 360))
+        return request_image(url, max_size=(max_px, max_px))
     except Exception:
-        pass
-    show_toast(f"加载产品图: {name}")
+        return None
 
 
-def close_product_preview():
-    global product_preview
-    product_preview = None
+def prefetch_furniture_images():
+    if scale < FURNITURE_IMAGE_MIN_SCALE:
+        return
+    urls = []
+    for furn in placed_furnitures:
+        url = image_url_for_product(furn.name)
+        if url:
+            urls.append(url)
+    if urls:
+        try:
+            from product_images import prefetch_urls
+
+            prefetch_urls(urls, limit=16)
+        except Exception:
+            pass
 
 
 def check_collision(furniture, obstacles):
@@ -2155,39 +2165,6 @@ def draw_toast(surface):
     surface.blit(text, (rect.x + pad, rect.y + pad // 2))
 
 
-def product_preview_box():
-    box_w, box_h = 520, 420
-    return pygame.Rect((SCREEN_WIDTH - box_w) // 2, (SCREEN_HEIGHT - box_h) // 2, box_w, box_h)
-
-
-def draw_product_preview_dialog(surface):
-    if not product_preview:
-        return
-    from product_images import is_image_failed, request_image
-
-    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-    overlay.fill((15, 23, 42, 165))
-    surface.blit(overlay, (0, 0))
-    box = product_preview_box()
-    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
-    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
-    name = product_preview["name"]
-    url = product_preview["url"]
-    surface.blit(FONT_LABEL.render(name, True, C_TEXT), (box.x + 20, box.y + 16))
-    surface.blit(FONT_SMALL.render("Esc 或点击空白处关闭", True, C_MUTED), (box.x + 20, box.y + 42))
-    img_rect = pygame.Rect(box.x + 20, box.y + 72, box.width - 40, box.height - 110)
-    pygame.draw.rect(surface, (248, 250, 252), img_rect, border_radius=8)
-    surf = request_image(url, max_size=(img_rect.width, img_rect.height))
-    if surf is not None:
-        surface.blit(surf, surf.get_rect(center=img_rect.center))
-    elif is_image_failed(url):
-        msg = FONT_BODY.render("图片加载失败", True, C_DANGER)
-        surface.blit(msg, msg.get_rect(center=img_rect.center))
-    else:
-        msg = FONT_BODY.render("加载中…", True, C_MUTED)
-        surface.blit(msg, msg.get_rect(center=img_rect.center))
-
-
 def draw_rename_dialog(surface):
     if not renaming_obstacle and not renaming_store:
         return
@@ -2283,7 +2260,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "右键拖动画布 | 滚轮缩放 | 点文字可选中 | 双击家具看图"
+    hints = "右键拖动画布 | 滚轮缩放 | 点文字可选中 | 放大显示产品图"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -2385,19 +2362,11 @@ def handle_canvas_click(mx, my, button):
 
     for f in reversed(placed_furnitures):
         if f.is_label_clicked(mx, my) or f.is_clicked(mx, my):
-            now = pygame.time.get_ticks()
-            is_double = (
-                f.name == _last_furniture_pick["name"]
-                and now - _last_furniture_pick["time"] < 400
-            )
-            _last_furniture_pick = {"name": f.name, "time": now}
             dragging_furniture = f
             f.dragging = True
             selected_furniture = f
             selected_feature = f
             selected_collision = None
-            if is_double:
-                open_product_preview(f.name)
             return
 
     for i, col in enumerate(collision_polygons):
@@ -2415,7 +2384,6 @@ def handle_canvas_click(mx, my, button):
 
     selected_furniture = selected_feature = None
     selected_collision = None
-    _last_furniture_pick = {"name": None, "time": 0}
 
 
 def main():
@@ -2427,7 +2395,7 @@ def main():
     global furniture_templates, startup_active, store_picker_active
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus
-    global startup_buttons, _catalog_refresh_ready, product_preview, collision_drag_snapshot
+    global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -2556,10 +2524,6 @@ def main():
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = ui_pos(event.pos)
-                if product_preview and event.button == 1:
-                    if not product_preview_box().collidepoint(mx, my):
-                        close_product_preview()
-                    continue
                 if mx < SIDEBAR_WIDTH and event.button == 1 and editor_buttons:
                     home_btn = editor_buttons.get("home")
                     if home_btn and home_btn.contains((mx, my)):
@@ -2592,19 +2556,14 @@ def main():
                     if selected_collision is not None and not drawing_polygon:
                         was_dragging = dragging_collision
                         poly = collision_polygons[selected_collision]
-                        clipped = clip_obstacle_points(poly["points"])
-                        if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
+                        points = poly["points"]
+                        if was_dragging and len(points) >= 3:
                             overlaps, other_name = obstacle_overlaps_any(
-                                clipped, selected_collision
+                                points, selected_collision
                             )
                             if overlaps and collision_drag_snapshot is not None:
                                 poly["points"] = collision_drag_snapshot
                                 show_toast(f"不能与「{other_name}」重叠")
-                            else:
-                                poly["points"] = clipped
-                        elif was_dragging and collision_drag_snapshot is not None:
-                            poly["points"] = collision_drag_snapshot
-                            show_toast("障碍物已移出画布，请拖回店内")
                     dragging_collision = False
                     collision_drag_snapshot = None
 
@@ -2636,9 +2595,6 @@ def main():
                     preview_point = None
 
             elif event.type == pygame.KEYDOWN:
-                if product_preview and event.key == pygame.K_ESCAPE:
-                    close_product_preview()
-                    continue
                 if renaming_store:
                     if event.key == pygame.K_RETURN and input_text.strip():
                         rename_current_store(input_text.strip())
@@ -2709,6 +2665,7 @@ def main():
             draw_store_floor(screen)
             for f in placed_furnitures:
                 f.draw(screen, selected=(f is selected_furniture))
+            prefetch_furniture_images()
             draw_obstacles(screen)
             draw_polygon_preview(screen)
             draw_scale_bar(screen)
@@ -2716,7 +2673,6 @@ def main():
             draw_rename_dialog(screen)
             draw_sidebar(editor_buttons, input_box, template_list_top)
             draw_toast(screen)
-            draw_product_preview_dialog(screen)
             if store_picker_active:
                 if store_picker_buttons is None:
                     store_picker_buttons = build_store_picker_ui()
