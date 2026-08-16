@@ -86,7 +86,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.5"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
@@ -435,13 +435,31 @@ def _segment_enters_interior(p1, p2, crossings=None):
     return False
 
 
+def apply_obstacle_shift(wx, wy, last):
+    if last is None:
+        return wx, wy
+    keys = pygame.key.get_pressed()
+    if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+        if abs(wx - last[0]) > abs(wy - last[1]):
+            wy = last[1]
+        else:
+            wx = last[0]
+    return wx, wy
+
+
+def _obstacle_last_allows_free_turn(last):
+    """After a boundary corner (or when already inside), next segment is unconstrained."""
+    return point_in_store(last[0], last[1])
+
+
 def obstacle_draw_target(last, wx, wy):
-    """Preview stops at the boundary cut point instead of extending into the store."""
+    """From outside, preview stops at boundary; after that, preview follows the cursor freely."""
+    wx, wy = apply_obstacle_shift(wx, wy, last)
     target = snap_world_point(wx, wy)
     if last is None:
         return None if is_store_interior(target[0], target[1]) else target
-    if is_on_store_boundary(last) and is_store_interior(target[0], target[1]):
-        return None
+    if _obstacle_last_allows_free_turn(last):
+        return target
     crossings = segment_store_boundary_crossings(last, target)
     if crossings and _segment_enters_interior(last, target, crossings):
         return crossings[0]
@@ -449,7 +467,8 @@ def obstacle_draw_target(last, wx, wy):
 
 
 def obstacle_vertices_for_click(last, wx, wy):
-    """Place boundary crossings as natural corners; never add interior-only points."""
+    """First crossing from outside becomes a corner; later points may go inside, outside, or along edges."""
+    wx, wy = apply_obstacle_shift(wx, wy, last)
     target = snap_world_point(wx, wy)
     if last is None:
         if is_store_interior(target[0], target[1]):
@@ -457,16 +476,15 @@ def obstacle_vertices_for_click(last, wx, wy):
             return []
         return [target]
 
-    if is_on_store_boundary(last):
-        if is_store_interior(target[0], target[1]):
-            show_toast("已在边界拐点，请沿墙边或向外转折")
+    if _obstacle_last_allows_free_turn(last):
+        if _points_near(target, last):
             return []
         return [target]
 
     crossings = segment_store_boundary_crossings(last, target)
     if is_store_interior(target[0], target[1]):
         if crossings:
-            show_toast("已在边界落点，请点击下一步转折方向")
+            show_toast("已在边界落点，可向内、沿边或向外转折")
             return [crossings[0]]
         return []
 
@@ -474,7 +492,7 @@ def obstacle_vertices_for_click(last, wx, wy):
         entry = crossings[0]
         if _points_near(entry, last):
             return []
-        show_toast("已在边界落点，请点击下一步转折方向")
+        show_toast("已在边界落点，可向内、沿边或向外转折")
         return [entry]
 
     if _points_near(target, last):
@@ -1646,7 +1664,7 @@ def toggle_draw_obstacle(active=None):
         editing_wall_size = False
         current_polygon = []
         preview_point = None
-        show_toast("刨除障碍: 碰边即停为拐点，再点选转折方向 | Enter 完成 | Esc 取消")
+        show_toast("刨除障碍: 碰边即停为拐点，之后可向内/沿边/向外转 | Shift 垂直水平 | Enter 完成")
     else:
         current_polygon = []
         preview_point = None
@@ -1871,7 +1889,7 @@ def draw_banner(surface):
         rect = pygame.Rect(SIDEBAR_WIDTH + 16, 12, CANVAS_RECT.width - 32, 36)
         pygame.draw.rect(surface, C_ACCENT_LIGHT, rect, border_radius=8)
         pygame.draw.rect(surface, C_ACCENT, rect, 1, border_radius=8)
-        text = FONT_SMALL.render("刨除障碍 — 碰边即停为拐点 | 0.1m 对齐 | Enter 完成 | Esc 取消", True, C_ACCENT)
+        text = FONT_SMALL.render("刨除障碍 — 碰边停 | 拐点后可向内转 | Shift 水平/垂直 | Enter 完成", True, C_ACCENT)
         surface.blit(text, text.get_rect(center=rect.center))
 
 
@@ -2061,13 +2079,6 @@ def handle_canvas_click(mx, my, button):
 
     if drawing_polygon:
         last = current_polygon[-1] if current_polygon else None
-        if current_polygon:
-            keys = pygame.key.get_pressed()
-            if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
-                if abs(wx - last[0]) > abs(wy - last[1]):
-                    wy = last[1]
-                else:
-                    wx = last[0]
         verts = obstacle_vertices_for_click(last, wx, wy)
         append_obstacle_vertices(verts)
         preview_point = None
@@ -2297,12 +2308,6 @@ def main():
                     poly["points"] = [(x + dx, y + dy) for x, y in old]
                 elif drawing_polygon:
                     last = current_polygon[-1] if current_polygon else None
-                    keys = pygame.key.get_pressed()
-                    if last and (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]):
-                        if abs(wx - last[0]) > abs(wy - last[1]):
-                            wy = last[1]
-                        else:
-                            wx = last[0]
                     preview_point = obstacle_draw_target(last, wx, wy)
                 else:
                     preview_point = None
