@@ -25,6 +25,7 @@ from display_lookup import (
     display_items_including_blacklist,
     filter_gallery_items,
     filter_items,
+    find_display_item_for_template,
     group_by_family,
     last_load_error,
     last_load_source,
@@ -32,6 +33,7 @@ from display_lookup import (
     load_display_items,
     match_template_index,
     find_template_index_by_id,
+    prune_orphan_templates,
     reload_display_items,
     shop_stats,
     shops_for_display_tabs,
@@ -161,7 +163,6 @@ _last_input_click = {"box": None, "time": 0}
 FOCUS_ZONES = ("name", "family")
 focus_zone = "canvas"
 app_screen = "gallery"  # editor | gallery
-gallery_mode = "display"  # display | templates
 display_shop = "all"
 display_survey_filter = "all"  # all | modeled | unmodeled
 display_blacklist_mode = "exclude"  # exclude | all | only
@@ -171,14 +172,13 @@ _pending_input_focus = None
 _pending_focus_frames = 0
 _sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
 _last_list_pick = {"index": -1, "time": 0}
-_last_gallery_pick = {"index": -1, "time": 0}
 CLICK_MOVE_TOLERANCE = 10
 return_to_gallery_after_edit = False
 _gallery_snapshot: dict | None = None
 
 
 class GalleryView:
-    """全屏总览：Display 大库（按门店）+ 已测绘模板库。"""
+    """全屏总览：Display 大库（按门店 / 已测绘筛选）。"""
 
     TOP_H = 118
     SHOP_H = 36
@@ -205,7 +205,6 @@ class GalleryView:
         self._shop_tabs: list[tuple[pygame.Rect, str]] = []
         self._survey_tabs: list[tuple[pygame.Rect, str]] = []
         self._blacklist_tabs: list[tuple[pygame.Rect, str]] = []
-        self._mode_tabs: list[tuple[pygame.Rect, str]] = []
         self._layout_key: tuple | None = None
         self._content_h = 0
         self._scroll_drag = False
@@ -222,24 +221,12 @@ class GalleryView:
             blacklist_mode=display_blacklist_mode,
         )
 
-    def group_templates(self, templates):
-        query = input_search.get_text().lower().strip()
-        groups = {}
-        for i, tpl in enumerate(templates):
-            family = tpl.get("product_family") or tpl.get("id", "未分类")
-            tid = tpl.get("id", "")
-            if query and query not in family.lower() and query not in tid.lower():
-                continue
-            groups.setdefault(family, []).append((i, tpl))
-        return sorted(groups.items(), key=lambda item: item[0].lower())
-
     def invalidate_layout(self) -> None:
         self._layout_key = None
 
     def _layout_cache_key(self, templates, screen_w: int) -> tuple:
         return (
             screen_w,
-            gallery_mode,
             display_shop,
             display_survey_filter,
             display_blacklist_mode,
@@ -318,8 +305,6 @@ class GalleryView:
         pygame.draw.rect(surface, (140, 148, 160), thumb, border_radius=6)
 
     def _prefetch_visible_images(self, screen_h: int) -> None:
-        if gallery_mode != "display":
-            return
         urls: list[str] = []
         for item in self._layout:
             if item[0] != "card_disp":
@@ -332,29 +317,7 @@ class GalleryView:
                 urls.append(disp_item.image_url)
         prefetch_urls(urls, limit=32)
 
-    def build_layout_templates(self, templates, screen_w: int):
-        self._layout = []
-        self._cards = []
-        y = self.PAD
-        for family, tpls in self.group_templates(templates):
-            rois = [t.get("roi", 0) or 0 for _, t in tpls]
-            avg_roi = sum(rois) / max(len(rois), 1)
-            self._layout.append(("family", family, len(tpls), avg_roi, y))
-            y += self.FAMILY_H
-            x = self.PAD
-            row_y = y
-            for idx, tpl in sorted(tpls, key=lambda x: x[1].get("id", "").lower()):
-                if x + self.CARD_W > screen_w - self.PAD:
-                    x = self.PAD
-                    row_y += self.CARD_H + self.CARD_GAP
-                rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
-                self._layout.append(("card_tpl", rect, idx, tpl))
-                self._cards.append((rect, "template", idx))
-                x += self.CARD_W + self.CARD_GAP
-            y = row_y + self.CARD_H + self.FAMILY_GAP
-        return y + self.PAD
-
-    def build_layout_display(self, templates, screen_w: int):
+    def build_layout(self, templates, screen_w: int):
         self._layout = []
         self._cards = []
         y = self.PAD
@@ -377,11 +340,6 @@ class GalleryView:
             y = row_y + self.CARD_H + self.FAMILY_GAP
         return y + self.PAD
 
-    def build_layout(self, templates, screen_w: int):
-        if gallery_mode == "display":
-            return self.build_layout_display(templates, screen_w)
-        return self.build_layout_templates(templates, screen_w)
-
     def scroll(self, delta: int):
         self.scroll_y = max(0, self.scroll_y + delta)
 
@@ -397,24 +355,19 @@ class GalleryView:
             return "back"
         if self.refresh_btn.contains((mx, my)):
             return "refresh"
-        if gallery_mode == "display":
-            if self.copy_btn.contains((mx, my)):
-                return "gallery_copy"
-            if self.paste_btn.contains((mx, my)):
-                return "gallery_paste"
-        for rect, mode in self._mode_tabs:
-            if rect.collidepoint(mx, my):
-                return f"mode:{mode}"
+        if self.copy_btn.contains((mx, my)):
+            return "gallery_copy"
+        if self.paste_btn.contains((mx, my)):
+            return "gallery_paste"
         for rect, shop_id in self._shop_tabs:
             if rect.collidepoint(mx, my):
                 return f"shop:{shop_id}"
-        if gallery_mode == "display":
-            for rect, sid in self._survey_tabs:
-                if rect.collidepoint(mx, my):
-                    return f"survey:{sid}"
-            for rect, bid in self._blacklist_tabs:
-                if rect.collidepoint(mx, my):
-                    return f"bl:{bid}"
+        for rect, sid in self._survey_tabs:
+            if rect.collidepoint(mx, my):
+                return f"survey:{sid}"
+        for rect, bid in self._blacklist_tabs:
+            if rect.collidepoint(mx, my):
+                return f"bl:{bid}"
         if input_search.contains((mx, my)):
             return None
         if my < self.TOP_H:
@@ -422,33 +375,20 @@ class GalleryView:
         cy = self.content_y(my)
         for rect, kind, data in self._cards:
             if rect.collidepoint(mx, cy):
-                if kind == "template":
-                    return data
-                return ("display", data)
+                if kind == "display":
+                    return ("display", data)
         return None
 
     def _draw_header_tabs(self, surface, sw: int, templates):
-        self._mode_tabs = []
         self._shop_tabs = []
         self._survey_tabs = []
         self._blacklist_tabs = []
-        x = 20
-        y = 10
-        for mode, label in (("display", "Display 库"), ("templates", "已测绘")):
-            w = 108
-            rect = pygame.Rect(x, y, w, 28)
-            active = gallery_mode == mode
-            bg = C_SIDEBAR_ACTIVE if active else C_SIDEBAR_HOVER
-            pygame.draw.rect(surface, bg, rect, border_radius=6)
-            surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 12, rect.y + 7))
-            self._mode_tabs.append((rect, mode))
-            x += w + 8
 
-        input_search.rect = pygame.Rect(250, 10, min(360, sw - 560), 28)
+        input_search.rect = pygame.Rect(20, 10, min(360, sw - 560), 28)
         input_search.draw(surface, None, on_dark=True)
 
         stats = shop_stats(display_items, templates) if display_items else {}
-        if gallery_mode == "display" and stats.get("all"):
+        if stats.get("all"):
             s = stats["all"]
             label = f"已测绘 {s['modeled']}/{s['total']}"
         else:
@@ -457,68 +397,65 @@ class GalleryView:
 
         self.refresh_btn.rect = pygame.Rect(sw - 248, 10, 72, 28)
         self.refresh_btn.draw(surface, mouse_pos, on_dark=True)
-        if gallery_mode == "display":
-            self.paste_btn.rect = pygame.Rect(sw - 328, 10, 56, 28)
-            self.copy_btn.rect = pygame.Rect(sw - 392, 10, 56, 28)
-            self.paste_btn.draw(surface, mouse_pos, on_dark=True)
-            self.copy_btn.draw(surface, mouse_pos, on_dark=True)
+        self.paste_btn.rect = pygame.Rect(sw - 328, 10, 56, 28)
+        self.copy_btn.rect = pygame.Rect(sw - 392, 10, 56, 28)
+        self.paste_btn.draw(surface, mouse_pos, on_dark=True)
+        self.copy_btn.draw(surface, mouse_pos, on_dark=True)
         self.back_btn.rect = pygame.Rect(sw - 148, 10, 128, 28)
         self.back_btn.draw(surface, mouse_pos, on_dark=True)
 
-        if gallery_mode == "display":
-            x = 20
-            y = 52
-            for shop, st in shops_for_display_tabs(display_items, templates):
-                sid = shop["id"]
-                if sid == "all":
-                    text = f"全部 {st['total']}"
-                else:
-                    fam_n = st.get("families", 0)
-                    text = f"{shop['label']} {fam_n}族 {st['modeled']}/{st['total']}"
-                w = max(88, FONT_SMALL.size(text)[0] + 20)
-                rect = pygame.Rect(x, y, w, self.SHOP_H - 4)
-                active = display_shop == sid
-                bg = C_ACCENT if active else C_SIDEBAR
-                pygame.draw.rect(surface, bg, rect, border_radius=6)
-                surface.blit(FONT_SMALL.render(text, True, (255, 255, 255)), (rect.x + 10, rect.y + 8))
-                self._shop_tabs.append((rect, sid))
-                x += w + 8
-                if x > sw - 40:
-                    break
+        x = 20
+        y = 52
+        for shop, st in shops_for_display_tabs(display_items, templates):
+            sid = shop["id"]
+            if sid == "all":
+                text = f"全部 {st['total']}"
+            else:
+                fam_n = st.get("families", 0)
+                text = f"{shop['label']} {fam_n}族 {st['modeled']}/{st['total']}"
+            w = max(88, FONT_SMALL.size(text)[0] + 20)
+            rect = pygame.Rect(x, y, w, self.SHOP_H - 4)
+            active = display_shop == sid
+            bg = C_ACCENT if active else C_SIDEBAR
+            pygame.draw.rect(surface, bg, rect, border_radius=6)
+            surface.blit(FONT_SMALL.render(text, True, (255, 255, 255)), (rect.x + 10, rect.y + 8))
+            self._shop_tabs.append((rect, sid))
+            x += w + 8
+            if x > sw - 40:
+                break
 
-            self._survey_tabs = []
-            self._blacklist_tabs = []
-            fy = 84
-            fx = 20
-            for sid, label in (("all", "全部"), ("modeled", "已测绘"), ("unmodeled", "未测绘")):
-                w = max(56, FONT_SMALL.size(label)[0] + 16)
-                rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
-                active = display_survey_filter == sid
-                bg = C_SUCCESS if active else C_SIDEBAR_HOVER
-                pygame.draw.rect(surface, bg, rect, border_radius=5)
-                surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
-                self._survey_tabs.append((rect, sid))
-                fx += w + 6
-            fx += 12
-            for bid, label in (("exclude", "剔除黑"), ("all", "含黑名单"), ("only", "仅黑")):
-                w = max(64, FONT_SMALL.size(label)[0] + 16)
-                rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
-                active = display_blacklist_mode == bid
-                bg = (192, 57, 43) if bid == "only" and active else (127, 140, 141) if active else C_SIDEBAR_HOVER
-                pygame.draw.rect(surface, bg, rect, border_radius=5)
-                surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
-                self._blacklist_tabs.append((rect, bid))
-                fx += w + 6
+        self._survey_tabs = []
+        self._blacklist_tabs = []
+        fy = 84
+        fx = 20
+        for sid, label in (("all", "全部"), ("modeled", "已测绘"), ("unmodeled", "未测绘")):
+            w = max(56, FONT_SMALL.size(label)[0] + 16)
+            rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
+            active = display_survey_filter == sid
+            bg = C_SUCCESS if active else C_SIDEBAR_HOVER
+            pygame.draw.rect(surface, bg, rect, border_radius=5)
+            surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
+            self._survey_tabs.append((rect, sid))
+            fx += w + 6
+        fx += 12
+        for bid, label in (("exclude", "剔除黑"), ("all", "含黑名单"), ("only", "仅黑")):
+            w = max(64, FONT_SMALL.size(label)[0] + 16)
+            rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
+            active = display_blacklist_mode == bid
+            bg = (192, 57, 43) if bid == "only" and active else (127, 140, 141) if active else C_SIDEBAR_HOVER
+            pygame.draw.rect(surface, bg, rect, border_radius=5)
+            surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
+            self._blacklist_tabs.append((rect, bid))
+            fx += w + 6
 
     def draw(self, surface, templates, selected_index: int):
         sw, sh = surface.get_width(), surface.get_height()
         surface.fill((245, 247, 250))
         pygame.draw.rect(surface, C_SIDEBAR_DARK, (0, 0, sw, self.TOP_H))
 
-        title = "Display 大库" if gallery_mode == "display" else "已测绘模板"
-        if gallery_mode == "display":
-            surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
-            surface.blit(FONT_MARK.render("单击选中 · 复制/粘贴按钮或 Ctrl+C/V", True, C_SIDEBAR_MUTED), (168, 62))
+        title = "Display 大库"
+        surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
+        surface.blit(FONT_MARK.render("单击选中 · 复制/粘贴按钮或 Ctrl+C/V", True, C_SIDEBAR_MUTED), (168, 62))
 
         self._draw_header_tabs(surface, sw, templates)
 
@@ -539,22 +476,9 @@ class GalleryView:
                 bar = pygame.Rect(self.PAD, sy, sw - self.PAD * 2, self.FAMILY_H - 4)
                 pygame.draw.rect(surface, C_SIDEBAR, bar, border_radius=6)
                 surface.blit(FONT_LABEL.render(family, True, (255, 255, 255)), (bar.x + 14, bar.y + 6))
-                if gallery_mode == "display":
-                    meta = f"{count} 款 Display  ·  已测绘 {extra}/{count}"
-                else:
-                    meta = f"{count} 款  ·  ROI {extra:.1f}"
+                meta = f"{count} 款 Display  ·  已测绘 {extra}/{count}"
                 meta_surf = FONT_SMALL.render(meta, True, C_SIDEBAR_MUTED)
                 surface.blit(meta_surf, (bar.right - meta_surf.get_width() - 14, bar.y + 12))
-            elif item[0] == "card_tpl":
-                _, rect, idx, tpl = item
-                screen_rect = rect.move(0, self.TOP_H - self.scroll_y)
-                if screen_rect.bottom < self.TOP_H or screen_rect.top > sh:
-                    continue
-                selected = idx == selected_index
-                draw_template_card(surface, tpl, screen_rect, selected)
-                name = tpl.get("id", "")
-                name_surf = FONT_SMALL.render(name, True, INPUT_TEXT if not selected else (255, 255, 255))
-                surface.blit(name_surf, (screen_rect.x + 8, screen_rect.bottom - 20))
             elif item[0] == "card_disp":
                 _, rect, disp_item, tpl_idx = item
                 screen_rect = rect.move(0, self.TOP_H - self.scroll_y)
@@ -569,10 +493,10 @@ class GalleryView:
         self.draw_scrollbar(surface, sw, sh, content_h)
 
         err = last_load_error()
-        if gallery_mode == "display" and err and not display_items:
+        if err and not display_items:
             banner = FONT_SMALL.render(f"⚠ {err[:90]}", True, (200, 80, 60))
             surface.blit(banner, (self.PAD, sh - 28))
-        elif gallery_mode == "display" and display_items and last_load_source():
+        elif display_items and last_load_source():
             src = last_load_source()
             fam_col = last_family_column()
             hint = f"数据源: {src}"
@@ -831,8 +755,11 @@ def open_gallery(reset_scroll: bool = True):
     return_to_gallery_after_edit = False
     _gallery_snapshot = None
     display_items = reload_display_items(prefer_db=False)
+    removed = prune_templates_against_display()
     bl_n, bl_src, _ = blacklist_status()
-    if bl_n:
+    if removed:
+        toast.show(f"已移除游离模板: {', '.join(removed)}")
+    elif bl_n:
         toast.show(f"黑名单已加载 {bl_n} 个 SKU（{bl_src}）")
 
 
@@ -842,7 +769,6 @@ def open_editor_from_gallery():
     _gallery_snapshot = {
         "scroll_y": gallery_view.scroll_y,
         "display_shop": display_shop,
-        "gallery_mode": gallery_mode,
         "display_survey_filter": display_survey_filter,
         "display_blacklist_mode": display_blacklist_mode,
     }
@@ -852,13 +778,12 @@ def open_editor_from_gallery():
 
 
 def return_to_gallery_view():
-    global app_screen, display_shop, gallery_mode, display_items
+    global app_screen, display_shop, display_items
     global return_to_gallery_after_edit, _gallery_snapshot
     global display_survey_filter, display_blacklist_mode
     snap = _gallery_snapshot or {}
     gallery_view.scroll_y = snap.get("scroll_y", 0)
     display_shop = snap.get("display_shop", display_shop)
-    gallery_mode = snap.get("gallery_mode", gallery_mode)
     display_survey_filter = snap.get("display_survey_filter", display_survey_filter)
     display_blacklist_mode = snap.get("display_blacklist_mode", display_blacklist_mode)
     return_to_gallery_after_edit = False
@@ -873,6 +798,60 @@ def close_gallery():
     global app_screen
     app_screen = "editor"
     input_search.deactivate()
+
+
+def _display_items_for_validation():
+    items = display_items_including_blacklist()
+    if items:
+        return items
+    return display_items or []
+
+
+def _bind_template_to_display(tpl: dict, item) -> dict:
+    tpl_id = item.product_code or item.product_name
+    family = item.product_family if item.product_family and item.product_family != "未分类" else tpl_id
+    tpl["id"] = tpl_id
+    tpl["product_family"] = family
+    tpl["roi"] = lookup_roi(family)
+    tpl["display_key"] = item.key
+    tpl["source"] = "display"
+    return tpl
+
+
+def _template_display_item(tpl: dict | None):
+    if not tpl:
+        return None
+    if selected_display_key:
+        item = _find_display_item(selected_display_key)
+        if item:
+            return item
+    return find_display_item_for_template(tpl, _display_items_for_validation())
+
+
+def _require_display_source(tpl: dict) -> bool:
+    if _template_display_item(tpl):
+        return True
+    toast.show("模板必须对应 Display 库产品，请从 Display 大库打开测绘")
+    return False
+
+
+def prune_templates_against_display(*, persist: bool = True) -> list[str]:
+    """删除不在 Display 库中的游离模板。"""
+    global furniture_templates, selected_index
+    items = _display_items_for_validation()
+    if not items:
+        return []
+    kept, removed = prune_orphan_templates(furniture_templates, items)
+    if not removed:
+        return []
+    furniture_templates = kept
+    if selected_index >= len(furniture_templates):
+        selected_index = len(furniture_templates) - 1
+    gallery_view.invalidate_layout()
+    if persist and os.path.isfile(TEMPLATES_FILE):
+        with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+            json.dump(furniture_templates, f, ensure_ascii=False, indent=2)
+    return removed
 
 
 def screen_to_world(sx, sy):
@@ -1332,44 +1311,47 @@ def _duplicate_id(name: str, ignore_index: int = -1) -> bool:
 
 
 def rename_template():
-    """只更新名称和 Product Family，复制后也可用此保存新名称。"""
+    """只更新 Product Family（名称锁定为 Display SKU）。"""
     global selected_index, editing_template, editing_mode
-    name = input_name.get_text().strip()
-    family = input_family.get_text().strip() or name
-    if not name:
-        toast.show("请填写模板名称")
+    if not editing_template and selected_index >= 0:
+        editing_template = copy.deepcopy(furniture_templates[selected_index])
+    if not editing_template:
+        toast.show("请先选中模板，或从 Display 大库打开测绘")
         return
+    display_item = _template_display_item(editing_template)
+    if not display_item:
+        toast.show("模板必须对应 Display 库产品，无法重命名游离项")
+        return
+    family = input_family.get_text().strip() or display_item.product_family or display_item.key
     roi = lookup_roi(family)
     if roi == 0:
         toast.show(f"警告: roi.xlsx 中未找到 {family}，ROI 将为 0")
-
-    if not _is_new_entry_mode() and selected_index >= 0:
-        if _duplicate_id(name, ignore_index=selected_index):
-            toast.show(f"名称「{name}」已存在，请换一个")
-            return
-        tpl = furniture_templates[selected_index]
-        old_name = tpl["id"]
-        tpl["id"] = name
-        tpl["product_family"] = family
-        tpl["roi"] = roi
-        editing_template = copy.deepcopy(tpl)
-        toast.show(f"已重命名: {old_name} → {name}，ROI={roi:.1f}")
-        return
-
-    if not editing_template:
-        toast.show("请先选中模板，或先复制再重命名")
-        return
-    if _duplicate_id(name):
-        toast.show(f"名称「{name}」已存在，请换一个")
-        return
-    editing_template = copy.deepcopy(editing_template)
-    editing_template["id"] = name
+    _bind_template_to_display(editing_template, display_item)
     editing_template["product_family"] = family
     editing_template["roi"] = roi
-    furniture_templates.append(editing_template)
+    input_name.set_text(editing_template["id"])
+    input_family.set_text(family)
+
+    if not _is_new_entry_mode() and selected_index >= 0:
+        tpl = furniture_templates[selected_index]
+        tpl.update({
+            "id": editing_template["id"],
+            "product_family": family,
+            "roi": roi,
+            "display_key": editing_template.get("display_key"),
+            "source": "display",
+        })
+        editing_template = copy.deepcopy(tpl)
+        toast.show(f"已更新 Family: {family}，ROI={roi:.1f}")
+        return
+
+    if _duplicate_id(editing_template["id"]):
+        toast.show(f"模板「{editing_template['id']}」已存在")
+        return
+    furniture_templates.append(copy.deepcopy(editing_template))
     selected_index = len(furniture_templates) - 1
     editing_mode = "edit"
-    toast.show(f"新模板已添加: {name}，ROI={roi:.1f}")
+    toast.show(f"新模板已添加: {editing_template['id']}，ROI={roi:.1f}")
 
 
 def save_to_list():
@@ -1378,10 +1360,13 @@ def save_to_list():
         apply_current_shape()
     if not editing_template:
         return
-    family = input_family.get_text() or editing_template.get("id", "")
-    editing_template["id"] = input_name.get_text() or editing_template["id"]
-    editing_template["product_family"] = family
-    editing_template["roi"] = lookup_roi(family)
+    display_item = _template_display_item(editing_template)
+    if not display_item:
+        toast.show("模板必须对应 Display 库产品，请从 Display 大库打开测绘")
+        return
+    _bind_template_to_display(editing_template, display_item)
+    input_name.set_text(editing_template["id"])
+    input_family.set_text(editing_template.get("product_family", ""))
     name = editing_template["id"]
     saved = copy.deepcopy(editing_template)
 
@@ -1435,7 +1420,11 @@ def load_templates_file(path=TEMPLATES_FILE):
         tpl["product_family"] = family
         tpl["roi"] = lookup_roi(family)
     selected_index = -1
-    toast.show(f"已加载 {len(furniture_templates)} 个模板")
+    removed = prune_templates_against_display(persist=path == TEMPLATES_FILE)
+    if removed:
+        toast.show(f"已加载 {len(furniture_templates)} 个模板，移除游离项: {', '.join(removed)}")
+    else:
+        toast.show(f"已加载 {len(furniture_templates)} 个模板")
 
 
 def load_template_into_editor(index, quiet=False):
@@ -1529,27 +1518,29 @@ def paste_template_from_clipboard() -> bool:
     if not _template_clipboard:
         toast.show("剪贴板为空，请先 Ctrl+C 复制")
         return False
+    if not selected_display_key:
+        toast.show("请从 Display 大库选中目标产品后再粘贴")
+        return False
+    item = _find_display_item(selected_display_key)
+    if not item:
+        toast.show("未找到选中的 Display 产品")
+        return False
 
     src = _template_clipboard
     new_tpl = copy.deepcopy(src)
-    new_name = _suggest_copy_name(src.get("id", "template"))
-    new_family = src.get("product_family", src.get("id", new_name))
-    new_tpl["id"] = new_name
-    new_tpl["product_family"] = new_family
-    new_tpl["roi"] = lookup_roi(new_family)
+    _bind_template_to_display(new_tpl, item)
 
     editing_template = new_tpl
     editing_mode = "copy"
     selected_index = -1
     draw_phase = "idle"
-    input_name.set_text(new_name)
-    input_family.set_text(new_family)
+    input_name.set_text(new_tpl["id"])
+    input_family.set_text(new_tpl.get("product_family", ""))
 
     if app_screen == "gallery":
         close_gallery()
-    focus_input(input_name)
-    input_name.select_all_text()
-    toast.show(f"已粘贴新形状，请修改名称后保存")
+    focus_input(input_family)
+    toast.show(f"已粘贴到 {item.product_name}，调整后保存")
     return True
 
 
@@ -1710,7 +1701,7 @@ def handle_global_clipboard_shortcuts(event):
         return False
 
     # 大库里优先处理模型复制粘贴（即使搜索框曾获得焦点）
-    if app_screen == "gallery" and gallery_mode == "display":
+    if app_screen == "gallery":
         if ui.is_ctrl_key(event, "c"):
             if input_search.active:
                 input_search.deactivate()
@@ -1785,12 +1776,9 @@ def begin_survey_display(item) -> None:
 def apply_template_to_display_item(item, src_tpl: dict) -> None:
     """把剪贴板里的模型形状绑定到指定 Display 产品（按 SKU 存模板）。"""
     global furniture_templates
-    tpl_id = item.product_code or item.product_name
-    family = item.product_family if item.product_family and item.product_family != "未分类" else tpl_id
     new_tpl = copy.deepcopy(src_tpl)
-    new_tpl["id"] = tpl_id
-    new_tpl["product_family"] = family
-    new_tpl["roi"] = lookup_roi(family)
+    _bind_template_to_display(new_tpl, item)
+    tpl_id = new_tpl["id"]
     idx = find_template_index_by_id(furniture_templates, tpl_id)
     if idx >= 0:
         furniture_templates[idx] = new_tpl
@@ -1805,8 +1793,6 @@ def apply_template_to_display_item(item, src_tpl: dict) -> None:
 
 
 def gallery_copy_model() -> bool:
-    if gallery_mode != "display":
-        return False
     if not selected_display_key:
         toast.show("请先单击选中一个产品")
         return False
@@ -1821,8 +1807,6 @@ def gallery_copy_model() -> bool:
 
 
 def gallery_paste_model() -> bool:
-    if gallery_mode != "display":
-        return False
     if not selected_display_key:
         toast.show("请先单击选中目标产品")
         return False
@@ -1861,26 +1845,22 @@ def refresh_display_data(prefer_db: bool = True) -> None:
 
 
 def handle_gallery_click(mx, my):
-    global selected_index, selected_display_key, gallery_mode, display_shop
+    global selected_index, selected_display_key, display_shop
     global display_survey_filter, display_blacklist_mode
-    global _last_gallery_pick, _last_gallery_display_pick
+    global _last_gallery_display_pick
     hit = gallery_view.handle_click(mx, my)
     if hit == "back":
         close_gallery()
         return True
     if hit == "refresh":
         refresh_display_data(prefer_db=True)
+        prune_templates_against_display()
         return True
     if hit == "gallery_copy":
         gallery_copy_model()
         return True
     if hit == "gallery_paste":
         gallery_paste_model()
-        return True
-    if isinstance(hit, str) and hit.startswith("mode:"):
-        gallery_mode = hit.split(":", 1)[1]
-        gallery_view.scroll_y = 0
-        gallery_view.invalidate_layout()
         return True
     if isinstance(hit, str) and hit.startswith("shop:"):
         display_shop = hit.split(":", 1)[1]
@@ -1908,6 +1888,7 @@ def handle_gallery_click(mx, my):
         _last_gallery_display_pick = {"key": key, "time": now}
         tpl_idx = match_template_index(item, furniture_templates)
         if is_double:
+            selected_display_key = key
             if tpl_idx >= 0:
                 open_editor_from_gallery()
                 load_template_into_editor(tpl_idx)
@@ -1919,17 +1900,6 @@ def handle_gallery_click(mx, my):
                 toast.show(f"已选中: {item.product_name}（已测绘 · 点「复制」或 Ctrl+C）")
             else:
                 toast.show(f"已选中: {item.product_name}（待测绘 · 先复制已测绘款，再点「粘贴」）")
-        return True
-    if hit is not None and isinstance(hit, int):
-        now = pygame.time.get_ticks()
-        is_double = hit == _last_gallery_pick["index"] and now - _last_gallery_pick["time"] < 400
-        _last_gallery_pick = {"index": hit, "time": now}
-        if is_double:
-            open_editor_from_gallery()
-            load_template_into_editor(hit)
-        else:
-            selected_index = hit
-            toast.show(f"已选中: {furniture_templates[hit]['id']}")
         return True
     if input_search.contains((mx, my)):
         handle_input_click(input_search)
@@ -1953,6 +1923,8 @@ def main():
             load_templates_file()
         except Exception as exc:
             show_error("加载模板失败", str(exc))
+    else:
+        prune_templates_against_display(persist=False)
 
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
     pygame.display.set_caption(f"家具模板编辑器 v{ui.__version__}")
