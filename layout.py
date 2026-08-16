@@ -86,7 +86,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
@@ -398,6 +398,96 @@ def segment_store_boundary_crossings(p1, p2):
 
 def point_in_store(x, y):
     return 0 <= x <= store_width_mm and 0 <= y <= store_height_mm
+
+
+def is_on_store_boundary(pt, tol=None):
+    tol = tol if tol is not None else OBSTACLE_SNAP_MM / 2 + 1
+    x, y = pt
+    if not point_in_store(x, y):
+        return False
+    return (
+        x <= tol
+        or x >= store_width_mm - tol
+        or y <= tol
+        or y >= store_height_mm - tol
+    )
+
+
+def is_store_interior(x, y):
+    return point_in_store(x, y) and not is_on_store_boundary((x, y))
+
+
+def _points_near(a, b, tol=None):
+    tol = tol if tol is not None else OBSTACLE_SNAP_MM
+    return math.hypot(a[0] - b[0], a[1] - b[1]) <= tol
+
+
+def _segment_enters_interior(p1, p2, crossings=None):
+    crossings = crossings if crossings is not None else segment_store_boundary_crossings(p1, p2)
+    if is_store_interior(p2[0], p2[1]):
+        return True
+    if not crossings:
+        return False
+    if not point_in_store(p1[0], p1[1]) and not point_in_store(p2[0], p2[1]):
+        mx = (p1[0] + p2[0]) / 2
+        my = (p1[1] + p2[1]) / 2
+        return is_store_interior(mx, my)
+    return False
+
+
+def obstacle_draw_target(last, wx, wy):
+    """Preview stops at the boundary cut point instead of extending into the store."""
+    target = snap_world_point(wx, wy)
+    if last is None:
+        return None if is_store_interior(target[0], target[1]) else target
+    if is_on_store_boundary(last) and is_store_interior(target[0], target[1]):
+        return None
+    crossings = segment_store_boundary_crossings(last, target)
+    if crossings and _segment_enters_interior(last, target, crossings):
+        return crossings[0]
+    return target
+
+
+def obstacle_vertices_for_click(last, wx, wy):
+    """Place boundary crossings as natural corners; never add interior-only points."""
+    target = snap_world_point(wx, wy)
+    if last is None:
+        if is_store_interior(target[0], target[1]):
+            show_toast("请从门店外或边界开始勾勒")
+            return []
+        return [target]
+
+    if is_on_store_boundary(last):
+        if is_store_interior(target[0], target[1]):
+            show_toast("已在边界拐点，请沿墙边或向外转折")
+            return []
+        return [target]
+
+    crossings = segment_store_boundary_crossings(last, target)
+    if is_store_interior(target[0], target[1]):
+        if crossings:
+            show_toast("已在边界落点，请点击下一步转折方向")
+            return [crossings[0]]
+        return []
+
+    if crossings and _segment_enters_interior(last, target, crossings):
+        entry = crossings[0]
+        if _points_near(entry, last):
+            return []
+        show_toast("已在边界落点，请点击下一步转折方向")
+        return [entry]
+
+    if _points_near(target, last):
+        return []
+    return [target]
+
+
+def append_obstacle_vertices(vertices):
+    global current_polygon
+    for vertex in vertices:
+        if current_polygon and _points_near(vertex, current_polygon[-1]):
+            continue
+        current_polygon.append(vertex)
 
 
 def polygon_area(points):
@@ -1556,7 +1646,7 @@ def toggle_draw_obstacle(active=None):
         editing_wall_size = False
         current_polygon = []
         preview_point = None
-        show_toast("刨除障碍: 顶点按 0.1m 对齐，边界切点显示距角距离 | Enter 完成 | Esc 取消")
+        show_toast("刨除障碍: 碰边即停为拐点，再点选转折方向 | Enter 完成 | Esc 取消")
     else:
         current_polygon = []
         preview_point = None
@@ -1743,16 +1833,24 @@ def draw_polygon_preview(surface):
     if len(current_polygon) >= 1 and preview:
         last = current_polygon[-1]
         dist_m = snap_world_mm(math.hypot(preview[0] - last[0], preview[1] - last[1])) / 1000
-        mid = world_to_screen((last[0] + preview[0]) / 2, (last[1] + preview[1]) / 2)
-        tag = FONT_SMALL.render(f"{dist_m:.1f} m", True, C_ACCENT)
-        surface.blit(tag, (mid[0] + 8, mid[1] - 10))
+        if dist_m > 0:
+            mid = world_to_screen((last[0] + preview[0]) / 2, (last[1] + preview[1]) / 2)
+            tag = FONT_SMALL.render(f"{dist_m:.1f} m", True, C_ACCENT)
+            surface.blit(tag, (mid[0] + 8, mid[1] - 10))
 
-        for cx, cy in segment_store_boundary_crossings(last, preview):
-            sx, sy = world_to_screen(cx, cy)
+        if is_on_store_boundary(preview) or _points_near(preview, last):
+            sx, sy = world_to_screen(*preview)
             pygame.draw.circle(surface, C_DANGER, (int(sx), int(sy)), 8)
             pygame.draw.circle(surface, (255, 255, 255), (int(sx), int(sy)), 8, 2)
-            label = FONT_SMALL.render(boundary_corner_label(cx, cy), True, C_DANGER)
+            label = FONT_SMALL.render(boundary_corner_label(*preview), True, C_DANGER)
             surface.blit(label, label.get_rect(center=(sx, sy - 22)))
+        else:
+            for cx, cy in segment_store_boundary_crossings(last, preview):
+                sx, sy = world_to_screen(cx, cy)
+                pygame.draw.circle(surface, C_DANGER, (int(sx), int(sy)), 8)
+                pygame.draw.circle(surface, (255, 255, 255), (int(sx), int(sy)), 8, 2)
+                label = FONT_SMALL.render(boundary_corner_label(cx, cy), True, C_DANGER)
+                surface.blit(label, label.get_rect(center=(sx, sy - 22)))
 
 
 def draw_scale_bar(surface):
@@ -1773,7 +1871,7 @@ def draw_banner(surface):
         rect = pygame.Rect(SIDEBAR_WIDTH + 16, 12, CANVAS_RECT.width - 32, 36)
         pygame.draw.rect(surface, C_ACCENT_LIGHT, rect, border_radius=8)
         pygame.draw.rect(surface, C_ACCENT, rect, 1, border_radius=8)
-        text = FONT_SMALL.render("刨除障碍 — 0.1m 对齐 | 红线=边界切点距角 | Enter 完成 | Esc 取消", True, C_ACCENT)
+        text = FONT_SMALL.render("刨除障碍 — 碰边即停为拐点 | 0.1m 对齐 | Enter 完成 | Esc 取消", True, C_ACCENT)
         surface.blit(text, text.get_rect(center=rect.center))
 
 
@@ -1962,16 +2060,17 @@ def handle_canvas_click(mx, my, button):
         return "pan"
 
     if drawing_polygon:
+        last = current_polygon[-1] if current_polygon else None
         if current_polygon:
-            last = current_polygon[-1]
             keys = pygame.key.get_pressed()
             if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
                 if abs(wx - last[0]) > abs(wy - last[1]):
                     wy = last[1]
                 else:
                     wx = last[0]
-        wx, wy = snap_world_point(wx, wy)
-        current_polygon.append((wx, wy))
+        verts = obstacle_vertices_for_click(last, wx, wy)
+        append_obstacle_vertices(verts)
+        preview_point = None
         return
 
     for f in reversed(placed_furnitures):
@@ -2196,15 +2295,15 @@ def main():
                     ncy = wy + collision_drag_offset[1]
                     dx, dy = ncx - cx, ncy - cy
                     poly["points"] = [(x + dx, y + dy) for x, y in old]
-                elif drawing_polygon and current_polygon:
-                    last = current_polygon[-1]
+                elif drawing_polygon:
+                    last = current_polygon[-1] if current_polygon else None
                     keys = pygame.key.get_pressed()
-                    if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+                    if last and (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]):
                         if abs(wx - last[0]) > abs(wy - last[1]):
                             wy = last[1]
                         else:
                             wx = last[0]
-                    preview_point = snap_world_point(wx, wy)
+                    preview_point = obstacle_draw_target(last, wx, wy)
                 else:
                     preview_point = None
 
