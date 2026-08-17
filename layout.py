@@ -87,7 +87,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
@@ -889,14 +889,129 @@ def shared_edge_length(poly_a, poly_b):
     return total
 
 
+def _segment_param(p, a, b):
+    ax, ay = a
+    bx, by = b
+    px, py = p
+    den = (bx - ax) ** 2 + (by - ay) ** 2
+    if den < 1:
+        return 0.0
+    return ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / den
+
+
+def _point_on_segment(p, a, b, tol=OBSTACLE_SNAP_MM):
+    if math.hypot(b[0] - a[0], b[1] - a[1]) < 1:
+        return False
+    if abs((p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0])) > tol * math.hypot(b[0] - a[0], b[1] - a[1]):
+        return False
+    t = _segment_param(p, a, b)
+    return -0.01 <= t <= 1.01
+
+
+def _segment_intersection_point(a1, a2, b1, b2, tol=5):
+    x1, y1 = a1
+    x2, y2 = a2
+    x3, y3 = b1
+    x4, y4 = b2
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(den) < 1:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+    u = ((x1 - x3) * (y1 - y2) - (y1 - y3) * (x1 - x2)) / den
+    if -0.001 <= t <= 1.001 and -0.001 <= u <= 1.001:
+        pt = (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+        return _snap_vertex(pt)
+    return None
+
+
+def subdivide_polygon_at_poly(points, other, tol=OBSTACLE_SNAP_MM):
+    """在 T 形/贴边处插入顶点，使共边能被正确抵消。"""
+    snaps = [_snap_vertex(p) for p in points]
+    other_pts = [_snap_vertex(p) for p in other]
+    out: list[tuple[float, float]] = []
+    n = len(snaps)
+    for i in range(n):
+        a = snaps[i]
+        b = snaps[(i + 1) % n]
+        splits = [a]
+        for p in other_pts:
+            if p == a or p == b:
+                continue
+            if _point_on_segment(p, a, b, tol):
+                splits.append(p)
+        for oa, ob in _polygon_edges(other_pts):
+            hit = _segment_intersection_point(a, b, oa, ob, tol=10)
+            if hit and hit != a and hit != b:
+                splits.append(hit)
+        splits.append(b)
+        splits.sort(key=lambda p: _segment_param(p, a, b))
+        deduped = [splits[0]]
+        for p in splits[1:]:
+            if math.hypot(p[0] - deduped[-1][0], p[1] - deduped[-1][1]) > tol / 2:
+                deduped.append(p)
+        for p in deduped[:-1]:
+            if not out or math.hypot(p[0] - out[-1][0], p[1] - out[-1][1]) > tol / 2:
+                out.append(p)
+    return out if len(out) >= 3 else snaps
+
+
+def _trace_polygon_loop(adj, start, start_nbr, used_edges):
+    path = [start]
+    prev = start
+    cur = start_nbr
+    used_edges.add(_undirected_edge_key(start, start_nbr))
+    for _ in range(len(adj) * 4 + 8):
+        path.append(cur)
+        if cur == start and len(path) > 3:
+            path.pop()
+            break
+        nxt = None
+        for n in adj.get(cur, []):
+            if n == prev:
+                continue
+            ek = _undirected_edge_key(cur, n)
+            if ek in used_edges:
+                continue
+            nxt = n
+            used_edges.add(ek)
+            break
+        if nxt is None:
+            break
+        prev, cur = cur, nxt
+    return path if len(path) >= 3 else []
+
+
+def _trace_largest_loop(outer):
+    adj = {}
+    for p1, p2 in outer:
+        adj.setdefault(p1, []).append(p2)
+        adj.setdefault(p2, []).append(p1)
+    used_edges: set = set()
+    best: list[tuple[float, float]] = []
+    best_area = 0.0
+    for p1, p2 in outer:
+        ek = _undirected_edge_key(p1, p2)
+        if ek in used_edges:
+            continue
+        loop = _trace_polygon_loop(adj, p1, p2, used_edges)
+        if len(loop) >= 3:
+            area = polygon_area(loop)
+            if area > best_area:
+                best_area = area
+                best = loop
+    return best if best_area > 1.0 else None
+
+
 def union_polygons(poly_a, poly_b):
-    """共边抵消后取外轮廓（支持任意多边形，不限于直角）。"""
+    """共边抵消后取外轮廓；先细分贴边顶点以支持 T 形/L 形融合。"""
+    pa = subdivide_polygon_at_poly(poly_a, poly_b)
+    pb = subdivide_polygon_at_poly(poly_b, poly_a)
     edges = []
-    for poly in (poly_a, poly_b):
+    for poly in (pa, pb):
         n = len(poly)
         for i in range(n):
-            p1 = _snap_vertex(poly[i])
-            p2 = _snap_vertex(poly[(i + 1) % n])
+            p1 = poly[i]
+            p2 = poly[(i + 1) % n]
             if p1 == p2:
                 continue
             edges.append((p1, p2))
@@ -909,35 +1024,20 @@ def union_polygons(poly_a, poly_b):
     outer = [directed[k] for k, c in counts.items() if c == 1]
     if not outer:
         return None
-    adj = {}
-    for p1, p2 in outer:
-        adj.setdefault(p1, []).append(p2)
-        adj.setdefault(p2, []).append(p1)
-    start = next((v for v, ns in adj.items() if len(ns) == 1), outer[0][0])
-    path = [start]
-    prev = None
-    cur = start
-    visited_edges = set()
-    for _ in range(len(outer) + 16):
-        nxt = None
-        for n in adj.get(cur, []):
-            if n == prev:
-                continue
-            ek = _undirected_edge_key(cur, n)
-            if ek in visited_edges:
-                continue
-            nxt = n
-            visited_edges.add(ek)
-            break
-        if nxt is None:
-            break
-        if nxt == start and len(path) >= 3:
-            break
-        path.append(nxt)
-        prev, cur = cur, nxt
-    if len(path) < 3 or polygon_area(path) <= 1.0:
+    path = _trace_largest_loop(outer)
+    if not path or len(path) < 3 or polygon_area(path) <= 1.0:
         return None
     return path
+
+
+def _merge_area_ok(poly_a, poly_b, merged):
+    area_a = polygon_area(poly_a)
+    area_b = polygon_area(poly_b)
+    area_m = polygon_area(merged)
+    if polygons_interior_overlap(poly_a, poly_b):
+        return area_m >= max(area_a, area_b) * 0.85
+    expected = area_a + area_b
+    return area_m >= expected * 0.90
 
 
 def align_polygon_for_merge(poly_a, poly_b):
@@ -1021,11 +1121,8 @@ def merge_selected_obstacle():
     if not merged:
         show_toast("融合失败，请把两边贴紧后再试")
         return
-    area_a = polygon_area(poly)
-    area_b = polygon_area(other)
-    area_m = polygon_area(merged)
-    if area_m < max(area_a, area_b) * 0.75:
-        show_toast("融合结果异常，已保留原形状")
+    if not _merge_area_ok(poly, other, merged):
+        show_toast("融合结果异常，已保留原形状（请贴紧共边后重试）")
         return
     overlaps, other_name = obstacle_overlaps_any(merged, idx, partner)
     if overlaps:
