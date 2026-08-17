@@ -1790,7 +1790,7 @@ def popup_store_size_dialog():
 
 def start_edit_canvas_size():
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, canvas_size_buttons
-    global renaming_store, renaming_obstacle, editing_wall_size
+    global editing_wall_size
     editing_canvas_size = True
     editing_wall_size = False
     cancel_rename_dialog()
@@ -1899,7 +1899,7 @@ def draw_canvas_size_dialog(surface):
 
 def start_edit_wall_size():
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus, wall_size_buttons
-    global renaming_store, renaming_obstacle, editing_canvas_size
+    global editing_canvas_size
     editing_wall_size = True
     editing_canvas_size = False
     cancel_rename_dialog()
