@@ -1847,6 +1847,7 @@ def handle_canvas_mousedown(mx, my, button):
             return
         x0, y0, x1, y1 = l_outer_corners
         pts = polygon_from_l_shape(x0, y0, x1, y1, wx, wy)
+        push_undo()
         editing_template = template_to_dict(
             input_name.get_text() or "l_shape",
             input_family.get_text() or input_name.get_text() or "l_shape",
