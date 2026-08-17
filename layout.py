@@ -726,10 +726,18 @@ def shape_to_points(item):
         return [tuple(p) for p in item.get("points", [])]
     if shape_type == "rectangle":
         w, h = item.get("width", 0), item.get("height", 0)
-        return [(0, 0), (w, 0), (w, h), (0, h)]
+        ox, oy = item.get("offset_x", 0) or 0, item.get("offset_y", 0) or 0
+        return [(ox, oy), (ox + w, oy), (ox + w, oy + h), (ox, oy + h)]
     if shape_type == "circle":
-        r = item.get("radius", 0)
-        return [(r * math.cos(2 * math.pi * i / 24), r * math.sin(2 * math.pi * i / 24)) for i in range(24)]
+        cx = item.get("center_x", 0) or 0
+        cy = item.get("center_y", 0) or 0
+        legacy = item.get("radius", 0) or 0
+        rx = item.get("radius_x", legacy) or legacy
+        ry = item.get("radius_y", legacy if legacy else rx) or rx
+        return [
+            (cx + rx * math.cos(2 * math.pi * i / 24), cy + ry * math.sin(2 * math.pi * i / 24))
+            for i in range(24)
+        ]
     if shape_type == "l_shape":
         w, h = item.get("width", 0), item.get("height", 0)
         cw, ch = item.get("cut_width", 0), item.get("cut_height", 0)
@@ -2731,7 +2739,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "←/→或Q/E旋转 | 右键拖动画布 | 滚轮缩放 | Ctrl+Z撤销 | Ctrl+C/V复制障碍"
+    hints = "←/→或Q/E旋转 | 右键拖动画布 | 滚轮缩放 | Ctrl+Z撤销 | Ctrl+C/V复制障碍 | 靠近自动磁吸"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
