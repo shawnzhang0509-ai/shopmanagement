@@ -62,14 +62,18 @@ def get_tk_root():
 _CTRL_UNICODE = {
     "a": "\x01",
     "c": "\x03",
+    "s": "\x13",
     "v": "\x16",
     "x": "\x18",
+    "z": "\x1a",
 }
 _CTRL_SCANCODES = {
     "a": 4,
     "c": 6,
+    "s": 22,
     "v": 25,
     "x": 45,
+    "z": 29,
 }
 
 

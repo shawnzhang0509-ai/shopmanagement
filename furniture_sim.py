@@ -745,6 +745,45 @@ def advance_focus(reverse: bool = False):
     apply_focus_zone()
 
 
+POLYGON_CLOSE_PX = 16
+
+
+def finish_polygon():
+    global editing_template, editing_mode, polygon_points, draw_phase, preview_point, selected_index
+    if len(polygon_points) < 3:
+        toast.show("至少需要 3 个顶点")
+        return False
+    push_undo()
+    editing_template = template_to_dict(
+        input_name.get_text() or "polygon",
+        input_family.get_text() or input_name.get_text() or "polygon",
+        "polygon",
+        polygon_points,
+    )
+    editing_mode = "new"
+    polygon_points = []
+    draw_phase = "idle"
+    preview_point = None
+    selected_index = -1
+    toast.show("多边形完成，可保存到列表")
+    return True
+
+
+def handle_editor_shortcuts(event):
+    """Editor shortcuts that must run before text inputs (IME-safe Ctrl+Z)."""
+    if event.type != pygame.KEYDOWN:
+        return False
+    if ui.is_ctrl_key(event, "z"):
+        undo_editor()
+        return True
+    if ui.is_ctrl_key(event, "s"):
+        if not (input_name.active or input_family.active):
+            save_to_list()
+            write_templates_file()
+            return True
+    return False
+
+
 def handle_enter_action():
     if input_name.active:
         focus_zone = "family"
@@ -1265,7 +1304,20 @@ def draw_canvas(surface):
         draw_shape(surface, pts, closed=False)
         if len(polygon_points) >= 2:
             p1, p2 = polygon_points[-2], polygon_points[-1]
-            draw_dimension_label(surface, p1, p2, f"{math.hypot(p2[0]-p1[0], p2[1]-p1[1])/1000:.2f} m")
+            draw_dimension_label(surface, p1, p2, _format_length_mm(math.hypot(p2[0] - p1[0], p2[1] - p1[1])))
+        if len(polygon_points) >= 3:
+            fx, fy = world_to_screen(polygon_points[0][0], polygon_points[0][1])
+            pygame.draw.circle(surface, C_ACCENT, (int(fx), int(fy)), 7, 2)
+            if preview_point:
+                near_close = math.hypot(mouse_pos[0] - fx, mouse_pos[1] - fy) <= POLYGON_CLOSE_PX
+                if near_close:
+                    pygame.draw.circle(surface, C_ACCENT, (int(fx), int(fy)), 11, 2)
+                    close_line = [
+                        world_to_screen(*polygon_points[-1]),
+                        world_to_screen(*preview_point),
+                        (fx, fy),
+                    ]
+                    pygame.draw.lines(surface, C_ACCENT, False, close_line, 2)
 
     if draw_phase == "drawing" and drag_start and drag_current:
         if current_tool == "rect":
@@ -1281,12 +1333,20 @@ def draw_canvas(surface):
             pts = polygon_from_circle(cx, cy, r)
             draw_shape(surface, pts, show_vertices=False)
             draw_dimension_label(surface, (cx, cy), drag_current, f"R {_format_length_mm(r)}")
+        elif current_tool == "l_shape":
+            pts = polygon_from_rect(*drag_start, *drag_current)
+            draw_shape(surface, pts)
+            w = abs(drag_current[0] - drag_start[0])
+            h = abs(drag_current[1] - drag_start[1])
+            draw_dimension_label(surface, pts[0], pts[1], _format_length_mm(w))
+            draw_dimension_label(surface, pts[1], pts[2], _format_length_mm(h))
 
     if draw_phase == "l_cut" and l_outer_corners and l_cut_preview:
         x0, y0, x1, y1 = l_outer_corners
         cx, cy = l_cut_preview
         pts = polygon_from_l_shape(x0, y0, x1, y1, cx, cy)
         draw_shape(surface, pts)
+        draw_edge_dimensions(surface, pts)
 
     # 十字中心线
     cx, cy = world_to_screen(0, 0)
@@ -1296,13 +1356,15 @@ def draw_canvas(surface):
     if current_tool == "polygon" and draw_phase != "idle":
         banner = pygame.Rect(SIDEBAR_WIDTH + 16, 12, sw - SIDEBAR_WIDTH - 32, 34)
         pygame.draw.rect(surface, (219, 234, 254), banner, border_radius=8)
-        tip = "多边形模式: 左键加点 | Shift 正交 | Enter 完成 | Esc 取消 | 右键拖动画布"
+        tip = "多边形: 左键加点 | 点击起点闭合 | Enter 完成 | Esc 取消"
         surface.blit(FONT_SMALL.render(tip, True, C_ACCENT), (banner.x + 12, banner.y + 9))
+    elif draw_phase == "drawing" and current_tool == "l_shape":
+        tip = "拖拽绘制 L 形外框（实时显示尺寸），松开后点击内角"
     elif draw_phase == "drawing":
         tip = "拖拽绘制形状，松开鼠标完成"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif draw_phase == "l_cut":
-        tip = "第二步: 点击 L 形内角位置"
+        tip = "第二步: 移动鼠标预览 L 形，点击确定内角位置"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif editing_template and draw_phase == "idle":
         tip = "左键拖动移动 | 橙色手柄调整大小 | 圆/椭圆拖四向轴点 | Ctrl+Z 撤销"
@@ -1835,6 +1897,11 @@ def handle_canvas_mousedown(mx, my, button):
     if current_tool == "polygon":
         if draw_phase == "idle":
             draw_phase = "drawing"
+        if len(polygon_points) >= 3:
+            fx, fy = world_to_screen(polygon_points[0][0], polygon_points[0][1])
+            if math.hypot(mx - fx, my - fy) <= POLYGON_CLOSE_PX:
+                finish_polygon()
+                return
         ref = polygon_points[-1] if polygon_points else None
         wx, wy = snap_point(wx, wy, ref)
         polygon_points.append((wx, wy))
@@ -1942,10 +2009,6 @@ def handle_global_clipboard_shortcuts(event):
 
     if ui.is_ctrl_key(event, "v"):
         paste_template_from_clipboard()
-        return True
-
-    if app_screen == "editor" and ui.is_ctrl_key(event, "z"):
-        undo_editor()
         return True
 
     return False
@@ -2319,46 +2382,33 @@ def main():
                         advance_focus(bool(event.mod & pygame.KMOD_SHIFT))
                         continue
 
-                    handled = (
-                        input_name.handle_event(event)
-                        or input_family.handle_event(event)
-                    )
-                    if handled:
-                        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                            handle_enter_action()
-                    elif handle_global_clipboard_shortcuts(event):
+                    if handle_editor_shortcuts(event):
                         pass
-                    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                        handle_enter_action()
-                    elif current_tool == "polygon":
-                        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
-                            push_undo()
-                            editing_template = template_to_dict(
-                                input_name.get_text() or "polygon",
-                                input_family.get_text() or input_name.get_text() or "polygon",
-                                "polygon",
-                                polygon_points,
-                            )
-                            editing_mode = "new"
-                            polygon_points = []
-                            draw_phase = "idle"
-                            preview_point = None
-                            selected_index = -1
-                            toast.show("多边形完成，可保存到列表")
+                    else:
+                        handled = (
+                            input_name.handle_event(event)
+                            or input_family.handle_event(event)
+                        )
+                        if handled:
+                            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                                handle_enter_action()
+                        elif handle_global_clipboard_shortcuts(event):
+                            pass
+                        elif current_tool == "polygon" and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            finish_polygon()
+                        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            handle_enter_action()
+                        elif current_tool == "polygon":
+                            if event.key == pygame.K_ESCAPE:
+                                polygon_points = []
+                                draw_phase = "idle"
+                                preview_point = None
                         elif event.key == pygame.K_ESCAPE:
-                            polygon_points = []
-                            draw_phase = "idle"
-                            preview_point = None
-                    elif event.key == pygame.K_ESCAPE:
-                        if return_to_gallery_after_edit and draw_phase == "idle":
-                            if input_name.active or input_family.active:
-                                blur_inputs()
-                            else:
-                                return_to_gallery_view()
-                    elif event.key == pygame.K_s and event.mod & pygame.KMOD_CTRL:
-                        if not (input_name.active or input_family.active):
-                            save_to_list()
-                            write_templates_file()
+                            if return_to_gallery_after_edit and draw_phase == "idle":
+                                if input_name.active or input_family.active:
+                                    blur_inputs()
+                                else:
+                                    return_to_gallery_view()
 
                 elif event.type == pygame.TEXTEDITING:
                     if input_name.active:
