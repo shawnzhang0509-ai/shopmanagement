@@ -38,7 +38,7 @@ from display_lookup import (
     shop_stats,
     shops_for_display_tabs,
 )
-from product_images import is_image_failed, prefetch_urls, request_thumbnail
+from product_images import is_image_failed, prefetch_urls, request_thumbnail, request_image
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
@@ -174,6 +174,10 @@ _sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
 _last_list_pick = {"index": -1, "time": 0}
 CLICK_MOVE_TOLERANCE = 10
 WHEEL_CLICK_COOLDOWN_MS = 350
+UNDO_LIMIT = 40
+SIDEBAR_PRODUCT_CARD_H = 108
+_undo_stack: list[dict] = []
+_undo_drag_started = False
 return_to_gallery_after_edit = False
 _gallery_snapshot: dict | None = None
 
@@ -530,6 +534,9 @@ def template_shape_badge(tpl: dict | None) -> str:
     if shape == "rectangle":
         return "矩"
     if shape == "circle":
+        rx, ry = circle_radii(tpl)
+        if abs(rx - ry) > 1:
+            return "椭"
         return "圆"
     if shape == "polygon":
         pts = tpl.get("points", [])
@@ -565,11 +572,11 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
     if has_model:
         border = C_SUCCESS
         border_w = 3
-        bg = (232, 245, 236) if not selected else (214, 238, 220)
+        bg = (232, 245, 236) if not selected else (200, 225, 245)
     elif selected:
         border = C_ACCENT
-        border_w = 2
-        bg = (220, 228, 238)
+        border_w = 3
+        bg = (214, 228, 248)
     else:
         border = (190, 198, 208)
         border_w = 1
@@ -577,6 +584,12 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
 
     pygame.draw.rect(surface, bg, rect, border_radius=8)
     pygame.draw.rect(surface, border, rect, border_w, border_radius=8)
+    if selected:
+        ring = rect.inflate(8, 8)
+        pygame.draw.rect(surface, C_ACCENT, ring, 3, border_radius=11)
+        for corner in (rect.topleft, rect.topright, rect.bottomleft, rect.bottomright):
+            pygame.draw.circle(surface, C_ACCENT, corner, 5)
+            pygame.draw.circle(surface, (255, 255, 255), corner, 5, 1)
 
     if sku_show:
         sku_surf = FONT_MARK.render(sku_show, True, (44, 62, 80))
@@ -905,7 +918,79 @@ def polygon_from_rect(x0, y0, x1, y1):
 
 
 def polygon_from_circle(cx, cy, r):
-    return [(cx + r * math.cos(2 * math.pi * i / 32), cy + r * math.sin(2 * math.pi * i / 32)) for i in range(32)]
+    return polygon_from_ellipse(cx, cy, r, r)
+
+
+def polygon_from_ellipse(cx, cy, rx, ry, segments=32):
+    return [
+        (cx + rx * math.cos(2 * math.pi * i / segments), cy + ry * math.sin(2 * math.pi * i / segments))
+        for i in range(segments)
+    ]
+
+
+def circle_radii(t: dict) -> tuple[float, float]:
+    legacy = float(t.get("radius", 0) or 0)
+    rx = float(t.get("radius_x", legacy) or legacy)
+    ry = float(t.get("radius_y", legacy if legacy else rx) or rx)
+    return rx, ry
+
+
+def circle_center(t: dict) -> tuple[float, float]:
+    return float(t.get("center_x", 0) or 0), float(t.get("center_y", 0) or 0)
+
+
+def rect_offset(t: dict) -> tuple[float, float]:
+    return float(t.get("offset_x", 0) or 0), float(t.get("offset_y", 0) or 0)
+
+
+def capture_editor_state() -> dict:
+    return {
+        "editing_template": copy.deepcopy(editing_template),
+        "editing_mode": editing_mode,
+        "selected_index": selected_index,
+        "current_tool": current_tool,
+        "polygon_points": copy.deepcopy(polygon_points),
+        "draw_phase": draw_phase,
+    }
+
+
+def push_undo():
+    global _undo_stack
+    _undo_stack.append(capture_editor_state())
+    if len(_undo_stack) > UNDO_LIMIT:
+        _undo_stack.pop(0)
+
+
+def clear_undo():
+    global _undo_stack
+    _undo_stack = []
+
+
+def undo_editor():
+    global editing_template, editing_mode, selected_index, current_tool, polygon_points, draw_phase
+    if not _undo_stack:
+        toast.show("无可撤销的操作")
+        return
+    state = _undo_stack.pop()
+    editing_template = state["editing_template"]
+    editing_mode = state["editing_mode"]
+    selected_index = state["selected_index"]
+    current_tool = state["current_tool"]
+    polygon_points = state["polygon_points"]
+    draw_phase = state["draw_phase"]
+    toast.show("已撤销上一步")
+
+
+def begin_editor_mutation():
+    global _undo_drag_started
+    if not _undo_drag_started:
+        push_undo()
+        _undo_drag_started = True
+
+
+def end_editor_mutation():
+    global _undo_drag_started
+    _undo_drag_started = False
 
 
 def polygon_from_l_shape(x0, y0, x1, y1, cut_x, cut_y):
@@ -920,10 +1005,12 @@ def normalize_template_dict(data):
     shape_type = data.get("type", "")
     if shape_type == "rectangle":
         w, h = data.get("width", 0), data.get("height", 0)
-        points = [(0, 0), (w, 0), (w, h), (0, h)]
+        ox, oy = rect_offset(data)
+        points = [(ox, oy), (ox + w, oy), (ox + w, oy + h), (ox, oy + h)]
     elif shape_type == "circle":
-        r = data.get("radius", 0)
-        points = polygon_from_circle(0, 0, r)
+        cx, cy = circle_center(data)
+        rx, ry = circle_radii(data)
+        points = polygon_from_ellipse(cx, cy, rx, ry)
     else:
         points = [tuple(p) for p in data.get("points", [])]
     return points
@@ -965,11 +1052,20 @@ def translate_editing_template(dx, dy):
     if not editing_template or (dx == 0 and dy == 0):
         return
     dx, dy = int(round(dx)), int(round(dy))
+    shape_type = editing_template.get("type")
+    if shape_type == "circle":
+        cx, cy = circle_center(editing_template)
+        editing_template["center_x"] = int(round(cx + dx))
+        editing_template["center_y"] = int(round(cy + dy))
+        return
+    if shape_type == "rectangle":
+        ox, oy = rect_offset(editing_template)
+        editing_template["offset_x"] = int(round(ox + dx))
+        editing_template["offset_y"] = int(round(oy + dy))
+        return
     pts = normalize_template_dict(editing_template)
     new_pts = [(x + dx, y + dy) for x, y in pts]
-    if editing_template.get("type") in ("rectangle", "circle"):
-        editing_template = _template_from_points(editing_template, new_pts)
-    elif editing_template.get("type") == "polygon":
+    if shape_type == "polygon":
         for i, (x, y) in enumerate(new_pts):
             editing_template["points"][i] = [int(round(x)), int(round(y))]
     else:
@@ -1002,14 +1098,20 @@ def template_to_dict(name, product_family, tool, points):
             "roi": roi,
         }
     if tool == "circle":
-        cx = sum(p[0] for p in points) / len(points)
-        cy = sum(p[1] for p in points) / len(points)
-        r = math.hypot(points[0][0] - cx, points[0][1] - cy)
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        cx = sum(xs) / len(xs)
+        cy = sum(ys) / len(ys)
+        rx = max(math.hypot(p[0] - cx, p[1] - cy) for p in points)
+        ry = rx
         return {
             "id": name,
             "product_family": product_family,
             "type": "circle",
-            "radius": int(round(r)),
+            "radius_x": int(round(rx)),
+            "radius_y": int(round(ry)),
+            "center_x": int(round(cx)),
+            "center_y": int(round(cy)),
             "roi": roi,
         }
     return {
@@ -1021,7 +1123,7 @@ def template_to_dict(name, product_family, tool, points):
     }
 
 
-def draw_shape(surface, points, fill=C_PREVIEW_FILL, border=C_PREVIEW, width=2, closed=True):
+def draw_shape(surface, points, fill=C_PREVIEW_FILL, border=C_PREVIEW, width=2, closed=True, show_vertices=True):
     if len(points) < 2:
         return
     screen_pts = [world_to_screen(x, y) for x, y in points]
@@ -1029,8 +1131,30 @@ def draw_shape(surface, points, fill=C_PREVIEW_FILL, border=C_PREVIEW, width=2, 
         pygame.draw.polygon(surface, fill, screen_pts)
     if len(screen_pts) >= 2:
         pygame.draw.lines(surface, border, closed, screen_pts, width)
-    for pt in screen_pts:
-        pygame.draw.circle(surface, border, (int(pt[0]), int(pt[1])), 4)
+    if show_vertices:
+        for pt in screen_pts:
+            pygame.draw.circle(surface, border, (int(pt[0]), int(pt[1])), 4)
+
+
+def _format_length_mm(dist_mm: float) -> str:
+    if dist_mm >= 1000:
+        return f"{dist_mm / 1000:.2f} m"
+    return f"{dist_mm:.0f} mm"
+
+
+def draw_edge_dimensions(surface, points, min_screen_px=36):
+    if len(points) < 2:
+        return
+    n = len(points)
+    for i in range(n):
+        p1 = points[i]
+        p2 = points[(i + 1) % n]
+        s1 = world_to_screen(*p1)
+        s2 = world_to_screen(*p2)
+        if math.hypot(s2[0] - s1[0], s2[1] - s1[1]) < min_screen_px:
+            continue
+        dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        draw_dimension_label(surface, p1, p2, _format_length_mm(dist))
 
 
 def draw_dimension_label(surface, p1, p2, text):
@@ -1047,15 +1171,22 @@ def get_resize_handles():
         return []
     t = editing_template
     if t["type"] == "rectangle":
+        ox, oy = rect_offset(t)
         w, h = t.get("width", 0), t.get("height", 0)
         return [
-            ("br", (w, h)),
-            ("tr", (w, 0)),
-            ("bl", (0, h)),
+            ("br", (ox + w, oy + h)),
+            ("tr", (ox + w, oy)),
+            ("bl", (ox, oy + h)),
         ]
     if t["type"] == "circle":
-        r = t.get("radius", 0)
-        return [("r", (r, 0))]
+        cx, cy = circle_center(t)
+        rx, ry = circle_radii(t)
+        return [
+            ("rx", (cx + rx, cy)),
+            ("-rx", (cx - rx, cy)),
+            ("ry", (cx, cy + ry)),
+            ("-ry", (cx, cy - ry)),
+        ]
     return [(i, tuple(p)) for i, p in enumerate(t.get("points", []))]
 
 
@@ -1074,19 +1205,23 @@ def apply_resize(handle_id, wx, wy):
     wx, wy = snap_grid(wx, wy)
     t = editing_template
     if t["type"] == "rectangle":
+        ox, oy = rect_offset(t)
         w, h = t.get("width", 0), t.get("height", 0)
         if handle_id == "br":
-            t["width"] = int(max(GRID_SNAP, wx))
-            t["height"] = int(max(GRID_SNAP, wy))
+            t["width"] = int(max(GRID_SNAP, wx - ox))
+            t["height"] = int(max(GRID_SNAP, wy - oy))
         elif handle_id == "tr":
-            t["width"] = int(max(GRID_SNAP, wx))
-            t["height"] = int(max(GRID_SNAP, h))
+            t["width"] = int(max(GRID_SNAP, wx - ox))
         elif handle_id == "bl":
-            t["width"] = int(max(GRID_SNAP, w))
-            t["height"] = int(max(GRID_SNAP, wy))
+            t["height"] = int(max(GRID_SNAP, wy - oy))
     elif t["type"] == "circle":
-        r = int(max(GRID_SNAP, math.hypot(wx, wy)))
-        t["radius"] = r
+        cx, cy = circle_center(t)
+        if handle_id in ("rx", "-rx"):
+            t["radius_x"] = int(max(GRID_SNAP, abs(wx - cx)))
+            t.pop("radius", None)
+        elif handle_id in ("ry", "-ry"):
+            t["radius_y"] = int(max(GRID_SNAP, abs(wy - cy)))
+            t.pop("radius", None)
     elif isinstance(handle_id, int):
         pts = t.get("points", [])
         if 0 <= handle_id < len(pts):
@@ -1102,14 +1237,16 @@ def draw_resize_handles(surface):
         pygame.draw.circle(surface, color, (int(sx), int(sy)), 8)
         pygame.draw.circle(surface, (255, 255, 255), (int(sx), int(sy)), 8, 2)
     pts = normalize_template_dict(editing_template)
-    if editing_template["type"] == "rectangle" and len(pts) >= 4:
-        w = abs(pts[1][0] - pts[0][0]) / 1000
-        h = abs(pts[2][1] - pts[1][1]) / 1000
-        draw_dimension_label(surface, pts[0], pts[1], f"{w:.1f} m")
-        draw_dimension_label(surface, pts[1], pts[2], f"{h:.1f} m")
-    elif editing_template["type"] == "circle":
-        r = editing_template.get("radius", 0) / 1000
-        draw_dimension_label(surface, (0, 0), (editing_template.get("radius", 0), 0), f"R {r:.1f} m")
+    t = editing_template
+    if t["type"] == "rectangle" and len(pts) >= 4:
+        draw_edge_dimensions(surface, pts)
+    elif t["type"] == "circle":
+        cx, cy = circle_center(t)
+        rx, ry = circle_radii(t)
+        draw_dimension_label(surface, (cx, cy), (cx + rx, cy), f"Rx {_format_length_mm(rx)}")
+        draw_dimension_label(surface, (cx, cy), (cx, cy + ry), f"Ry {_format_length_mm(ry)}")
+    elif t["type"] == "polygon" and len(pts) >= 3:
+        draw_edge_dimensions(surface, pts)
 
 
 def draw_canvas(surface):
@@ -1119,7 +1256,8 @@ def draw_canvas(surface):
 
     if editing_template:
         pts = normalize_template_dict(editing_template)
-        draw_shape(surface, pts, fill=(254, 243, 199), border=(217, 119, 6))
+        is_circle = editing_template.get("type") == "circle"
+        draw_shape(surface, pts, fill=(254, 243, 199), border=(217, 119, 6), show_vertices=not is_circle)
         draw_resize_handles(surface)
 
     if current_tool == "polygon" and polygon_points:
@@ -1141,8 +1279,8 @@ def draw_canvas(surface):
             cx, cy = drag_start
             r = math.hypot(drag_current[0] - cx, drag_current[1] - cy)
             pts = polygon_from_circle(cx, cy, r)
-            draw_shape(surface, pts)
-            draw_dimension_label(surface, (cx, cy), drag_current, f"R {r/1000:.2f} m")
+            draw_shape(surface, pts, show_vertices=False)
+            draw_dimension_label(surface, (cx, cy), drag_current, f"R {_format_length_mm(r)}")
 
     if draw_phase == "l_cut" and l_outer_corners and l_cut_preview:
         x0, y0, x1, y1 = l_outer_corners
@@ -1167,17 +1305,90 @@ def draw_canvas(surface):
         tip = "第二步: 点击 L 形内角位置"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif editing_template and draw_phase == "idle":
-        tip = "左键拖动形状移动 | 橙色角点调整大小 | Shift 自由定位"
+        tip = "左键拖动移动 | 橙色手柄调整大小 | 圆/椭圆拖四向轴点 | Ctrl+Z 撤销"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
     elif draw_phase == "idle":
         tip = "自动对齐 10cm 网格 | 按住 Shift 自由绘制"
         surface.blit(FONT_SMALL.render(tip, True, C_MUTED), (SIDEBAR_WIDTH + 16, 12))
 
 
+def draw_product_reference_card(surface):
+    pad = 16
+    w = SIDEBAR_WIDTH - pad * 2
+    card = pygame.Rect(pad, 58, w, SIDEBAR_PRODUCT_CARD_H)
+    pygame.draw.rect(surface, C_SIDEBAR_DARK, card, border_radius=8)
+    pygame.draw.rect(surface, C_SIDEBAR_HOVER, card, 1, border_radius=8)
+
+    item = _template_display_item(editing_template)
+    if item is None and selected_display_key:
+        item = _find_display_item(selected_display_key)
+
+    img_rect = pygame.Rect(card.x + 8, card.y + 8, 72, 88)
+    pygame.draw.rect(surface, (30, 41, 59), img_rect, border_radius=6)
+    text_x = img_rect.right + 10
+    text_w = card.right - text_x - 8
+
+    if item:
+        if getattr(item, "image_url", ""):
+            thumb = request_image(item.image_url, max_size=(120, 100))
+            if thumb is not None:
+                _blit_thumb_fit(surface, thumb, img_rect)
+            elif not is_image_failed(item.image_url):
+                wait = FONT_MARK.render("加载中…", True, C_SIDEBAR_MUTED)
+                surface.blit(wait, wait.get_rect(center=img_rect.center))
+            else:
+                wait = FONT_MARK.render("无图", True, C_SIDEBAR_MUTED)
+                surface.blit(wait, wait.get_rect(center=img_rect.center))
+        else:
+            wait = FONT_MARK.render("无图", True, C_SIDEBAR_MUTED)
+            surface.blit(wait, wait.get_rect(center=img_rect.center))
+        sku = (item.product_code or item.product_name or "").strip()
+        name = item.product_name or sku
+    else:
+        sku = input_name.get_text().strip()
+        name = sku or "未关联 Display 产品"
+        hint = FONT_MARK.render("从大库打开测绘", True, C_SIDEBAR_MUTED)
+        surface.blit(hint, hint.get_rect(center=img_rect.center))
+
+    if sku:
+        sku_surf = FONT_MARK.render(sku[:18], True, C_SIDEBAR_MUTED)
+        surface.blit(sku_surf, (text_x, card.y + 10))
+    name_lines = _wrap_text_lines(name, FONT_SMALL, text_w, max_lines=3)
+    y = card.y + 30
+    for line in name_lines:
+        surface.blit(FONT_SMALL.render(line, True, C_SIDEBAR_TEXT), (text_x, y))
+        y += 16
+
+
+def _wrap_text_lines(text: str, font, max_width: int, max_lines: int = 3) -> list[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    if font.size(text)[0] <= max_width:
+        return [text]
+    lines = []
+    chunk = ""
+    for ch in text:
+        trial = chunk + ch
+        if font.size(trial)[0] <= max_width:
+            chunk = trial
+        else:
+            if chunk:
+                lines.append(chunk)
+            chunk = ch
+        if len(lines) >= max_lines:
+            break
+    if chunk and len(lines) < max_lines:
+        lines.append(chunk)
+    if len(lines) == max_lines and font.size(lines[-1])[0] > max_width - 8:
+        lines[-1] = lines[-1][:-1] + "…"
+    return lines or [text[:12] + "…"]
+
+
 def build_sidebar():
     pad = 16
     w = SIDEBAR_WIDTH - pad * 2
-    y = 72
+    y = 58 + SIDEBAR_PRODUCT_CARD_H + 16
     tool_buttons = {}
     bw = (w - 8) // 2
     for i, (tool_id, label) in enumerate(TOOLS):
@@ -1208,9 +1419,11 @@ def build_sidebar():
 def draw_sidebar(tool_buttons, buttons):
     draw_sidebar_bg(screen)
     draw_sidebar_header(screen, "家具模板编辑器", "Furniture Template")
+    draw_product_reference_card(screen)
 
     pad = 16
-    screen.blit(FONT_SMALL.render("绘制工具", True, C_SIDEBAR_MUTED), (pad, 64))
+    tools_y = 58 + SIDEBAR_PRODUCT_CARD_H + 8
+    screen.blit(FONT_SMALL.render("绘制工具", True, C_SIDEBAR_MUTED), (pad, tools_y))
 
     for btn in tool_buttons.values():
         btn.active = btn.action == f"tool:{current_tool}"
@@ -1247,6 +1460,8 @@ def draw_sidebar(tool_buttons, buttons):
         sub = "从产品总览打开或新建"
     screen.blit(FONT_SMALL.render(status, True, C_SIDEBAR_TEXT), (pad, footer_y))
     screen.blit(FONT_MARK.render(sub, True, C_SIDEBAR_MUTED), (pad, footer_y + 18))
+    hint = "Ctrl+Z 撤销  |  Ctrl+S 保存"
+    screen.blit(FONT_MARK.render(hint, True, C_SIDEBAR_MUTED), (pad, footer_y - 14))
 
 
 def _is_new_entry_mode() -> bool:
@@ -1264,6 +1479,7 @@ def _editing_mode_label() -> str:
 def reset_draw_state():
     global draw_phase, drag_start, drag_current, polygon_points, preview_point, editing_template
     global l_outer_corners, l_cut_preview, resizing_handle, editing_mode
+    clear_undo()
     draw_phase = "idle"
     drag_start = None
     drag_current = None
@@ -1446,6 +1662,7 @@ def load_template_into_editor(index, quiet=False):
 
     selected_index = index
     editing_mode = "edit"
+    clear_undo()
     tpl = copy.deepcopy(furniture_templates[index])
     editing_template = tpl
     input_name.set_text(tpl["id"])
@@ -1605,9 +1822,11 @@ def handle_canvas_mousedown(mx, my, button):
     if draw_phase == "idle" and editing_template:
         handle = hit_resize_handle(mx, my)
         if handle is not None:
+            begin_editor_mutation()
             resizing_handle = handle
             return
         if hit_template_body(mx, my):
+            begin_editor_mutation()
             dragging_shape = True
             drag_shape_last_world = screen_to_world(mx, my)
             return
@@ -1628,6 +1847,7 @@ def handle_canvas_mousedown(mx, my, button):
             return
         x0, y0, x1, y1 = l_outer_corners
         pts = polygon_from_l_shape(x0, y0, x1, y1, wx, wy)
+        push_undo()
         editing_template = template_to_dict(
             input_name.get_text() or "l_shape",
             input_family.get_text() or input_name.get_text() or "l_shape",
@@ -1653,6 +1873,7 @@ def handle_canvas_mouseup(mx, my, button):
         return
     wx, wy = screen_to_world(mx, my)
     drag_current = snap_point(wx, wy, drag_start)
+    push_undo()
 
     if current_tool == "rect":
         pts = polygon_from_rect(*drag_start, *drag_current)
@@ -1721,6 +1942,10 @@ def handle_global_clipboard_shortcuts(event):
 
     if ui.is_ctrl_key(event, "v"):
         paste_template_from_clipboard()
+        return True
+
+    if app_screen == "editor" and ui.is_ctrl_key(event, "z"):
+        undo_editor()
         return True
 
     return False
@@ -2030,10 +2255,12 @@ def main():
                         else:
                             if resizing_handle is not None:
                                 resizing_handle = None
+                                end_editor_mutation()
                                 toast.show("尺寸已更新")
                             elif dragging_shape:
                                 dragging_shape = False
                                 drag_shape_last_world = None
+                                end_editor_mutation()
                                 keys = pygame.key.get_pressed()
                                 if not (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]):
                                     snap_template_to_grid()
@@ -2105,6 +2332,7 @@ def main():
                         handle_enter_action()
                     elif current_tool == "polygon":
                         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and len(polygon_points) >= 3:
+                            push_undo()
                             editing_template = template_to_dict(
                                 input_name.get_text() or "polygon",
                                 input_family.get_text() or input_name.get_text() or "polygon",
