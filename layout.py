@@ -87,7 +87,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.6.5"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
@@ -148,6 +148,9 @@ dragging_furniture = None
 selected_feature = None
 placed_furnitures = []
 renaming_obstacle = False
+rename_collision_index = None
+rename_dialog_buttons = {}
+rename_input_rect = None
 input_text = ""
 selected_template_index = 0
 dragging_collision = False
@@ -1787,10 +1790,10 @@ def popup_store_size_dialog():
 
 def start_edit_canvas_size():
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, canvas_size_buttons
-    global renaming_store, renaming_obstacle, editing_wall_size
+    global editing_wall_size
     editing_canvas_size = True
     editing_wall_size = False
-    renaming_store = renaming_obstacle = False
+    cancel_rename_dialog()
     canvas_w_text = f"{store_width_mm / 1000:g}"
     canvas_h_text = f"{store_height_mm / 1000:g}"
     canvas_size_focus = "width"
@@ -1896,10 +1899,10 @@ def draw_canvas_size_dialog(surface):
 
 def start_edit_wall_size():
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus, wall_size_buttons
-    global renaming_store, renaming_obstacle, editing_canvas_size
+    global editing_canvas_size
     editing_wall_size = True
     editing_canvas_size = False
-    renaming_store = renaming_obstacle = False
+    cancel_rename_dialog()
     toggle_draw_obstacle(False)
     wall_length_text = "3"
     wall_width_text = "0.2"
@@ -2239,21 +2242,119 @@ def rotate_selected(delta):
         show_toast(f"旋转至 {selected_feature.rotation:.0f}°")
 
 
+def build_rename_dialog_buttons():
+    cx = SCREEN_WIDTH // 2
+    bw, bh = 88, 34
+    y = SCREEN_HEIGHT // 2 + 42
+    return {
+        "ok": Button((cx - bw - 6, y, bw, bh), "确定", "rename_ok", primary=True),
+        "cancel": Button((cx + 6, y, bw, bh), "取消", "rename_cancel"),
+    }
+
+
+def cancel_rename_dialog():
+    global renaming_obstacle, renaming_store, input_text, rename_collision_index
+    renaming_obstacle = False
+    renaming_store = False
+    rename_collision_index = None
+    input_text = ""
+
+
+def apply_rename_obstacle():
+    global renaming_obstacle, input_text, rename_collision_index
+    if rename_collision_index is None or rename_collision_index >= len(collision_polygons):
+        cancel_rename_dialog()
+        return
+    name = input_text.strip()
+    if not name:
+        show_toast("名称不能为空")
+        return
+    for i, col in enumerate(collision_polygons):
+        if i != rename_collision_index and col.get("name") == name:
+            show_toast(f"名称「{name}」已被使用")
+            return
+    old_name = collision_polygons[rename_collision_index].get("name", "")
+    if name != old_name:
+        push_undo()
+        collision_polygons[rename_collision_index]["name"] = name
+    cancel_rename_dialog()
+    show_toast("重命名成功")
+
+
+def apply_rename_store_dialog():
+    global renaming_store, input_text
+    if not input_text.strip():
+        show_toast("门店名称不能为空")
+        return
+    rename_current_store(input_text.strip())
+    cancel_rename_dialog()
+
+
+def handle_rename_dialog_action(action):
+    if action == "rename_ok":
+        if renaming_store:
+            apply_rename_store_dialog()
+        else:
+            apply_rename_obstacle()
+    elif action == "rename_cancel":
+        cancel_rename_dialog()
+
+
+def handle_rename_dialog_click(mx, my):
+    global rename_input_rect
+    mx, my = ui_pos((mx, my))
+    if rename_input_rect and rename_input_rect.collidepoint(mx, my):
+        return True
+    for btn in rename_dialog_buttons.values():
+        if btn.contains((mx, my)):
+            handle_rename_dialog_action(btn.action)
+            return True
+    return False
+
+
+def handle_rename_dialog_key(event):
+    global input_text
+    if renaming_store:
+        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            apply_rename_store_dialog()
+        elif event.key == pygame.K_ESCAPE:
+            cancel_rename_dialog()
+        elif event.key == pygame.K_BACKSPACE:
+            input_text = input_text[:-1]
+        elif event.unicode and event.unicode.isprintable():
+            input_text += event.unicode
+    elif renaming_obstacle:
+        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            apply_rename_obstacle()
+        elif event.key == pygame.K_ESCAPE:
+            cancel_rename_dialog()
+        elif event.key == pygame.K_BACKSPACE:
+            input_text = input_text[:-1]
+        elif event.unicode and event.unicode.isprintable():
+            input_text += event.unicode
+
+
 def start_rename_obstacle():
-    global renaming_obstacle, renaming_store, input_text
-    if selected_collision is not None:
-        renaming_obstacle = True
-        renaming_store = False
-        input_text = collision_polygons[selected_collision]["name"]
-        show_toast("输入障碍物新名称后按 Enter")
+    global renaming_obstacle, renaming_store, input_text, rename_collision_index, rename_dialog_buttons
+    if selected_collision is None:
+        show_toast("请先选中障碍或墙体")
+        return
+    renaming_obstacle = True
+    renaming_store = False
+    rename_collision_index = selected_collision
+    input_text = collision_polygons[selected_collision]["name"]
+    rename_dialog_buttons = build_rename_dialog_buttons()
+    show_toast("输入新名称后点确定或按 Enter")
 
 
 def start_rename_store():
-    global renaming_store, renaming_obstacle, input_text
+    global renaming_store, renaming_obstacle, input_text, rename_collision_index, rename_dialog_buttons
     renaming_store = True
     renaming_obstacle = False
+    rename_collision_index = None
     input_text = store_name
-    show_toast("输入门店新名称后按 Enter")
+    rename_dialog_buttons = build_rename_dialog_buttons()
+    show_toast("输入新名称后点确定或按 Enter")
 
 
 def open_store_picker():
@@ -2450,17 +2551,31 @@ def draw_toast(surface):
 
 
 def draw_rename_dialog(surface):
+    global rename_input_rect
     if not renaming_obstacle and not renaming_store:
+        rename_input_rect = None
         return
-    box = pygame.Rect(SIDEBAR_WIDTH + 80, 120, 420, 110)
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 120))
+    surface.blit(overlay, (0, 0))
+    box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 90, 440, 170)
     pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
     title = "重命名门店" if renaming_store else "重命名障碍物"
-    surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 16, box.y + 14))
-    input_rect = pygame.Rect(box.x + 16, box.y + 48, box.width - 32, 36)
-    pygame.draw.rect(surface, (248, 250, 252), input_rect, border_radius=8)
-    pygame.draw.rect(surface, C_ACCENT, input_rect, 2, border_radius=8)
-    surface.blit(FONT_BODY.render(input_text + "|", True, C_TEXT), (input_rect.x + 10, input_rect.y + 8))
+    surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(
+        FONT_SMALL.render("Enter 确认  |  Esc 取消", True, C_MUTED),
+        (box.x + 20, box.y + 42),
+    )
+    rename_input_rect = pygame.Rect(box.x + 20, box.y + 68, box.width - 40, 36)
+    pygame.draw.rect(surface, (248, 250, 252), rename_input_rect, border_radius=8)
+    pygame.draw.rect(surface, C_ACCENT, rename_input_rect, 2, border_radius=8)
+    surface.blit(
+        FONT_BODY.render(input_text + "|", True, C_TEXT),
+        (rename_input_rect.x + 10, rename_input_rect.y + 8),
+    )
+    for btn in rename_dialog_buttons.values():
+        btn.draw(surface)
 
 
 def build_sidebar_ui():
@@ -2796,6 +2911,13 @@ def main():
                                 canvas_h_text += ch
                 continue
 
+            if (renaming_obstacle or renaming_store) and not startup_active:
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_rename_dialog_click(*event.pos)
+                elif event.type == pygame.KEYDOWN:
+                    handle_rename_dialog_key(event)
+                continue
+
             if startup_active:
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     handle_startup_mouseup(*event.pos, startup_buttons)
@@ -2882,32 +3004,7 @@ def main():
                     preview_point = None
 
             elif event.type == pygame.KEYDOWN:
-                if renaming_store:
-                    if event.key == pygame.K_RETURN and input_text.strip():
-                        rename_current_store(input_text.strip())
-                        renaming_store = False
-                        input_text = ""
-                    elif event.key == pygame.K_ESCAPE:
-                        renaming_store = False
-                        input_text = ""
-                    elif event.key == pygame.K_BACKSPACE:
-                        input_text = input_text[:-1]
-                    elif event.unicode and event.unicode.isprintable():
-                        input_text += event.unicode
-                elif renaming_obstacle:
-                    if event.key == pygame.K_RETURN and selected_collision is not None and input_text.strip():
-                        collision_polygons[selected_collision]["name"] = input_text.strip()
-                        show_toast("重命名成功")
-                        renaming_obstacle = False
-                        input_text = ""
-                    elif event.key == pygame.K_ESCAPE:
-                        renaming_obstacle = False
-                        input_text = ""
-                    elif event.key == pygame.K_BACKSPACE:
-                        input_text = input_text[:-1]
-                    elif event.unicode and event.unicode.isprintable():
-                        input_text += event.unicode
-                elif search_box_active:
+                if search_box_active:
                     if event.key == pygame.K_BACKSPACE:
                         search_text = search_text[:-1]
                     elif event.key == pygame.K_ESCAPE:
@@ -2967,7 +3064,6 @@ def main():
             draw_polygon_preview(screen)
             draw_scale_bar(screen)
             draw_banner(screen)
-            draw_rename_dialog(screen)
             draw_sidebar(editor_buttons, input_box, template_list_top)
             draw_toast(screen)
             if store_picker_active:
@@ -2976,6 +3072,8 @@ def main():
                 draw_store_picker(screen, store_picker_buttons)
             else:
                 store_picker_buttons = None
+            if renaming_obstacle or renaming_store:
+                draw_rename_dialog(screen)
             if editing_canvas_size:
                 draw_canvas_size_dialog(screen)
             if editing_wall_size:
