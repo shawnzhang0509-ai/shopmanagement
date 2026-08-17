@@ -86,7 +86,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
 FURNITURE_IMAGE_MIN_SCALE = 0.032  # 放大到此比例以上时在家具上方显示产品图
@@ -578,6 +578,21 @@ def clip_obstacle_points(points):
     if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
         return clipped
     return clipped
+
+
+def polygon_fully_inside_store(points):
+    for x, y in points:
+        if x < 0 or y < 0 or x > store_width_mm or y > store_height_mm:
+            return False
+    return True
+
+
+def try_translate_obstacle(points, dx, dy):
+    """在店内时禁止拖出画布；若因缩小画布已越界，仍允许拖回店内。"""
+    new_points = [(x + dx, y + dy) for x, y in points]
+    if polygon_fully_inside_store(points) and not polygon_fully_inside_store(new_points):
+        return points
+    return new_points
 
 
 def rect_points_centered(cx, cy, length_mm, width_mm):
@@ -2558,12 +2573,20 @@ def main():
                         poly = collision_polygons[selected_collision]
                         points = poly["points"]
                         if was_dragging and len(points) >= 3:
-                            overlaps, other_name = obstacle_overlaps_any(
-                                points, selected_collision
-                            )
-                            if overlaps and collision_drag_snapshot is not None:
+                            if (
+                                collision_drag_snapshot is not None
+                                and polygon_fully_inside_store(collision_drag_snapshot)
+                                and not polygon_fully_inside_store(points)
+                            ):
                                 poly["points"] = collision_drag_snapshot
-                                show_toast(f"不能与「{other_name}」重叠")
+                                show_toast("障碍不能移出门店画布")
+                            else:
+                                overlaps, other_name = obstacle_overlaps_any(
+                                    points, selected_collision
+                                )
+                                if overlaps and collision_drag_snapshot is not None:
+                                    poly["points"] = collision_drag_snapshot
+                                    show_toast(f"不能与「{other_name}」重叠")
                     dragging_collision = False
                     collision_drag_snapshot = None
 
@@ -2587,7 +2610,7 @@ def main():
                     ncx = wx + collision_drag_offset[0]
                     ncy = wy + collision_drag_offset[1]
                     dx, dy = ncx - cx, ncy - cy
-                    poly["points"] = [(x + dx, y + dy) for x, y in old]
+                    poly["points"] = try_translate_obstacle(old, dx, dy)
                 elif drawing_polygon:
                     last = current_polygon[-1] if current_polygon else None
                     preview_point = obstacle_draw_target(last, wx, wy)
