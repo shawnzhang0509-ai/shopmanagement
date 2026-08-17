@@ -173,6 +173,7 @@ _pending_focus_frames = 0
 _sidebar_click_start = None  # (x, y) mouse-down position for click-vs-drag
 _last_list_pick = {"index": -1, "time": 0}
 CLICK_MOVE_TOLERANCE = 10
+WHEEL_CLICK_COOLDOWN_MS = 350
 return_to_gallery_after_edit = False
 _gallery_snapshot: dict | None = None
 
