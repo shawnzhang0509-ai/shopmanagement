@@ -87,9 +87,11 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.5"
+APP_VERSION = "1.6.6"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
+ROTATE_FINE_DEG = 15
+ROTATE_COARSE_DEG = 90
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
 FURNITURE_IMAGE_MIN_SCALE = 0.032  # 放大到此比例以上时在家具上方显示产品图
 UNDO_LIMIT = 40
@@ -161,6 +163,7 @@ _undo_stack: list[dict] = []
 _display_items_cache = None
 search_text = ""
 search_box_active = False
+rotation_mode = "fine"  # "fine" = 15°, "90" = 90°
 toast_message = ""
 toast_until = 0
 mouse_pos = (0, 0)
@@ -1086,6 +1089,46 @@ def try_move_obstacle(points, dx, dy, ignore_idx):
     if obstacle_overlaps_any(moved, ignore_idx)[0]:
         return points
     return moved
+
+
+def rotate_polygon_points(points, angle_deg, origin=None):
+    if not points:
+        return []
+    if origin is None:
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
+        origin = (cx, cy)
+    ox, oy = origin
+    rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    rotated = []
+    for x, y in points:
+        rx, ry = x - ox, y - oy
+        rotated.append((rx * cos_a - ry * sin_a + ox, rx * sin_a + ry * cos_a + oy))
+    return rotated
+
+
+def try_rotate_obstacle(points, angle_deg, ignore_idx):
+    rotated = rotate_polygon_points(points, angle_deg)
+    if polygon_fully_inside_store(points) and not polygon_fully_inside_store(rotated):
+        return points, False
+    if obstacle_overlaps_any(rotated, ignore_idx)[0]:
+        return points, False
+    return rotated, True
+
+
+def rotation_step_degrees():
+    return ROTATE_COARSE_DEG if rotation_mode == "90" else ROTATE_FINE_DEG
+
+
+def rotation_mode_label():
+    return "90°翻转" if rotation_mode == "90" else f"微调{ROTATE_FINE_DEG}°"
+
+
+def toggle_rotation_mode():
+    global rotation_mode
+    rotation_mode = "90" if rotation_mode == "fine" else "fine"
+    show_toast(f"旋转模式: {rotation_mode_label()}")
 
 
 def find_merge_partner(idx):
@@ -2236,10 +2279,30 @@ def finish_obstacle():
     preview_point = None
 
 
-def rotate_selected(delta):
+def rotate_selected(direction):
+    """direction: -1 左转, +1 右转。支持家具与障碍/墙体。"""
+    step = rotation_step_degrees() * direction
     if selected_feature:
-        selected_feature.rotate_by(delta)
-        show_toast(f"旋转至 {selected_feature.rotation:.0f}°")
+        push_undo()
+        selected_feature.rotate_by(step)
+        show_toast(f"旋转至 {selected_feature.rotation:.0f}°（{rotation_mode_label()}）")
+        return
+    if selected_collision is not None:
+        poly = collision_polygons[selected_collision]
+        old_points = poly["points"]
+        new_points, ok = try_rotate_obstacle(old_points, step, selected_collision)
+        if not ok:
+            trial = rotate_polygon_points(old_points, step)
+            if polygon_fully_inside_store(old_points) and not polygon_fully_inside_store(trial):
+                show_toast("旋转后会移出门店画布")
+            else:
+                show_toast("旋转后会与其它障碍重叠")
+            return
+        push_undo()
+        poly["points"] = new_points
+        show_toast(f"已旋转 {poly.get('name', '障碍物')}（{rotation_mode_label()}）")
+        return
+    show_toast("请先选中家具、障碍或墙体")
 
 
 def build_rename_dialog_buttons():
@@ -2605,6 +2668,8 @@ def build_sidebar_ui():
     buttons["rotate_l"] = Button((pad, y, bw, 34), "左转", "rotate_l")
     buttons["rotate_r"] = Button((pad + bw + 8, y, bw, 34), "右转", "rotate_r")
     y += 42
+    buttons["rotate_mode"] = Button((pad, y, w, 30), "旋转: 微调 15°", "rotate_mode", toggle=True)
+    y += 38
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
     buttons["delete"] = Button((pad + bw + 8, y, bw, 34), "删除", "delete", danger=True)
     template_list_top = y + 50
@@ -2623,9 +2688,11 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.rect.y = 58
     input_box.draw(surface)
 
-    for key in ("save", "home", "rename_store", "store", "obstacle", "wall", "merge", "add", "rotate_l", "rotate_r", "rename", "delete"):
+    for key in ("save", "home", "rename_store", "store", "obstacle", "wall", "merge", "add", "rotate_l", "rotate_r", "rotate_mode", "rename", "delete"):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
+    buttons["rotate_mode"].active = rotation_mode == "90"
+    buttons["rotate_mode"].label = f"旋转: {rotation_mode_label()}"
 
     y = template_list_top
     surface.blit(FONT_LABEL.render("家具模板", True, C_TEXT), (16, y))
@@ -2655,11 +2722,16 @@ def draw_sidebar(buttons, input_box, template_list_top):
     elif selected_collision is not None:
         name = collision_polygons[selected_collision]["name"]
         surface.blit(FONT_SMALL.render(f"选中障碍物: {name}", True, C_DANGER), (16, y))
+        y += 20
+        surface.blit(
+            FONT_SMALL.render(f"可旋转  |  模式 {rotation_mode_label()}", True, C_MUTED),
+            (16, y),
+        )
     else:
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "右键拖动画布 | 滚轮缩放 | Ctrl+Z撤销 | Ctrl+C/V复制障碍 | 靠近自动磁吸"
+    hints = "←/→或Q/E旋转 | 右键拖动画布 | 滚轮缩放 | Ctrl+Z撤销 | Ctrl+C/V复制障碍"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -2691,9 +2763,11 @@ def handle_toolbar_click(action, buttons):
     elif action == "add":
         add_furniture_to_canvas()
     elif action == "rotate_l":
-        rotate_selected(-15)
+        rotate_selected(-1)
     elif action == "rotate_r":
-        rotate_selected(15)
+        rotate_selected(1)
+    elif action == "rotate_mode":
+        toggle_rotation_mode()
     elif action == "rename":
         start_rename_obstacle()
     elif action == "delete":
@@ -3036,10 +3110,10 @@ def main():
                         popup_save_dialog()
                     elif event.key == pygame.K_o and mods & pygame.KMOD_CTRL:
                         popup_load_dialog()
-                    elif event.key == pygame.K_LEFT:
-                        rotate_selected(-15)
-                    elif event.key == pygame.K_RIGHT:
-                        rotate_selected(15)
+                    elif event.key in (pygame.K_LEFT, pygame.K_q):
+                        rotate_selected(-1)
+                    elif event.key in (pygame.K_RIGHT, pygame.K_e):
+                        rotate_selected(1)
                     elif event.key == pygame.K_p:
                         toggle_draw_obstacle()
                         editor_buttons["obstacle"].active = drawing_polygon
