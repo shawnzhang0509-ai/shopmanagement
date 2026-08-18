@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -1686,13 +1686,17 @@ def merge_pair_obstacles(idx, partner) -> bool:
             new_name = base["name"]
             if str(new_name).endswith("_copy") or str(partner_col["name"]).endswith("_copy"):
                 new_name = re.sub(r"_copy\d*$", "", str(base["name"]))
+            user_named = bool(base.get("user_named") or partner_col.get("user_named"))
             for remove_idx in sorted((idx, partner), reverse=True):
                 collision_polygons.pop(remove_idx)
-            collision_polygons.append({
+            entry = {
                 "name": new_name,
                 "points": [[int(round(x)), int(round(y))] for x, y in merged_rect],
                 "kind": "wall",
-            })
+            }
+            if user_named:
+                entry["user_named"] = True
+            collision_polygons.append(entry)
             set_obstacle_selection([len(collision_polygons) - 1])
             show_toast(f"已合并墙段为「{new_name}」")
             return True
@@ -1715,6 +1719,8 @@ def merge_pair_obstacles(idx, partner) -> bool:
     entry = {"name": new_name, "points": merged}
     if is_wall or partner_wall:
         entry["kind"] = "wall"
+    if base.get("user_named") or partner_col.get("user_named"):
+        entry["user_named"] = True
     collision_polygons.append(entry)
     set_obstacle_selection([len(collision_polygons) - 1])
     show_toast(f"已融合为 {new_name}（共边 {shared / 1000:.1f}m · {len(merged)} 顶点）")
@@ -2736,6 +2742,7 @@ def apply_obstacle_edit_dialog():
     push_undo()
     if rename_changed:
         col["name"] = name
+        col["user_named"] = True
     if size_changed and not resize_obstacle_rect(idx, length_m, width_m):
         show_toast("尺寸无效或未与门店画布重叠")
         cancel_obstacle_edit_dialog()
@@ -2892,7 +2899,7 @@ def draw_obstacle_edit_dialog(surface):
     title = "编辑墙体" if is_wall else "编辑障碍物"
     surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
     surface.blit(
-        FONT_SMALL.render("名称与尺寸可一并修改；障碍之间不可重叠，与墙体可贴边", True, C_MUTED),
+        FONT_SMALL.render("重命名后画布才显示名称；选中时始终显示标签", True, C_MUTED),
         (box.x + 20, box.y + 42),
     )
     surface.blit(FONT_SMALL.render("名称", True, C_TEXT), (box.x + 20, box.y + 72))
@@ -3572,9 +3579,9 @@ def wall_screen_length_px(col) -> float:
     return obstacle_length_mm(col) * scale
 
 
-def wall_label_text(col) -> str:
+def wall_label_text(col, *, show_name=True) -> str:
     length_str = format_length_m(obstacle_length_mm(col))
-    if wall_screen_length_px(col) < WALL_LABEL_NAME_MIN_PX:
+    if not show_name or wall_screen_length_px(col) < WALL_LABEL_NAME_MIN_PX:
         return length_str
     name = str(col.get("name", "")).strip()
     if name.startswith("墙体"):
@@ -3582,17 +3589,25 @@ def wall_label_text(col) -> str:
     return f"{name}\n{length_str}" if name else length_str
 
 
+def obstacle_label_display_name(col) -> str:
+    return str(col.get("name", "")).strip()
+
+
 def should_show_obstacle_label(col, idx, selected) -> bool:
-    """墙体显示名称与长度；区域仅够大时显示；多选时不画字（看侧栏）。"""
-    is_wall = obstacle_is_wall(col)
+    """默认不显示名称；选中项或 user_named 标记后才在画布上显示标签。"""
     if len(selected_collisions) > 1:
+        return False
+    is_wall = obstacle_is_wall(col)
+    if selected:
+        if is_wall:
+            return wall_screen_length_px(col) >= WALL_LABEL_MIN_PX
+        return True
+    if not col.get("user_named"):
         return False
     if is_wall:
         return wall_screen_length_px(col) >= WALL_LABEL_MIN_PX
-    if not selected:
-        rect = obstacle_screen_rect(col)
-        return rect.width >= LABEL_MIN_W and rect.height >= LABEL_MIN_H
-    return True
+    rect = obstacle_screen_rect(col)
+    return rect.width >= LABEL_MIN_W and rect.height >= LABEL_MIN_H
 
 
 def draw_label_pill(surface, text, center, *, font=None, fg=C_TEXT, bg=(255, 255, 255, 230)):
@@ -3652,13 +3667,14 @@ def draw_obstacles(surface):
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
             if is_wall:
-                label_text = wall_label_text(col)
+                show_name = selected or col.get("user_named")
+                label_text = wall_label_text(col, show_name=show_name)
                 span_px = wall_screen_length_px(col)
                 font = FONT_SMALL if span_px >= WALL_LABEL_NAME_MIN_PX else FONT_TINY
                 pill_bg = (255, 255, 255, 210) if not selected else (232, 240, 255, 235)
                 draw_label_pill(surface, label_text, (cx, cy), font=font, fg=label_color, bg=pill_bg)
             else:
-                draw_label_pill(surface, col["name"], (cx, cy), font=FONT_BODY, fg=label_color)
+                draw_label_pill(surface, obstacle_label_display_name(col), (cx, cy), font=FONT_BODY, fg=label_color)
 
 
 def draw_selection_overlay(surface):
@@ -4175,6 +4191,7 @@ def main():
     global editing_obstacle_dialog, obstacle_edit_name, obstacle_edit_length, obstacle_edit_width, obstacle_edit_focus
     global canvas_last_click_time, canvas_last_click_pos, pending_reset_confirm
     global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot, multi_drag_snapshots
+    global active_alignment_guides
     global marquee_active, marquee_start, marquee_current, template_scroll_offset, template_family_filter
 
     try:
@@ -4423,7 +4440,6 @@ def main():
                             partner, _ = find_merge_partner(selected_collision)
                             if partner >= 0:
                                 show_toast("墙段已对齐，可点「融合相邻」合并为一整段")
-                    global active_alignment_guides
                     active_alignment_guides = []
                     dragging_collision = False
                     collision_drag_snapshot = None
