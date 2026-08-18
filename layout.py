@@ -96,13 +96,14 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.9"
+APP_VERSION = "1.8.0"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
 WALL_LABEL_NAME_MIN_PX = 68  # 足够宽时显示名称 + 长度
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
+ALIGN_GUIDE_SNAP_MM = 450  # 对齐参考线磁吸容差
 OBSTACLE_TOUCH_TOLERANCE_MM = 80  # 贴边容差：小于此间隙不算重叠
 ROTATE_FINE_DEG = 15
 ROTATE_COARSE_DEG = 90
@@ -249,6 +250,7 @@ marquee_active = False
 marquee_start = None
 marquee_current = None
 multi_drag_snapshots: dict[int, list] = {}
+active_alignment_guides: list[dict] = []
 _next_group_id = 1
 
 
@@ -345,23 +347,41 @@ def ungroup_selected_obstacles():
 
 
 def try_move_obstacles_batch(indices, dx, dy) -> bool:
+    global active_alignment_guides
     if not indices:
+        active_alignment_guides = []
         return False
     originals = {i: [tuple(p) for p in collision_polygons[i]["points"]] for i in indices}
     dx, dy = clamp_group_translation(originals, dx, dy)
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        active_alignment_guides = []
         return False
     trials = {}
     for i in indices:
         trials[i] = [(x + dx, y + dy) for x, y in originals[i]]
+    all_pts = [p for pts in trials.values() for p in pts]
+    snap_dx, snap_dy, guides = compute_alignment_snap(all_pts, indices)
+    if abs(snap_dx) > 1e-9 or abs(snap_dy) > 1e-9:
+        for i in trials:
+            trials[i] = [(x + snap_dx, y + snap_dy) for x, y in trials[i]]
+        all_pts = [p for pts in trials.values() for p in pts]
+    snapped = magnet_snap_translate(all_pts, indices)
+    idx = 0
+    for i in sorted(trials):
+        n = len(trials[i])
+        trials[i] = snapped[idx : idx + n]
+        idx += n
+    active_alignment_guides = guides if guides else []
     zone_indices = [i for i in indices if obstacle_is_zone(collision_polygons[i])]
     for a in range(len(zone_indices)):
         for b in range(a + 1, len(zone_indices)):
             ia, ib = zone_indices[a], zone_indices[b]
             if polygons_interior_overlap(trials[ia], trials[ib]):
+                active_alignment_guides = []
                 return False
     for i in zone_indices:
         if zone_overlaps_any(trials[i], *indices)[0]:
+            active_alignment_guides = []
             return False
     for i, pts in trials.items():
         collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in pts]
@@ -1443,6 +1463,126 @@ def align_polygon_for_merge(poly_a, poly_b):
     return best_b, best_shared
 
 
+def _alignment_ref_coords(points):
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    refs_x = xs + [min(xs), max(xs), (min(xs) + max(xs)) / 2]
+    refs_y = ys + [min(ys), max(ys), (min(ys) + max(ys)) / 2]
+    return refs_x, refs_y
+
+
+def _collect_alignment_targets(ignore_indices):
+    ignore = set(ignore_indices)
+    target_x, target_y = [], []
+    for j, col in enumerate(collision_polygons):
+        if j in ignore:
+            continue
+        for x, y in col["points"]:
+            target_x.append(x)
+            target_y.append(y)
+        if obstacle_rect_metrics(col["points"]):
+            xs = [p[0] for p in col["points"]]
+            ys = [p[1] for p in col["points"]]
+            target_x.extend([min(xs), max(xs)])
+            target_y.extend([min(ys), max(ys)])
+    return target_x, target_y
+
+
+def _best_1d_snap(refs, targets, tol=ALIGN_GUIDE_SNAP_MM):
+    best_delta = 0.0
+    best_coord = None
+    best_gap = tol
+    for ref in refs:
+        for target in targets:
+            gap = abs(ref - target)
+            if gap < best_gap:
+                best_gap = gap
+                best_delta = target - ref
+                best_coord = target
+    if best_coord is None:
+        return 0.0, None
+    return best_delta, best_coord
+
+
+def compute_alignment_snap(points, ignore_indices):
+    refs_x, refs_y = _alignment_ref_coords(points)
+    target_x, target_y = _collect_alignment_targets(ignore_indices)
+    dx, guide_x = _best_1d_snap(refs_x, target_x)
+    dy, guide_y = _best_1d_snap(refs_y, target_y)
+    guides = []
+    if guide_x is not None and abs(dx) > 1e-9:
+        guides.append({"axis": "v", "coord": guide_x})
+    if guide_y is not None and abs(dy) > 1e-9:
+        guides.append({"axis": "h", "coord": guide_y})
+    return dx, dy, guides
+
+
+def draw_alignment_guides(surface):
+    if not active_alignment_guides:
+        return
+    dash, gap = 8, 6
+    color = (37, 99, 235, 200)
+    top = CANVAS_RECT.top
+    bottom = SCREEN_HEIGHT
+    left = SIDEBAR_WIDTH
+    right = SCREEN_WIDTH
+    for guide in active_alignment_guides:
+        if guide["axis"] == "v":
+            sx, _ = world_to_screen(guide["coord"], 0)
+            sx = int(sx)
+            y = top
+            while y < bottom:
+                y2 = min(y + dash, bottom)
+                pygame.draw.line(surface, color, (sx, y), (sx, y2), 2)
+                y += dash + gap
+        else:
+            _, sy = world_to_screen(0, guide["coord"])
+            sy = int(sy)
+            x = left
+            while x < right:
+                x2 = min(x + dash, right)
+                pygame.draw.line(surface, color, (x, sy), (x2, sy), 2)
+                x += dash + gap
+
+
+def merge_two_wall_rects(poly_a, poly_b):
+    """共线贴边或重叠的两面墙合并为一个长方形墙段。"""
+    ma, mb = obstacle_rect_metrics(poly_a), obstacle_rect_metrics(poly_b)
+    if not ma or not mb:
+        return None
+    axs = [p[0] for p in poly_a]
+    ays = [p[1] for p in poly_a]
+    bxs = [p[0] for p in poly_b]
+    bys = [p[1] for p in poly_b]
+    span_ax = max(axs) - min(axs)
+    span_ay = max(ays) - min(ays)
+    span_bx = max(bxs) - min(bxs)
+    span_by = max(bys) - min(bys)
+    horizontal = span_ax >= span_ay and span_bx >= span_by
+    vertical = span_ax < span_ay and span_bx < span_by
+    if not horizontal and not vertical:
+        return None
+    if horizontal:
+        cy_a = (min(ays) + max(ays)) / 2
+        cy_b = (min(bys) + max(bys)) / 2
+        if abs(cy_a - cy_b) > OBSTACLE_MAGNET_MM * 2:
+            return None
+        min_x = min(min(axs), min(bxs))
+        max_x = max(max(axs), max(bxs))
+        thickness = max(span_ay, span_by)
+        cy = (cy_a + cy_b) / 2
+        return rect_points_centered((min_x + max_x) / 2, cy, max_x - min_x, thickness)
+    cx_a = (min(axs) + max(axs)) / 2
+    cx_b = (min(bxs) + max(bxs)) / 2
+    if abs(cx_a - cx_b) > OBSTACLE_MAGNET_MM * 2:
+        return None
+    min_y = min(min(ays), min(bys))
+    max_y = max(max(ays), max(bys))
+    thickness = max(span_ax, span_bx)
+    cx = (cx_a + cx_b) / 2
+    return rect_points_centered(cx, (min_y + max_y) / 2, thickness, max_y - min_y)
+
+
 def magnet_snap_translate(points, ignore_idx):
     """拖动时顶点磁吸到其它障碍的顶点，便于贴边融合。"""
     ignore_set = {ignore_idx} if isinstance(ignore_idx, int) else set(ignore_idx)
@@ -1516,9 +1656,14 @@ def find_merge_partner(idx):
         if j == idx:
             continue
         other = col["points"]
-        if polygons_interior_overlap(poly, other):
-            continue
-        _, shared = align_polygon_for_merge(poly, other)
+        shared = 0.0
+        if obstacle_is_wall(collision_polygons[idx]) and obstacle_is_wall(col):
+            if merge_two_wall_rects(poly, other):
+                shared = max(shared_edge_length(poly, other), OBSTACLE_SNAP_MM)
+        if shared <= 0:
+            if polygons_interior_overlap(poly, other):
+                continue
+            _, shared = align_polygon_for_merge(poly, other)
         if shared > best_len:
             best_len = shared
             best_j = j
@@ -1527,46 +1672,71 @@ def find_merge_partner(idx):
     return -1, 0.0
 
 
-def merge_selected_obstacle():
-    if len(selected_collisions) != 1:
-        show_toast("请先选中要融合的障碍或墙体")
-        return
-    idx = selected_collision
+def merge_pair_obstacles(idx, partner) -> bool:
     poly = collision_polygons[idx]["points"]
-    partner, shared = find_merge_partner(idx)
-    if partner < 0:
-        show_toast("未找到可贴边融合的相邻障碍（靠近后重试，或先磁吸贴边）")
-        return
     other_raw = collision_polygons[partner]["points"]
+    base = collision_polygons[idx]
+    partner_col = collision_polygons[partner]
+    is_wall = obstacle_is_wall(base)
+    partner_wall = obstacle_is_wall(partner_col)
+    if is_wall and partner_wall:
+        merged_rect = merge_two_wall_rects(poly, other_raw)
+        if merged_rect:
+            push_undo()
+            new_name = base["name"]
+            if str(new_name).endswith("_copy") or str(partner_col["name"]).endswith("_copy"):
+                new_name = re.sub(r"_copy\d*$", "", str(base["name"]))
+            for remove_idx in sorted((idx, partner), reverse=True):
+                collision_polygons.pop(remove_idx)
+            collision_polygons.append({
+                "name": new_name,
+                "points": [[int(round(x)), int(round(y))] for x, y in merged_rect],
+                "kind": "wall",
+            })
+            set_obstacle_selection([len(collision_polygons) - 1])
+            show_toast(f"已合并墙段为「{new_name}」")
+            return True
     other, shared = align_polygon_for_merge(poly, other_raw)
     merged = union_polygons(poly, other)
     if not merged:
-        show_toast("融合失败，请把两边贴紧后再试")
-        return
+        return False
     if not _merge_area_ok(poly, other, merged):
-        show_toast("融合结果异常，已保留原形状（请贴紧共边后重试）")
-        return
+        return False
     overlaps, other_name = obstacle_overlaps_any(merged, idx, partner)
     if overlaps:
         show_toast(f"融合后会与「{other_name}」重叠，已取消")
-        return
+        return False
     push_undo()
-    base = collision_polygons[idx]
-    partner_name = collision_polygons[partner]["name"]
-    is_wall = base.get("kind") == "wall" or str(base.get("name", "")).startswith("墙体")
-    partner_wall = collision_polygons[partner].get("kind") == "wall" or str(
-        collision_polygons[partner].get("name", "")
-    ).startswith("墙体")
     new_name = base["name"]
     if partner_wall and not is_wall:
-        new_name = partner_name
+        new_name = partner_col["name"]
     for remove_idx in sorted((idx, partner), reverse=True):
         collision_polygons.pop(remove_idx)
     entry = {"name": new_name, "points": merged}
     if is_wall or partner_wall:
         entry["kind"] = "wall"
     collision_polygons.append(entry)
-    set_obstacle_selection([len(collision_polygons) - 1], toast_msg=f"已融合为 {new_name}（共边 {shared / 1000:.1f}m · {len(merged)} 顶点）")
+    set_obstacle_selection([len(collision_polygons) - 1])
+    show_toast(f"已融合为 {new_name}（共边 {shared / 1000:.1f}m · {len(merged)} 顶点）")
+    return True
+
+
+def merge_selected_obstacle():
+    if len(selected_collisions) == 2:
+        a, b = selected_collisions[0], selected_collisions[1]
+        if merge_pair_obstacles(a, b):
+            return
+        show_toast("两面选中项无法融合，请先贴边对齐")
+        return
+    if len(selected_collisions) != 1:
+        show_toast("请选中 1 个或 2 个相邻障碍/墙体再点「融合相邻」")
+        return
+    idx = selected_collision
+    partner, shared = find_merge_partner(idx)
+    if partner < 0:
+        show_toast("未找到可融合的相邻项（拖动时看蓝色对齐线，贴紧后重试）")
+        return
+    merge_pair_obstacles(idx, partner)
 
 
 def obstacle_label_rect(col):
@@ -4244,6 +4414,17 @@ def main():
                             for j, pts in multi_drag_snapshots.items():
                                 collision_polygons[j]["points"] = [list(p) for p in pts]
                             show_toast("障碍区域之间不能重叠，已恢复位置")
+                            reverted = True
+                        if (
+                            not reverted
+                            and len(selected_collisions) == 1
+                            and obstacle_is_wall(collision_polygons[selected_collision])
+                        ):
+                            partner, _ = find_merge_partner(selected_collision)
+                            if partner >= 0:
+                                show_toast("墙段已对齐，可点「融合相邻」合并为一整段")
+                    global active_alignment_guides
+                    active_alignment_guides = []
                     dragging_collision = False
                     collision_drag_snapshot = None
                     multi_drag_snapshots = {}
@@ -4341,6 +4522,7 @@ def main():
             draw_grid(screen)
             draw_store_floor(screen)
             draw_obstacles(screen)
+            draw_alignment_guides(screen)
             for f in placed_furnitures:
                 if f is not selected_furniture:
                     f.draw(screen, selected=False)
