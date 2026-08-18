@@ -304,7 +304,7 @@ def try_move_obstacles_batch(indices, dx, dy) -> bool:
     trials = {}
     for i in indices:
         moved = try_translate_obstacle(originals[i], dx, dy)
-        moved = magnet_snap_translate(moved, *ignore)
+        moved = magnet_snap_translate(moved, ignore)
         if obstacle_overlaps_any(moved, *ignore)[0]:
             return False
         trials[i] = moved
@@ -1209,10 +1209,11 @@ def align_polygon_for_merge(poly_a, poly_b):
 
 def magnet_snap_translate(points, ignore_idx):
     """拖动时顶点磁吸到其它障碍的顶点，便于贴边融合。"""
+    ignore_set = {ignore_idx} if isinstance(ignore_idx, int) else set(ignore_idx)
     best_dx = best_dy = 0.0
     best_gap = OBSTACLE_MAGNET_MM
     for j, col in enumerate(collision_polygons):
-        if j == ignore_idx:
+        if j in ignore_set:
             continue
         for px, py in points:
             for ox, oy in col["points"]:
