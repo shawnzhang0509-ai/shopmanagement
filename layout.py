@@ -96,7 +96,9 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
+MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
+LABEL_MIN_W, LABEL_MIN_H = 56, 28
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -132,12 +134,20 @@ def init_display():
     global screen, clock
     if screen is not None:
         return
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
     pygame.display.set_caption("坪效布局编辑器")
     clock = pygame.time.Clock()
     pygame.mouse.set_visible(True)
     pygame.event.set_grab(False)
     pygame.event.clear()
+
+
+def handle_window_resize(w, h):
+    global screen, SCREEN_WIDTH, SCREEN_HEIGHT, CANVAS_RECT
+    SCREEN_WIDTH = max(MIN_SCREEN_W, int(w))
+    SCREEN_HEIGHT = max(MIN_SCREEN_H, int(h))
+    CANVAS_RECT = pygame.Rect(SIDEBAR_WIDTH, 0, SCREEN_WIDTH - SIDEBAR_WIDTH, SCREEN_HEIGHT)
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
 
 
 def ui_pos(pos):
@@ -2911,6 +2921,43 @@ def draw_grid(surface):
         y += y_step
 
 
+def obstacle_screen_rect(col) -> pygame.Rect:
+    pts = [world_to_screen(x, y) for x, y in col["points"]]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return pygame.Rect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+
+
+def obstacle_is_wall(col) -> bool:
+    return col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
+
+
+def should_show_obstacle_label(col, idx, selected) -> bool:
+    """墙体默认不标字；区域仅够大时显示；多选时不画字（看侧栏）。"""
+    is_wall = obstacle_is_wall(col)
+    if not selected:
+        if is_wall:
+            return False
+        rect = obstacle_screen_rect(col)
+        return rect.width >= LABEL_MIN_W and rect.height >= LABEL_MIN_H
+    if len(selected_collisions) > 1:
+        return False
+    return True
+
+
+def draw_label_pill(surface, text, center, *, font=None, fg=C_TEXT, bg=(255, 255, 255, 230)):
+    font = font or FONT_SMALL
+    label = font.render(text, True, fg)
+    rect = label.get_rect(center=(int(center[0]), int(center[1])))
+    pad_x, pad_y = 6, 3
+    pill = rect.inflate(pad_x * 2, pad_y * 2)
+    overlay = pygame.Surface((pill.width, pill.height), pygame.SRCALPHA)
+    overlay.fill(bg)
+    surface.blit(overlay, pill.topleft)
+    pygame.draw.rect(surface, C_BORDER, pill, 1, border_radius=4)
+    surface.blit(label, rect)
+
+
 def draw_store_floor(surface):
     floor_pts = [world_to_screen(x, y) for x, y in store_rect_points()]
     pygame.draw.polygon(surface, C_FLOOR, floor_pts)
@@ -2928,7 +2975,7 @@ def draw_obstacles(surface):
     for idx, col in enumerate(collision_polygons):
         pts = [world_to_screen(x, y) for x, y in col["points"]]
         selected = idx in selected_collisions
-        is_wall = col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
+        is_wall = obstacle_is_wall(col)
         if is_wall:
             fill = (210, 218, 228) if not selected else (180, 195, 215)
             border = C_WALL
@@ -2939,11 +2986,11 @@ def draw_obstacles(surface):
             label_color = (127, 29, 29)
         pygame.draw.polygon(surface, fill, pts)
         pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
-        font = FONT_SMALL if is_wall else FONT_BODY
-        label = font.render(col["name"], True, label_color)
-        surface.blit(label, label.get_rect(center=(cx, cy)))
+        if should_show_obstacle_label(col, idx, selected):
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            font = FONT_SMALL if is_wall else FONT_BODY
+            draw_label_pill(surface, col["name"], (cx, cy), font=font, fg=label_color)
 
 
 def draw_selection_overlay(surface):
@@ -3252,7 +3299,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "搜索/系列筛选 | 滚轮翻页模板 | Ctrl+A全选 | Ctrl+G成组 | Ctrl+Z撤销"
+    hints = "墙体名仅选中显示 | 可拖窗口边缘最大化 | 滚轮翻页模板"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -3484,6 +3531,10 @@ def main():
                 if current_layout_path and not startup_active:
                     save_layout(current_layout_path, quiet=True)
                 running = False
+                continue
+
+            if event.type == pygame.VIDEORESIZE and not startup_active:
+                handle_window_resize(event.w, event.h)
                 continue
 
             if event.type == EVENT_HOME_DEFERRED:
