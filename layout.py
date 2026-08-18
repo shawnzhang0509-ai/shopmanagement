@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -71,8 +72,12 @@ C_WALL = (51, 65, 85)
 DEFAULT_STORE_WIDTH_M = 20.0
 DEFAULT_STORE_HEIGHT_M = 15.0
 LAYOUTS_DIR = os.path.join(SCRIPT_DIR, "data", "layouts")
+LAYOUT_TEMPLATES_DIR = os.path.join(LAYOUTS_DIR, "_templates")
 LEGACY_LAYOUT_FILE = os.path.join(SCRIPT_DIR, "saved_layout.json")
 LAST_STORE_FILE = os.path.join(LAYOUTS_DIR, "_last.json")
+CATALOG_LAYOUT_SPECS = {
+    "onehunga": (43000, 76300),
+}
 # 固定门店列表：(显示名称, 文件标识)
 STORE_CATALOG = [
     ("Onehunga店", "onehunga"),
@@ -87,7 +92,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.9"
+APP_VERSION = "1.7.0"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -1506,6 +1511,7 @@ furniture_templates = []
 # ── 数据持久化 ──────────────────────────────────────────────
 def ensure_layouts_dir():
     os.makedirs(LAYOUTS_DIR, exist_ok=True)
+    os.makedirs(LAYOUT_TEMPLATES_DIR, exist_ok=True)
 
 
 def slugify_name(name):
@@ -1528,6 +1534,10 @@ def unique_layout_path(display_name):
 
 def layout_path_for_slug(slug):
     return os.path.join(LAYOUTS_DIR, f"{slug}.json")
+
+
+def template_path_for_slug(slug):
+    return os.path.join(LAYOUT_TEMPLATES_DIR, f"{slug}.json")
 
 
 def catalog_name_for_slug(slug):
@@ -1839,7 +1849,37 @@ def load_layout(filepath):
         f"已打开「{store_name}」{store_width_mm / 1000:g}×{store_height_mm / 1000:g} m, "
         f"{len(placed_furnitures)} 件家具, {len(collision_polygons)} 个障碍"
     )
+    slug = data.get("store_slug") or catalog_slug_for_path(filepath)
+    if slug in CATALOG_LAYOUT_SPECS:
+        exp_w, exp_h = CATALOG_LAYOUT_SPECS[slug]
+        if store_width_mm != exp_w or store_height_mm != exp_h:
+            show_toast(
+                f"画布尺寸与默认户型不符（应为 {exp_w / 1000:g}×{exp_h / 1000:g} m），"
+                f"请点侧栏「恢复默认布局」"
+            )
     clear_undo()
+
+
+def reset_catalog_layout():
+    slug = catalog_slug_for_path(current_layout_path)
+    if not slug:
+        show_toast("仅内置门店可恢复默认布局")
+        return
+    tpl = template_path_for_slug(slug)
+    path = layout_path_for_slug(slug)
+    if not os.path.isfile(tpl):
+        show_toast("未找到默认模板，请运行 tools/generate_onehunga_layout.py")
+        return
+    flush_deferred_save(block=True)
+    try:
+        shutil.copy2(tpl, path)
+    except OSError as exc:
+        show_toast(f"恢复失败: {exc}")
+        return
+    load_layout(path)
+    fit_view_to_store()
+    remember_last_store(path)
+    show_toast("已恢复默认布局")
 
 
 def create_store_layout(name, width_m, height_m, filepath=None):
@@ -2796,10 +2836,11 @@ def draw_obstacles(surface):
             label_color = (127, 29, 29)
         pygame.draw.polygon(surface, fill, pts)
         pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
-        label = FONT_BODY.render(col["name"], True, label_color)
-        surface.blit(label, label.get_rect(center=(cx, cy)))
+        if not is_wall or selected:
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            label = FONT_BODY.render(col["name"], True, label_color)
+            surface.blit(label, label.get_rect(center=(cx, cy)))
 
 
 def draw_selection_overlay(surface):
@@ -2974,6 +3015,8 @@ def build_sidebar_ui():
     y += 42
     buttons["store"] = Button((pad, y, w, 34), "修改画布尺寸", "store")
     y += 42
+    buttons["reset_layout"] = Button((pad, y, w, 34), "恢复默认布局", "reset_layout")
+    y += 42
     buttons["obstacle"] = Button((pad, y, bw, 34), "刨除障碍", "obstacle", toggle=True)
     buttons["wall"] = Button((pad + bw + 8, y, bw, 34), "添加墙体", "wall")
     y += 42
@@ -3012,7 +3055,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.draw(surface)
 
     for key in (
-        "save", "home", "rename_store", "store", "obstacle", "wall", "merge",
+        "save", "home", "rename_store", "store", "reset_layout", "obstacle", "wall", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
         "rotate_mode", "resize", "rename", "delete",
     ):
@@ -3103,6 +3146,8 @@ def handle_toolbar_click(action, buttons):
         start_rename_store()
     elif action == "store":
         start_edit_canvas_size()
+    elif action == "reset_layout":
+        reset_catalog_layout()
     elif action == "obstacle":
         toggle_draw_obstacle()
         buttons["obstacle"].active = drawing_polygon
