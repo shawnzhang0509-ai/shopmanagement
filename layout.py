@@ -3011,7 +3011,6 @@ def rotate_selected(direction):
         return
     if selected_collisions:
         push_undo()
-        ignore = tuple(selected_collisions)
         all_pts = []
         for i in selected_collisions:
             all_pts.extend(collision_polygons[i]["points"])
