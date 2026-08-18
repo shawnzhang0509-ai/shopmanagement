@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -110,6 +110,12 @@ ROTATE_COARSE_DEG = 90
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
 FURNITURE_IMAGE_MIN_SCALE = 0.032  # 放大到此比例以上时在家具上方显示产品图
 UNDO_LIMIT = 40
+MARKER_SIZE_MM = 1000
+MARKER_HIT_PAD_PX = 14
+MARKER_KINDS = {
+    "entrance": "入口",
+    "stairs": "楼梯",
+}
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -254,6 +260,19 @@ marquee_current = None
 multi_drag_snapshots: dict[int, list] = {}
 active_alignment_guides: list[dict] = []
 _next_group_id = 1
+layout_markers: list[dict] = []
+selected_marker_index = None
+dragging_marker = False
+marker_drag_offset = (0.0, 0.0)
+editing_marker_dialog = False
+editing_marker_index = None
+marker_edit_name = ""
+marker_edit_show_label = False
+marker_edit_focus = "name"
+marker_edit_composition = ""
+marker_edit_buttons = {}
+marker_edit_name_rect = None
+marker_edit_show_label_rect = None
 
 
 def clear_obstacle_selection():
@@ -263,10 +282,11 @@ def clear_obstacle_selection():
 
 
 def set_obstacle_selection(indices, *, toast_msg: str | None = None):
-    global selected_collision, selected_collisions, selected_furniture, selected_feature
+    global selected_collision, selected_collisions, selected_furniture, selected_feature, selected_marker_index
     selected_collisions = sorted({i for i in indices if 0 <= i < len(collision_polygons)})
     selected_collision = selected_collisions[0] if selected_collisions else None
     selected_furniture = selected_feature = None
+    selected_marker_index = None
     if toast_msg is not None:
         show_toast(toast_msg)
     elif len(selected_collisions) == 1:
@@ -450,6 +470,7 @@ def capture_layout_state():
     return {
         "collision_polygons": copy.deepcopy(collision_polygons),
         "placed_furnitures": _furniture_snapshot(placed_furnitures),
+        "layout_markers": copy.deepcopy(layout_markers),
         "store_width_mm": store_width_mm,
         "store_height_mm": store_height_mm,
         "store_name": store_name,
@@ -471,17 +492,20 @@ def clear_undo():
 def undo_layout():
     global collision_polygons, placed_furnitures, selected_collision, selected_collisions
     global selected_furniture, selected_feature, store_width_mm, store_height_mm, store_name
+    global layout_markers, selected_marker_index
     if not _undo_stack:
         show_toast("无可撤销的操作")
         return
     state = _undo_stack.pop()
     collision_polygons = state["collision_polygons"]
     placed_furnitures = _furnitures_from_snapshot(state["placed_furnitures"])
+    layout_markers = state.get("layout_markers", [])
     store_width_mm = state.get("store_width_mm", store_width_mm)
     store_height_mm = state.get("store_height_mm", store_height_mm)
     store_name = state.get("store_name", store_name)
     clear_obstacle_selection()
     selected_furniture = selected_feature = None
+    selected_marker_index = None
     show_toast("已撤销")
 
 
@@ -716,6 +740,153 @@ def find_clear_furniture_position(furn, wx, wy):
             if polygon_fully_inside_store(furn.get_rotated_points()) and not furniture_overlaps_zone(furn):
                 return
     place_furniture_at_world(furn, wx, wy)
+
+
+def clear_marker_selection():
+    global selected_marker_index
+    selected_marker_index = None
+
+
+def set_marker_selection(index, *, toast_msg: str | None = None):
+    global selected_marker_index, selected_furniture, selected_feature
+    if index is None or index < 0 or index >= len(layout_markers):
+        selected_marker_index = None
+        return
+    selected_marker_index = index
+    selected_furniture = selected_feature = None
+    clear_obstacle_selection()
+    marker = layout_markers[index]
+    kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
+    label = marker.get("label") or kind_label
+    if toast_msg is not None:
+        show_toast(toast_msg)
+    else:
+        show_toast(f"选中: {label}")
+
+
+def marker_default_label(kind: str) -> str:
+    return MARKER_KINDS.get(kind, "图标")
+
+
+def new_layout_marker(kind: str, x_mm: float, y_mm: float) -> dict:
+    return {
+        "kind": kind,
+        "x_mm": int(round(x_mm)),
+        "y_mm": int(round(y_mm)),
+        "rotation": 0.0,
+        "label": marker_default_label(kind),
+    }
+
+
+def marker_screen_size_px() -> float:
+    return max(20.0, MARKER_SIZE_MM * scale)
+
+
+def marker_screen_center(marker) -> tuple[float, float]:
+    return world_to_screen(marker["x_mm"], marker["y_mm"])
+
+
+def _rotate_screen_point(cx, cy, x, y, deg):
+    rad = math.radians(deg)
+    dx, dy = x - cx, y - cy
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a
+
+
+def _marker_local_to_screen(cx, cy, lx, ly, rotation):
+    return _rotate_screen_point(cx, cy, cx + lx, cy + ly, rotation)
+
+
+def marker_hit_test(mx, my, marker) -> bool:
+    cx, cy = marker_screen_center(marker)
+    radius = marker_screen_size_px() * 0.55 + MARKER_HIT_PAD_PX
+    dx, dy = mx - cx, my - cy
+    return dx * dx + dy * dy <= radius * radius
+
+
+def should_show_marker_label(marker, index: int) -> bool:
+    return index == selected_marker_index or bool(marker.get("user_named"))
+
+
+def draw_marker_entrance(surface, cx, cy, size, rotation, color, width=3):
+    half = size * 0.46
+    frame = [
+        (-half * 0.35, half * 0.45),
+        (-half * 0.35, -half * 0.25),
+        (half * 0.35, -half * 0.25),
+        (half * 0.35, half * 0.45),
+    ]
+    frame_pts = [_marker_local_to_screen(cx, cy, x, y, rotation) for x, y in frame]
+    pygame.draw.lines(surface, color, False, frame_pts, width)
+    arrow = [
+        (0, -half * 0.82),
+        (-half * 0.22, -half * 0.42),
+        (half * 0.22, -half * 0.42),
+        (0, -half * 0.82),
+    ]
+    arrow_pts = [_marker_local_to_screen(cx, cy, x, y, rotation) for x, y in arrow]
+    pygame.draw.lines(surface, color, False, arrow_pts, width)
+
+
+def draw_marker_stairs(surface, cx, cy, size, rotation, color, width=2):
+    half = size * 0.48
+    base_y = half * 0.42
+    base_pts = [
+        _marker_local_to_screen(cx, cy, -half, base_y, rotation),
+        _marker_local_to_screen(cx, cy, half, base_y, rotation),
+    ]
+    pygame.draw.line(surface, color, base_pts[0], base_pts[1], width + 1)
+    rung_top = -half * 0.38
+    for i in range(5):
+        t = i / 4
+        x = -half + t * (2 * half)
+        p1 = _marker_local_to_screen(cx, cy, x, rung_top, rotation)
+        p2 = _marker_local_to_screen(cx, cy, x, base_y, rotation)
+        pygame.draw.line(surface, color, p1, p2, width)
+    elbow = [
+        (half * 0.55, base_y),
+        (half * 0.55, half * 0.62),
+        (half * 0.15, half * 0.62),
+    ]
+    elbow_pts = [_marker_local_to_screen(cx, cy, x, y, rotation) for x, y in elbow]
+    pygame.draw.lines(surface, color, False, elbow_pts, width)
+
+
+def draw_single_layout_marker(surface, marker, index: int):
+    cx, cy = marker_screen_center(marker)
+    size = marker_screen_size_px()
+    selected = index == selected_marker_index
+    kind = marker.get("kind", "entrance")
+    color = (220, 38, 38) if kind == "entrance" else C_WALL
+    if selected:
+        ring = int(size * 0.62)
+        pygame.draw.circle(surface, C_ACCENT_LIGHT, (int(cx), int(cy)), ring + 4)
+        pygame.draw.circle(surface, C_ACCENT, (int(cx), int(cy)), ring, 2)
+    if kind == "stairs":
+        draw_marker_stairs(surface, cx, cy, size, marker.get("rotation", 0), color)
+    else:
+        draw_marker_entrance(surface, cx, cy, size, marker.get("rotation", 0), color)
+    if should_show_marker_label(marker, index):
+        label = marker.get("label") or marker_default_label(kind)
+        draw_label_pill(surface, label, (cx, cy - size * 0.72), font=FONT_SMALL, fg=color)
+
+
+def draw_layout_markers(surface):
+    for i, marker in enumerate(layout_markers):
+        draw_single_layout_marker(surface, marker, i)
+
+
+def add_marker_to_canvas(kind: str):
+    global selected_marker_index
+    if kind not in MARKER_KINDS:
+        show_toast("未知图标类型")
+        return
+    wx, wy = viewport_world_center()
+    wx, wy = snap_world_point(wx, wy)
+    push_undo()
+    layout_markers.append(new_layout_marker(kind, wx, wy))
+    set_marker_selection(len(layout_markers) - 1)
+    show_toast(f"已添加{MARKER_KINDS[kind]}（可拖动、旋转，双击编辑名称）")
 
 
 def snap_world_mm(value):
@@ -2080,6 +2251,7 @@ def build_layout_data(filepath):
             for f in placed_furnitures
         ],
         "obstacles": collision_polygons,
+        "markers": layout_markers,
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -2177,7 +2349,7 @@ def refresh_catalog_cache_async():
 
 def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
-    global store_name, current_layout_path
+    global store_name, current_layout_path, layout_markers, selected_marker_index
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -2193,7 +2365,9 @@ def load_layout(filepath, *, keep_undo=False):
         furniture.rotation = f.get("rotation", 0)
         placed_furnitures.append(furniture)
     collision_polygons = data.get("obstacles", [])
+    layout_markers = data.get("markers", [])
     clear_obstacle_selection()
+    selected_marker_index = None
     sync_group_id_counter()
     remember_store_summary(
         current_layout_path,
@@ -2204,7 +2378,7 @@ def load_layout(filepath, *, keep_undo=False):
     )
     show_toast(
         f"已打开「{store_name}」{store_width_mm / 1000:g}×{store_height_mm / 1000:g} m, "
-        f"{len(placed_furnitures)} 件家具, {len(collision_polygons)} 个障碍"
+        f"{len(placed_furnitures)} 件家具, {len(collision_polygons)} 个障碍, {len(layout_markers)} 个图标"
     )
     slug = data.get("store_slug") or catalog_slug_for_path(filepath)
     if slug in CATALOG_LAYOUT_SPECS:
@@ -2306,11 +2480,12 @@ def reset_catalog_layout():
 
 
 def create_store_layout(name, width_m, height_m, filepath=None):
-    global store_name, current_layout_path, placed_furnitures, collision_polygons, startup_active
+    global store_name, current_layout_path, placed_furnitures, collision_polygons, startup_active, layout_markers
     store_name = (name or "新门店").strip() or "新门店"
     current_layout_path = filepath or unique_layout_path(store_name)
     placed_furnitures = []
     collision_polygons = []
+    layout_markers = []
     clear_undo()
     set_store_size(width_m, height_m)
     save_layout(current_layout_path)
@@ -2705,6 +2880,7 @@ def start_edit_obstacle_dialog(index=None):
         return
     cancel_rename_dialog()
     cancel_wall_size_edit()
+    cancel_marker_edit_dialog()
     toggle_draw_obstacle(False)
     _, _, length_mm, width_mm = metrics
     editing_obstacle_dialog = True
@@ -2788,11 +2964,18 @@ def handle_obstacle_edit_dialog_action(action):
 def handle_obstacle_edit_dialog_click(mx, my):
     global obstacle_edit_focus, obstacle_edit_length, obstacle_edit_width, obstacle_edit_show_label
     mx, my = ui_pos((mx, my))
-    if obstacle_edit_show_label_rect and obstacle_edit_show_label_rect.collidepoint(mx, my):
-        obstacle_edit_show_label = not obstacle_edit_show_label
-        obstacle_edit_focus = "label"
-        _sync_obstacle_edit_ime()
-        return True
+    if obstacle_edit_show_label_rect:
+        hit = pygame.Rect(
+            obstacle_edit_show_label_rect.x,
+            obstacle_edit_show_label_rect.y - 4,
+            180,
+            obstacle_edit_show_label_rect.height + 8,
+        )
+        if hit.collidepoint(mx, my):
+            obstacle_edit_show_label = not obstacle_edit_show_label
+            obstacle_edit_focus = "label"
+            _sync_obstacle_edit_ime()
+            return True
     if obstacle_edit_name_rect and obstacle_edit_name_rect.collidepoint(mx, my):
         obstacle_edit_focus = "name"
         _sync_obstacle_edit_ime()
@@ -2857,7 +3040,7 @@ def _note_backspace_pressed():
 
 def poll_dialog_backspace_repeat():
     global _backspace_hold_start, _backspace_last_delete
-    if not (editing_obstacle_dialog or renaming_store):
+    if not (editing_obstacle_dialog or editing_marker_dialog or renaming_store):
         _backspace_hold_start = 0
         return
     if not pygame.key.get_pressed()[pygame.K_BACKSPACE]:
@@ -2873,6 +3056,8 @@ def poll_dialog_backspace_repeat():
     _backspace_last_delete = now
     if editing_obstacle_dialog:
         _delete_obstacle_edit_char()
+    elif editing_marker_dialog:
+        _delete_marker_edit_char()
     else:
         _delete_rename_char()
 
@@ -2907,6 +3092,218 @@ def handle_obstacle_edit_dialog_key(event):
                 obstacle_edit_length += ch
             else:
                 obstacle_edit_width += ch
+
+
+def build_marker_edit_dialog_buttons():
+    cx = SCREEN_WIDTH // 2
+    bw, bh = 88, 34
+    y = SCREEN_HEIGHT // 2 + 52
+    return {
+        "ok": Button((cx - bw - 6, y, bw, bh), "确定", "marker_edit_ok", primary=True),
+        "cancel": Button((cx + 6, y, bw, bh), "取消", "marker_edit_cancel"),
+    }
+
+
+def cancel_marker_edit_dialog():
+    global editing_marker_dialog, editing_marker_index, marker_edit_name, marker_edit_show_label
+    global marker_edit_focus, marker_edit_composition
+    editing_marker_dialog = False
+    editing_marker_index = None
+    marker_edit_name = ""
+    marker_edit_show_label = False
+    marker_edit_focus = "name"
+    marker_edit_composition = ""
+    try:
+        pygame.key.stop_text_input()
+    except Exception:
+        pass
+
+
+def _sync_marker_edit_ime():
+    global marker_edit_composition
+    marker_edit_composition = ""
+    try:
+        if marker_edit_name_rect:
+            pygame.key.start_text_input()
+            pygame.key.set_text_input_rect(marker_edit_name_rect)
+    except Exception:
+        pass
+
+
+def start_edit_marker_dialog(index=None):
+    global editing_marker_dialog, editing_marker_index, marker_edit_name, marker_edit_show_label
+    global marker_edit_focus, marker_edit_composition, marker_edit_buttons
+    if index is None:
+        if selected_marker_index is None:
+            show_toast("请先选中一个图标")
+            return
+        index = selected_marker_index
+    if index < 0 or index >= len(layout_markers):
+        return
+    cancel_obstacle_edit_dialog()
+    cancel_rename_dialog()
+    editing_marker_dialog = True
+    editing_marker_index = index
+    marker = layout_markers[index]
+    marker_edit_name = marker.get("label") or marker_default_label(marker.get("kind", "entrance"))
+    marker_edit_show_label = bool(marker.get("user_named"))
+    marker_edit_focus = "name"
+    marker_edit_composition = ""
+    marker_edit_buttons = build_marker_edit_dialog_buttons()
+    set_marker_selection(index)
+    _sync_marker_edit_ime()
+    show_toast("可修改名称，Enter 确认")
+
+
+def apply_marker_edit_dialog():
+    global editing_marker_dialog, editing_marker_index, marker_edit_show_label
+    if editing_marker_index is None or editing_marker_index >= len(layout_markers):
+        cancel_marker_edit_dialog()
+        return
+    name = marker_edit_name.strip()
+    if not name:
+        show_toast("名称不能为空")
+        return
+    marker = layout_markers[editing_marker_index]
+    old_name = marker.get("label") or marker_default_label(marker.get("kind", "entrance"))
+    label_changed = bool(marker.get("user_named")) != marker_edit_show_label
+    if name == old_name and not label_changed:
+        cancel_marker_edit_dialog()
+        return
+    push_undo()
+    marker["label"] = name
+    if marker_edit_show_label:
+        marker["user_named"] = True
+    else:
+        marker.pop("user_named", None)
+    cancel_marker_edit_dialog()
+    if label_changed:
+        show_toast("已在画布显示名称" if marker_edit_show_label else "已隐藏画布名称")
+    else:
+        show_toast("重命名成功")
+
+
+def handle_marker_edit_dialog_action(action):
+    if action == "marker_edit_ok":
+        apply_marker_edit_dialog()
+    elif action == "marker_edit_cancel":
+        cancel_marker_edit_dialog()
+
+
+def handle_marker_edit_dialog_click(mx, my):
+    global marker_edit_focus, marker_edit_show_label
+    mx, my = ui_pos((mx, my))
+    if marker_edit_show_label_rect:
+        hit = pygame.Rect(
+            marker_edit_show_label_rect.x,
+            marker_edit_show_label_rect.y - 4,
+            180,
+            marker_edit_show_label_rect.height + 8,
+        )
+        if hit.collidepoint(mx, my):
+            marker_edit_show_label = not marker_edit_show_label
+            marker_edit_focus = "label"
+            _sync_marker_edit_ime()
+            return True
+    if marker_edit_name_rect and marker_edit_name_rect.collidepoint(mx, my):
+        marker_edit_focus = "name"
+        _sync_marker_edit_ime()
+        return True
+    for btn in marker_edit_buttons.values():
+        if btn.contains((mx, my)):
+            handle_marker_edit_dialog_action(btn.action)
+            return True
+    return False
+
+
+def handle_marker_edit_text_event(event):
+    global marker_edit_name, marker_edit_composition
+    if not editing_marker_dialog or marker_edit_focus != "name":
+        return False
+    if event.type == pygame.TEXTEDITING:
+        marker_edit_composition = event.text or ""
+        return True
+    if event.type == pygame.TEXTINPUT:
+        marker_edit_composition = ""
+        if event.text:
+            marker_edit_name += event.text
+        return True
+    return False
+
+
+def _delete_marker_edit_char():
+    global marker_edit_name, marker_edit_composition
+    if marker_edit_composition:
+        marker_edit_composition = marker_edit_composition[:-1]
+    elif marker_edit_name:
+        marker_edit_name = marker_edit_name[:-1]
+
+
+def handle_marker_edit_dialog_key(event):
+    global marker_edit_focus, marker_edit_composition
+    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+        apply_marker_edit_dialog()
+    elif event.key == pygame.K_ESCAPE:
+        cancel_marker_edit_dialog()
+    elif event.key == pygame.K_BACKSPACE:
+        _note_backspace_pressed()
+        _delete_marker_edit_char()
+    elif event.unicode and marker_edit_focus == "name":
+        return
+
+
+def draw_marker_edit_dialog(surface):
+    global marker_edit_name_rect, marker_edit_show_label_rect
+    if not editing_marker_dialog or editing_marker_index is None:
+        marker_edit_name_rect = None
+        marker_edit_show_label_rect = None
+        return
+    marker = layout_markers[editing_marker_index]
+    kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 120))
+    surface.blit(overlay, (0, 0))
+    box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 96, 440, 200)
+    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
+    surface.blit(FONT_LABEL.render(f"编辑{kind_label}", True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(
+        FONT_SMALL.render("Enter 确认  |  Esc 取消", True, C_MUTED),
+        (box.x + 20, box.y + 42),
+    )
+    surface.blit(FONT_SMALL.render("名称", True, C_MUTED), (box.x + 20, box.y + 66))
+    marker_edit_name_rect = pygame.Rect(box.x + 20, box.y + 84, box.width - 40, 36)
+    pygame.draw.rect(surface, (248, 250, 252), marker_edit_name_rect, border_radius=8)
+    border = C_ACCENT if marker_edit_focus == "name" else C_BORDER
+    pygame.draw.rect(surface, border, marker_edit_name_rect, 2, border_radius=8)
+    surface.blit(
+        FONT_BODY.render(marker_edit_name + marker_edit_composition + "|", True, C_TEXT),
+        (marker_edit_name_rect.x + 10, marker_edit_name_rect.y + 8),
+    )
+    marker_edit_show_label_rect = pygame.Rect(box.x + 20, box.y + 128, 20, 20)
+    pygame.draw.rect(surface, (248, 250, 252), marker_edit_show_label_rect, border_radius=4)
+    pygame.draw.rect(surface, C_BORDER, marker_edit_show_label_rect, 1, border_radius=4)
+    if marker_edit_show_label:
+        pygame.draw.line(
+            surface,
+            C_ACCENT,
+            (marker_edit_show_label_rect.x + 4, marker_edit_show_label_rect.centery),
+            (marker_edit_show_label_rect.centerx - 1, marker_edit_show_label_rect.bottom - 5),
+            2,
+        )
+        pygame.draw.line(
+            surface,
+            C_ACCENT,
+            (marker_edit_show_label_rect.centerx - 1, marker_edit_show_label_rect.bottom - 5),
+            (marker_edit_show_label_rect.right - 4, marker_edit_show_label_rect.y + 5),
+            2,
+        )
+    surface.blit(
+        FONT_SMALL.render("在画布显示名称", True, C_TEXT),
+        (marker_edit_show_label_rect.right + 8, marker_edit_show_label_rect.y + 1),
+    )
+    for btn in marker_edit_buttons.values():
+        btn.draw(surface)
 
 
 def draw_obstacle_edit_dialog(surface):
@@ -3228,7 +3625,7 @@ def handle_startup_action(action):
 
 # ── 操作 ────────────────────────────────────────────────────
 def add_furniture_to_canvas():
-    global selected_furniture, selected_feature, selected_collision
+    global selected_furniture, selected_feature, selected_collision, selected_marker_index
     tpl = furniture_templates[selected_template_index]
     new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points], product_family=tpl.product_family)
     wx, wy = viewport_world_center()
@@ -3237,6 +3634,7 @@ def add_furniture_to_canvas():
     placed_furnitures.append(new_furn)
     selected_furniture = new_furn
     selected_feature = new_furn
+    selected_marker_index = None
     clear_obstacle_selection()
     if furniture_overlaps_zone(new_furn):
         show_toast(f"已添加: {tpl.name}（在障碍区内，请拖到卖场区域）")
@@ -3245,13 +3643,20 @@ def add_furniture_to_canvas():
 
 
 def delete_selected():
-    global selected_furniture, selected_feature
+    global selected_furniture, selected_feature, selected_marker_index
     if selected_furniture is not None:
         push_undo()
         name = selected_furniture.name
         placed_furnitures.remove(selected_furniture)
         selected_furniture = selected_feature = None
         show_toast(f"已删除家具: {name}")
+    elif selected_marker_index is not None:
+        push_undo()
+        marker = layout_markers[selected_marker_index]
+        label = marker.get("label") or marker_default_label(marker.get("kind", "entrance"))
+        layout_markers.pop(selected_marker_index)
+        selected_marker_index = None
+        show_toast(f"已删除图标: {label}")
     elif selected_collisions:
         push_undo()
         names = [collision_polygons[i]["name"] for i in selected_collisions]
@@ -3310,8 +3715,15 @@ def finish_obstacle():
 
 
 def rotate_selected(direction):
-    """direction: -1 左转, +1 右转。支持家具与障碍/墙体（含多选）。"""
+    """direction: -1 左转, +1 右转。支持家具、图标与障碍/墙体（含多选）。"""
     step = rotation_step_degrees() * direction
+    if selected_marker_index is not None:
+        push_undo()
+        marker = layout_markers[selected_marker_index]
+        marker["rotation"] = (marker.get("rotation", 0) + step) % 360
+        kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
+        show_toast(f"{kind_label} 旋转至 {marker['rotation']:.0f}°（{rotation_mode_label()}）")
+        return
     if selected_feature:
         push_undo()
         selected_feature.rotate_by(step)
@@ -3339,7 +3751,7 @@ def rotate_selected(direction):
         else:
             show_toast(f"已旋转 {len(selected_collisions)} 项（{rotation_mode_label()}）")
         return
-    show_toast("请先选中家具、障碍或墙体")
+    show_toast("请先选中家具、图标、障碍或墙体")
 
 
 def build_rename_dialog_buttons():
@@ -3885,6 +4297,9 @@ def build_sidebar_ui():
     buttons["obstacle"] = Button((pad, y, bw, 34), "刨除障碍", "obstacle", toggle=True)
     buttons["wall"] = Button((pad + bw + 8, y, bw, 34), "添加墙体", "wall")
     y += 42
+    buttons["add_entrance"] = Button((pad, y, bw, 34), "入口", "add_entrance")
+    buttons["add_stairs"] = Button((pad + bw + 8, y, bw, 34), "楼梯", "add_stairs")
+    y += 42
     buttons["merge"] = Button((pad, y, w, 34), "融合相邻", "merge")
     y += 42
     buttons["select_all"] = Button((pad, y, bw, 34), "全选", "select_all")
@@ -3923,7 +4338,8 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.draw(surface)
 
     for key in (
-        "save", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall", "merge",
+        "save", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall",
+        "add_entrance", "add_stairs", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
         "rotate_mode", "resize", "rename", "delete", "family_filter",
     ):
@@ -3975,7 +4391,21 @@ def draw_sidebar(buttons, input_box, template_list_top):
     y = SCREEN_HEIGHT - 110
     pygame.draw.line(surface, C_BORDER, (16, y), (SIDEBAR_WIDTH - 16, y))
     y += 12
-    if selected_feature:
+    if selected_marker_index is not None:
+        marker = layout_markers[selected_marker_index]
+        kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
+        label = marker.get("label") or kind_label
+        surface.blit(FONT_SMALL.render(f"选中图标: {label} ({kind_label})", True, C_ACCENT), (16, y))
+        y += 20
+        surface.blit(
+            FONT_SMALL.render(
+                f"旋转 {marker.get('rotation', 0):.0f}°  |  模式 {rotation_mode_label()}  |  可拖动",
+                True,
+                C_MUTED,
+            ),
+            (16, y),
+        )
+    elif selected_feature:
         surface.blit(FONT_SMALL.render(f"选中: {selected_feature.name}", True, C_ACCENT), (16, y))
         y += 20
         surface.blit(FONT_SMALL.render(f"旋转 {selected_feature.rotation:.0f}°  |  ROI {selected_feature.roi:.1f}", True, C_MUTED), (16, y))
@@ -4019,7 +4449,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     y += 18
     surface.blit(
         FONT_SMALL.render(
-            f"{store_name}  |  {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}  |  v{APP_VERSION}",
+            f"{store_name}  |  {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}  |  图标 {len(layout_markers)}  |  v{APP_VERSION}",
             True,
             C_MUTED,
         ),
@@ -4046,6 +4476,10 @@ def handle_toolbar_click(action, buttons):
         buttons["obstacle"].active = drawing_polygon
     elif action == "wall":
         start_edit_wall_size()
+    elif action == "add_entrance":
+        add_marker_to_canvas("entrance")
+    elif action == "add_stairs":
+        add_marker_to_canvas("stairs")
     elif action == "merge":
         merge_selected_obstacle()
     elif action == "select_all":
@@ -4063,9 +4497,15 @@ def handle_toolbar_click(action, buttons):
     elif action == "rotate_mode":
         toggle_rotation_mode()
     elif action == "resize":
-        start_edit_obstacle_size()
+        if selected_marker_index is not None:
+            show_toast("图标无尺寸编辑，请用旋转调整方向")
+        else:
+            start_edit_obstacle_size()
     elif action == "rename":
-        start_rename_obstacle()
+        if selected_marker_index is not None:
+            start_edit_marker_dialog()
+        else:
+            start_rename_obstacle()
     elif action == "delete":
         delete_selected()
     elif action == "family_filter":
@@ -4125,9 +4565,9 @@ def finish_marquee_selection():
 
 
 def handle_canvas_click(mx, my, button, shift=False, double=False):
-    global selected_furniture, selected_feature
+    global selected_furniture, selected_feature, selected_marker_index
     global dragging_furniture, dragging_collision, collision_drag_offset, collision_drag_snapshot, multi_drag_snapshots
-    global current_polygon, preview_point
+    global current_polygon, preview_point, dragging_marker, marker_drag_offset
 
     wx, wy = screen_to_world(mx, my)
 
@@ -4140,6 +4580,12 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
         append_obstacle_vertices(verts)
         preview_point = None
         return
+
+    def try_open_marker_editor(i):
+        if not double:
+            return False
+        start_edit_marker_dialog(i)
+        return True
 
     def try_open_obstacle_editor(i):
         if not double:
@@ -4176,6 +4622,17 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             cur |= expanded
         set_obstacle_selection(cur)
 
+    for i in reversed(range(len(layout_markers))):
+        if marker_hit_test(mx, my, layout_markers[i]):
+            if try_open_marker_editor(i):
+                return
+            set_marker_selection(i)
+            push_undo()
+            dragging_marker = True
+            marker = layout_markers[i]
+            marker_drag_offset = (marker["x_mm"] - wx, marker["y_mm"] - wy)
+            return
+
     for i in reversed(range(len(collision_polygons))):
         col = collision_polygons[i]
         if obstacle_label_rect(col).collidepoint(mx, my):
@@ -4193,6 +4650,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             f.dragging = True
             selected_furniture = f
             selected_feature = f
+            selected_marker_index = None
             clear_obstacle_selection()
             return
 
@@ -4207,6 +4665,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             return
 
     selected_furniture = selected_feature = None
+    selected_marker_index = None
     return "marquee"
 
 
@@ -4224,6 +4683,8 @@ def main():
     global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot, multi_drag_snapshots
     global active_alignment_guides
     global marquee_active, marquee_start, marquee_current, template_scroll_offset, template_family_filter
+    global layout_markers, selected_marker_index, dragging_marker, marker_drag_offset
+    global editing_marker_dialog, marker_edit_name, marker_edit_focus
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -4299,6 +4760,15 @@ def main():
                     handle_obstacle_edit_text_event(event)
                 elif event.type == pygame.KEYDOWN:
                     handle_obstacle_edit_dialog_key(event)
+                continue
+
+            if editing_marker_dialog and not startup_active:
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_marker_edit_dialog_click(*event.pos)
+                elif event.type in (pygame.TEXTINPUT, pygame.TEXTEDITING):
+                    handle_marker_edit_text_event(event)
+                elif event.type == pygame.KEYDOWN:
+                    handle_marker_edit_dialog_key(event)
                 continue
 
             if editing_wall_size and not startup_active:
@@ -4444,6 +4914,12 @@ def main():
                     if dragging_furniture:
                         dragging_furniture.dragging = False
                         dragging_furniture = None
+                    if dragging_marker and selected_marker_index is not None:
+                        marker = layout_markers[selected_marker_index]
+                        marker["x_mm"], marker["y_mm"] = snap_world_point(
+                            marker["x_mm"], marker["y_mm"]
+                        )
+                        dragging_marker = False
                     if selected_collisions and not drawing_polygon and dragging_collision and multi_drag_snapshots:
                         reverted = False
                         for i in selected_collisions:
@@ -4490,6 +4966,10 @@ def main():
                     dragging_furniture.x, dragging_furniture.y = wx, wy
                     if check_collision(dragging_furniture, collision_polygons):
                         dragging_furniture.x, dragging_furniture.y = old_x, old_y
+                elif dragging_marker and selected_marker_index is not None:
+                    marker = layout_markers[selected_marker_index]
+                    marker["x_mm"] = int(round(wx + marker_drag_offset[0]))
+                    marker["y_mm"] = int(round(wy + marker_drag_offset[1]))
                 elif dragging_collision and selected_collisions:
                     all_pts = []
                     for i in selected_collisions:
@@ -4522,7 +5002,7 @@ def main():
                         editor_buttons["obstacle"].active = False
                 else:
                     mods = pygame.key.get_mods()
-                    if not search_box_active and not renaming_store and not editing_obstacle_dialog:
+                    if not search_box_active and not renaming_store and not editing_obstacle_dialog and not editing_marker_dialog:
                         if event.key == pygame.K_z and mods & pygame.KMOD_CTRL:
                             undo_layout()
                             continue
@@ -4569,6 +5049,7 @@ def main():
             draw_grid(screen)
             draw_store_floor(screen)
             draw_obstacles(screen)
+            draw_layout_markers(screen)
             draw_alignment_guides(screen)
             for f in placed_furnitures:
                 if f is not selected_furniture:
@@ -4595,6 +5076,8 @@ def main():
                 draw_rename_dialog(screen)
             if editing_obstacle_dialog:
                 draw_obstacle_edit_dialog(screen)
+            if editing_marker_dialog:
+                draw_marker_edit_dialog(screen)
             if editing_canvas_size:
                 draw_canvas_size_dialog(screen)
             if editing_wall_size:
