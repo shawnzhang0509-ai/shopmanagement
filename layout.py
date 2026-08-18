@@ -92,7 +92,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -2836,11 +2836,11 @@ def draw_obstacles(surface):
             label_color = (127, 29, 29)
         pygame.draw.polygon(surface, fill, pts)
         pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
-        if not is_wall or selected:
-            cx = sum(p[0] for p in pts) / len(pts)
-            cy = sum(p[1] for p in pts) / len(pts)
-            label = FONT_BODY.render(col["name"], True, label_color)
-            surface.blit(label, label.get_rect(center=(cx, cy)))
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        font = FONT_SMALL if is_wall else FONT_BODY
+        label = font.render(col["name"], True, label_color)
+        surface.blit(label, label.get_rect(center=(cx, cy)))
 
 
 def draw_selection_overlay(surface):

@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""Generate draft Onehunga store layout JSON from architectural dimensions.
+"""Generate Onehunga store layout from architectural floor plan (mm, origin top-left).
 
-Plan reading (metres, origin top-left):
-  - Total bbox: 43 × 76.3  (11+6+26 by 17+35.8+23.5)
-  - Top wing: 11 wide × 17 deep (top-left)
-  - Step at y=17: extends to x=17
-  - Corridor runs down x=17 from y=17 to y=52.8 (35.8 m)
-  - Main sales: x=17..43, y=52.8..76.3 (26 × 23.5)
-  - Non-sales void: top-right above main (x=17..43, y=17..52.8) and top notch (x=11..43, y=0..17)
-
-Walkable shop = bbox minus void polygons. Exterior walls follow the L-shaped footprint.
+Plan dimensions (metres):
+  Width 43 = 17 (left column) + 26 (main block)
+  Height 76.3 = 17 + 35.8 + 23.5
+  Top wing 11×17 | corridor column 17 wide | main sales 26×23.5 (bottom-right)
+  Left room 17×23.5 (below wing) | Office 26×11.2 (bottom-left) | Stairs 5×11.2 (bottom-right)
 """
 from __future__ import annotations
 
@@ -24,7 +20,7 @@ TEMPLATE_OUT = os.path.join(ROOT, "data", "layouts", "_templates", "onehunga.jso
 
 WALL_T = 200
 DOOR = 1400
-LAYOUT_VERSION = 4
+LAYOUT_VERSION = 5
 
 
 def m(v: float) -> int:
@@ -66,50 +62,76 @@ def split_v(name: str, x: int, y1: int, y2: int, gap_y: int, gap: int = DOOR) ->
 
 
 def build_obstacles() -> list[dict]:
-    x_top = m(11)
-    x_corridor = m(17)
-    x_right = m(43)
-    y_top = m(17)
-    y_main = y_top + m(35.8)
-    y_bottom = y_main + m(23.5)
-    y_office = y_bottom - m(11.2)
+    # Key coordinates from plan (mm)
+    x11 = m(11)
+    x17 = m(17)
+    x26 = m(26)
+    x38 = m(38)
+    x43 = m(43)
+    y17 = m(17)
+    y405 = y17 + m(23.5)   # left room bottom
+    y528 = y17 + m(35.8)   # main sales top / corridor bottom
+    y651 = m(76.3) - m(11.2)
+    y763 = m(76.3)
 
-    obstacles: list[dict] = []
+    obs: list[dict] = []
 
-    obstacles.append(void_rect("外部空地-顶右", x_top, 0, x_right, y_top))
-    obstacles.append(void_rect("外部空地-上右后场", x_corridor, y_top, x_right, y_main))
-    obstacles.append(void_rect("Office", 0, y_office, m(26), y_bottom))
-    obstacles.append(void_rect("楼梯间", x_right - m(5), y_office, x_right, y_bottom))
+    # ── Non-sales voids ─────────────────────────────────────────
+    obs.append(void_rect("外部空地-顶右", x11, 0, x43, y17))
+    obs.append(void_rect("外部空地-上右后场", x17, y17, x43, y528))
+    obs.append(void_rect("Office", 0, y651, x26, y763))
+    obs.append(void_rect("楼梯间", x38, y651, x43, y763))
 
-    obstacles.append(wall_h("外墙-顶", 0, x_top, 0))
-    obstacles.append(wall_v("外墙-顶翼东", x_top - WALL_T, 0, y_top))
-    obstacles.append(wall_h("外墙-翼底", 0, x_corridor, y_top - WALL_T))
-    obstacles.extend(split_v("外墙-左", 0, 0, y_bottom, y_main // 2))
-    obstacles.extend(split_v("外墙-廊东", x_corridor - WALL_T, y_top, y_main, y_top + m(20)))
-    obstacles.extend(split_h("外墙-主区顶", x_corridor, x_right, y_main - WALL_T, (x_corridor + x_right) // 2))
-    obstacles.extend(split_v("外墙-右", x_right - WALL_T, y_main, y_bottom, (y_main + y_bottom) // 2))
-    obstacles.append(wall_h("外墙-底", 0, x_right, y_bottom - WALL_T))
+    # ── Exterior walls (L-shaped footprint) ───────────────────
+    obs.append(wall_h("外墙-顶", 0, x11, 0))
+    obs.append(wall_v("外墙-顶翼东", x11 - WALL_T, 0, y17))
+    obs.append(wall_h("外墙-翼底", 0, x17, y17 - WALL_T))
+    obs.append(wall_v("外墙-左翼西", 0, 0, y17))
+    # Left: 35.8 m corridor segment (plan) with door
+    obs.extend(split_v("外墙-左廊", 0, y17, y528, y17 + m(18)))
+    # Left: 6 m opening at y=52.8 junction, then down to bottom
+    obs.extend(split_v("外墙-左下", 0, y528, y763, y528 + m(3)))
+    # Corridor east / void west (full 35.8 m) with door
+    obs.extend(split_v("外墙-廊东", x17 - WALL_T, y17, y528, y17 + m(20)))
+    # Main block north (26 m wide) with center door
+    obs.extend(split_h("外墙-主区顶", x17, x43, y528 - WALL_T, (x17 + x43) // 2))
+    # East exterior of main block with door
+    obs.extend(split_v("外墙-右", x43 - WALL_T, y528, y763, (y528 + y763) // 2))
+    obs.append(wall_h("外墙-底", 0, x43, y763 - WALL_T))
 
-    obstacles.extend(split_v("内墙-左室", x_corridor - WALL_T, y_top, y_top + m(23.5), y_top + m(12)))
-    obstacles.extend(split_h("内墙-Office上", m(11.2), m(26), y_office - WALL_T, m(18)))
+    # ── Interior partitions (match plan labels) ─────────────────
+    # 23.5 m room south wall (17 m wide) — separates room from lower corridor
+    obs.extend(split_h("内墙-左室底", 0, x17, y405 - WALL_T, x17 // 2))
+    # Room east = corridor wall (外墙-廊东), already above
 
-    return obstacles
+    # Office north wall (11.2 m zone above office strip)
+    obs.extend(split_h("内墙-Office上", 0, x26, y651 - WALL_T, m(13)))
+    # Sales floor south edge between office and stairs (door to back)
+    obs.extend(split_h("内墙-卖场南", x26, x38, y651 - WALL_T, (x26 + x38) // 2))
+    # Office east face
+    obs.extend(split_v("内墙-Office东", x26 - WALL_T, y651, y763, y651 + m(4)))
+    # Stair west face
+    obs.extend(split_v("内墙-楼梯西", x38 - WALL_T, y651, y763, y651 + m(4)))
+
+    return obs
 
 
 def build_layout_data() -> dict:
     width_mm = m(43)
     height_mm = m(76.3)
+    obstacles = build_obstacles()
+    wall_count = sum(1 for o in obstacles if o.get("kind") == "wall")
     return {
         "name": "Onehunga店",
         "store_slug": "onehunga",
         "layout_version": LAYOUT_VERSION,
         "store": {"width_mm": width_mm, "height_mm": height_mm},
         "furnitures": [],
-        "obstacles": build_obstacles(),
+        "obstacles": obstacles,
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "draft_note": (
-            "v4 floor plan: 43×76.3 m L-footprint. Top wing 11×17 m, corridor 35.8 m, "
-            "main sales 26×23.5 m. Use 恢复默认布局 if canvas shows 60×90 or walls overlap."
+            f"v5: 43×76.3 m per plan — wing 11×17, corridor 35.8 m, room 17×23.5, "
+            f"main 26×23.5, office 26×11.2, stairs 5×11.2. {wall_count} wall segments."
         ),
     }
 
@@ -123,10 +145,9 @@ def main():
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     shutil.copy2(OUT, TEMPLATE_OUT)
-    print(
-        f"Wrote {OUT} and {TEMPLATE_OUT} "
-        f"({width_mm / 1000:g}×{height_mm / 1000:g} m, {len(data['obstacles'])} obstacles)"
-    )
+    n = len(data["obstacles"])
+    walls = sum(1 for o in data["obstacles"] if o.get("kind") == "wall")
+    print(f"Wrote {OUT} and template ({width_mm / 1000:g}×{height_mm / 1000:g} m, {n} items, {walls} walls)")
 
 
 if __name__ == "__main__":
