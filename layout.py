@@ -96,9 +96,11 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.7.4"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
+WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
+WALL_LABEL_NAME_MIN_PX = 68  # 足够宽时显示名称 + 长度
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -123,6 +125,7 @@ def load_font(size, bold=False):
 FONT_TITLE = load_font(22, bold=True)
 FONT_BODY = load_font(16)
 FONT_SMALL = load_font(13)
+FONT_TINY = load_font(11)
 FONT_LABEL = load_font(14, bold=True)
 FONT_MARK = load_font(12)
 
@@ -2932,30 +2935,72 @@ def obstacle_is_wall(col) -> bool:
     return col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
 
 
+def obstacle_length_mm(col) -> float:
+    metrics = obstacle_rect_metrics(col["points"])
+    if metrics:
+        return metrics[2]
+    xs = [p[0] for p in col["points"]]
+    ys = [p[1] for p in col["points"]]
+    return max(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def format_length_m(length_mm) -> str:
+    meters = length_mm / 1000.0
+    if abs(meters - round(meters)) < 0.05:
+        return f"{round(meters):g} m"
+    return f"{meters:.1f} m"
+
+
+def wall_screen_length_px(col) -> float:
+    return obstacle_length_mm(col) * scale
+
+
+def wall_label_text(col) -> str:
+    length_str = format_length_m(obstacle_length_mm(col))
+    if wall_screen_length_px(col) < WALL_LABEL_NAME_MIN_PX:
+        return length_str
+    name = str(col.get("name", "")).strip()
+    if name.startswith("墙体"):
+        name = name[2:].lstrip("-· ")
+    return f"{name}\n{length_str}" if name else length_str
+
+
 def should_show_obstacle_label(col, idx, selected) -> bool:
-    """墙体默认不标字；区域仅够大时显示；多选时不画字（看侧栏）。"""
+    """墙体显示名称与长度；区域仅够大时显示；多选时不画字（看侧栏）。"""
     is_wall = obstacle_is_wall(col)
-    if not selected:
-        if is_wall:
-            return False
-        rect = obstacle_screen_rect(col)
-        return rect.width >= LABEL_MIN_W and rect.height >= LABEL_MIN_H
     if len(selected_collisions) > 1:
         return False
+    if is_wall:
+        return wall_screen_length_px(col) >= WALL_LABEL_MIN_PX
+    if not selected:
+        rect = obstacle_screen_rect(col)
+        return rect.width >= LABEL_MIN_W and rect.height >= LABEL_MIN_H
     return True
 
 
 def draw_label_pill(surface, text, center, *, font=None, fg=C_TEXT, bg=(255, 255, 255, 230)):
     font = font or FONT_SMALL
-    label = font.render(text, True, fg)
-    rect = label.get_rect(center=(int(center[0]), int(center[1])))
-    pad_x, pad_y = 6, 3
-    pill = rect.inflate(pad_x * 2, pad_y * 2)
+    lines = text.split("\n")
+    if len(lines) == 1:
+        rendered = [font.render(lines[0], True, fg)]
+    else:
+        rendered = [font.render(line, True, fg) for line in lines]
+    line_gap = 2
+    total_h = sum(r.get_height() for r in rendered) + line_gap * (len(rendered) - 1)
+    max_w = max(r.get_width() for r in rendered)
+    cx, cy = int(center[0]), int(center[1])
+    pad_x, pad_y = 5, 3
+    pill = pygame.Rect(0, 0, max_w + pad_x * 2, total_h + pad_y * 2)
+    pill.center = (cx, cy)
     overlay = pygame.Surface((pill.width, pill.height), pygame.SRCALPHA)
     overlay.fill(bg)
     surface.blit(overlay, pill.topleft)
     pygame.draw.rect(surface, C_BORDER, pill, 1, border_radius=4)
-    surface.blit(label, rect)
+    y = pill.top + pad_y
+    for label in rendered:
+        rect = label.get_rect(midtop=(pill.centerx, y))
+        surface.blit(label, rect)
+        y += label.get_height() + line_gap
 
 
 def draw_store_floor(surface):
@@ -2989,8 +3034,14 @@ def draw_obstacles(surface):
         if should_show_obstacle_label(col, idx, selected):
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
-            font = FONT_SMALL if is_wall else FONT_BODY
-            draw_label_pill(surface, col["name"], (cx, cy), font=font, fg=label_color)
+            if is_wall:
+                label_text = wall_label_text(col)
+                span_px = wall_screen_length_px(col)
+                font = FONT_SMALL if span_px >= WALL_LABEL_NAME_MIN_PX else FONT_TINY
+                pill_bg = (255, 255, 255, 210) if not selected else (232, 240, 255, 235)
+                draw_label_pill(surface, label_text, (cx, cy), font=font, fg=label_color, bg=pill_bg)
+            else:
+                draw_label_pill(surface, col["name"], (cx, cy), font=FONT_BODY, fg=label_color)
 
 
 def draw_selection_overlay(surface):
