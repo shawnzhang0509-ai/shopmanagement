@@ -1,9 +1,3 @@
-try:
-    import pygame
-except ModuleNotFoundError:
-    print("未找到 pygame。Python 3.14 请安装: python -m pip install pygame-ce")
-    raise SystemExit(1) from None
-
 import copy
 import json
 import math
@@ -14,18 +8,28 @@ import sys
 import threading
 import time
 import traceback
-import tkinter as tk
-from tkinter import filedialog, messagebox
-
-from roi_lookup import lookup_roi
 
 # 无论从哪启动，都切换到脚本所在目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
 
+# IME / 中文输入：须在 import pygame 之前设置
+os.environ.setdefault("SDL_IME_SHOW_UI", "1")
+os.environ.setdefault("SDL_IME_SUPPORT_EXTENDED_TEXT", "1")
 os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
 if sys.platform == "win32":
     os.environ.setdefault("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")
+
+try:
+    import pygame
+except ModuleNotFoundError:
+    print("未找到 pygame。Python 3.14 请安装: python -m pip install pygame-ce")
+    raise SystemExit(1) from None
+
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+from roi_lookup import lookup_roi
 
 pygame.init()
 
@@ -92,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -169,6 +173,11 @@ _undo_stack: list[dict] = []
 _display_items_cache = None
 search_text = ""
 search_box_active = False
+template_family_filter = ""
+template_scroll_offset = 0
+TEMPLATE_ROW_H = 56
+TEMPLATE_THUMB = 40
+rename_composition = ""
 rotation_mode = "fine"  # "fine" = 15°, "90" = 90°
 toast_message = ""
 toast_until = 0
@@ -960,10 +969,11 @@ def shape_to_points(item):
 
 # ── 家具 ────────────────────────────────────────────────────
 class Furniture:
-    def __init__(self, name, roi, points, x=0, y=0, rotation=0):
+    def __init__(self, name, roi, points, x=0, y=0, rotation=0, product_family=""):
         self.name = name
         self.roi = roi
         self.points = points
+        self.product_family = product_family or ""
         self.x = x
         self.y = y
         self.rotation = rotation
@@ -1447,8 +1457,17 @@ def image_url_for_product(name: str) -> str:
     return ""
 
 
-def furniture_image_surface(name: str, max_px: int = 96):
+def image_url_for_template(tpl) -> str:
+    url = image_url_for_product(tpl.name)
+    if not url and getattr(tpl, "product_family", ""):
+        url = image_url_for_product(tpl.product_family)
+    return url
+
+
+def furniture_image_surface(name: str, max_px: int = 96, *, family: str = ""):
     url = image_url_for_product(name)
+    if not url and family:
+        url = image_url_for_product(family)
     if not url:
         return None
     try:
@@ -1457,6 +1476,21 @@ def furniture_image_surface(name: str, max_px: int = 96):
         return request_image(url, max_size=(max_px, max_px))
     except Exception:
         return None
+
+
+def prefetch_template_list_images(items):
+    urls = []
+    for _, tpl in items:
+        url = image_url_for_template(tpl)
+        if url:
+            urls.append(url)
+    if urls:
+        try:
+            from product_images import prefetch_urls
+
+            prefetch_urls(urls, limit=12)
+        except Exception:
+            pass
 
 
 def prefetch_furniture_images():
@@ -1499,7 +1533,7 @@ def load_furniture_templates(json_path):
         if points:
             family = item.get("product_family") or item.get("id", "")
             roi = item.get("roi", 0) or lookup_roi(family)
-            templates.append(Furniture(item.get("id", "unnamed"), roi, points))
+            templates.append(Furniture(item.get("id", "unnamed"), roi, points, product_family=family))
     if not templates:
         raise ValueError(f"{json_path} 中没有有效的家具模板")
     return templates
@@ -2625,11 +2659,42 @@ def build_rename_dialog_buttons():
 
 
 def cancel_rename_dialog():
-    global renaming_obstacle, renaming_store, input_text, rename_collision_index
+    global renaming_obstacle, renaming_store, input_text, rename_collision_index, rename_composition
     renaming_obstacle = False
     renaming_store = False
     rename_collision_index = None
     input_text = ""
+    rename_composition = ""
+    try:
+        pygame.key.stop_text_input()
+    except Exception:
+        pass
+
+
+def _start_rename_text_input():
+    global rename_composition
+    rename_composition = ""
+    try:
+        rect = pygame.Rect(SCREEN_WIDTH // 2 - 200, SCREEN_HEIGHT // 2 + 18, 400, 36)
+        pygame.key.start_text_input()
+        pygame.key.set_text_input_rect(rect)
+    except Exception:
+        pass
+
+
+def handle_rename_text_event(event):
+    global input_text, rename_composition
+    if not (renaming_obstacle or renaming_store):
+        return False
+    if event.type == pygame.TEXTEDITING:
+        rename_composition = event.text or ""
+        return True
+    if event.type == pygame.TEXTINPUT:
+        rename_composition = ""
+        if event.text:
+            input_text += event.text
+        return True
+    return False
 
 
 def apply_rename_obstacle():
@@ -2685,7 +2750,7 @@ def handle_rename_dialog_click(mx, my):
 
 
 def handle_rename_dialog_key(event):
-    global input_text
+    global input_text, rename_composition
     if renaming_store:
         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             apply_rename_store_dialog()
@@ -2693,8 +2758,7 @@ def handle_rename_dialog_key(event):
             cancel_rename_dialog()
         elif event.key == pygame.K_BACKSPACE:
             input_text = input_text[:-1]
-        elif event.unicode and event.unicode.isprintable():
-            input_text += event.unicode
+            rename_composition = ""
     elif renaming_obstacle:
         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             apply_rename_obstacle()
@@ -2702,8 +2766,7 @@ def handle_rename_dialog_key(event):
             cancel_rename_dialog()
         elif event.key == pygame.K_BACKSPACE:
             input_text = input_text[:-1]
-        elif event.unicode and event.unicode.isprintable():
-            input_text += event.unicode
+            rename_composition = ""
 
 
 def start_rename_obstacle():
@@ -2716,7 +2779,8 @@ def start_rename_obstacle():
     rename_collision_index = selected_collision
     input_text = collision_polygons[selected_collision]["name"]
     rename_dialog_buttons = build_rename_dialog_buttons()
-    show_toast("输入新名称后点确定或按 Enter")
+    _start_rename_text_input()
+    show_toast("可输入中文名称，Enter 确认")
 
 
 def start_rename_store():
@@ -2726,7 +2790,8 @@ def start_rename_store():
     rename_collision_index = None
     input_text = store_name
     rename_dialog_buttons = build_rename_dialog_buttons()
-    show_toast("输入新名称后点确定或按 Enter")
+    _start_rename_text_input()
+    show_toast("可输入中文名称，Enter 确认")
 
 
 def open_store_picker():
@@ -2772,11 +2837,49 @@ def handle_store_picker_action(action):
         close_store_picker()
 
 
+def template_families():
+    families = sorted({(getattr(t, "product_family", "") or "未分类") for t in furniture_templates})
+    return families
+
+
+def cycle_family_filter(buttons=None):
+    global template_family_filter, template_scroll_offset
+    options = [""] + template_families()
+    try:
+        idx = options.index(template_family_filter)
+    except ValueError:
+        idx = 0
+    template_family_filter = options[(idx + 1) % len(options)]
+    template_scroll_offset = 0
+    label = template_family_filter or "全部"
+    show_toast(f"系列筛选: {label}")
+    if buttons and "family_filter" in buttons:
+        buttons["family_filter"].label = f"系列: {label}"
+
+
 def filtered_templates():
-    if not search_text.strip():
-        return list(enumerate(furniture_templates))
+    items = list(enumerate(furniture_templates))
+    if template_family_filter:
+        items = [
+            (i, t)
+            for i, t in items
+            if (getattr(t, "product_family", "") or "未分类") == template_family_filter
+        ]
     q = search_text.strip().lower()
-    return [(i, t) for i, t in enumerate(furniture_templates) if q in t.name.lower()]
+    if q:
+        items = [
+            (i, t)
+            for i, t in items
+            if q in t.name.lower()
+            or q in (getattr(t, "product_family", "") or "").lower()
+        ]
+    return items
+
+
+def template_visible_count(template_list_top):
+    bottom = SCREEN_HEIGHT - 112
+    avail = bottom - template_list_top - 56
+    return max(1, avail // TEMPLATE_ROW_H)
 
 
 # ── 绘制 ────────────────────────────────────────────────────
@@ -2991,7 +3094,7 @@ def draw_rename_dialog(surface):
     pygame.draw.rect(surface, (248, 250, 252), rename_input_rect, border_radius=8)
     pygame.draw.rect(surface, C_ACCENT, rename_input_rect, 2, border_radius=8)
     surface.blit(
-        FONT_BODY.render(input_text + "|", True, C_TEXT),
+        FONT_BODY.render(input_text + rename_composition + "|", True, C_TEXT),
         (rename_input_rect.x + 10, rename_input_rect.y + 8),
     )
     for btn in rename_dialog_buttons.values():
@@ -3038,11 +3141,14 @@ def build_sidebar_ui():
     y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
     buttons["delete"] = Button((pad + bw + 8, y, bw, 34), "删除", "delete", danger=True)
-    template_list_top = y + 50
+    y += 42
+    buttons["family_filter"] = Button((pad, y, w, 28), "系列: 全部", "family_filter")
+    template_list_top = y + 38
     return buttons, input_box, template_list_top
 
 
 def draw_sidebar(buttons, input_box, template_list_top):
+    global template_scroll_offset
     surface = screen
     pygame.draw.rect(surface, C_SIDEBAR, (0, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT))
     pygame.draw.line(surface, C_BORDER, (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, SCREEN_HEIGHT))
@@ -3057,30 +3163,52 @@ def draw_sidebar(buttons, input_box, template_list_top):
     for key in (
         "save", "home", "rename_store", "store", "reset_layout", "obstacle", "wall", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
-        "rotate_mode", "resize", "rename", "delete",
+        "rotate_mode", "resize", "rename", "delete", "family_filter",
     ):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
     buttons["rotate_mode"].active = rotation_mode == "90"
     buttons["rotate_mode"].label = f"旋转: {rotation_mode_label()}"
+    fam = template_family_filter or "全部"
+    if "family_filter" in buttons:
+        buttons["family_filter"].label = f"系列: {fam}"
 
     y = template_list_top
     surface.blit(FONT_LABEL.render("家具模板", True, C_TEXT), (16, y))
-    y += 28
-
+    y += 24
     filtered = filtered_templates()
-    row_h = 44
-    for i, (idx, tpl) in enumerate(filtered[:6]):
-        row = pygame.Rect(12, y + i * row_h, SIDEBAR_WIDTH - 24, row_h - 6)
+    visible_n = template_visible_count(template_list_top)
+    max_scroll = max(0, len(filtered) - visible_n)
+    template_scroll_offset = min(template_scroll_offset, max_scroll)
+    visible = filtered[template_scroll_offset : template_scroll_offset + visible_n]
+    prefetch_template_list_images(visible)
+    count_label = f"{len(filtered)} 项" + (f" · 显示 {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}" if len(filtered) > visible_n else "")
+    surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (16, y))
+    y += 20
+    for i, (idx, tpl) in enumerate(visible):
+        row = pygame.Rect(12, y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
         selected = idx == selected_template_index
         bg = C_ACCENT_LIGHT if selected else (248, 250, 252)
         pygame.draw.rect(surface, bg, row, border_radius=8)
         if selected:
             pygame.draw.rect(surface, C_ACCENT, row, 2, border_radius=8)
-        color_dot = roi_to_color(tpl.roi)
-        pygame.draw.circle(surface, color_dot, (row.x + 16, row.centery), 8)
-        surface.blit(FONT_BODY.render(tpl.name, True, C_TEXT), (row.x + 32, row.centery - 10))
-        surface.blit(FONT_SMALL.render(f"ROI {tpl.roi:.1f}", True, C_MUTED), (row.x + 32, row.centery + 6))
+        thumb = pygame.Rect(row.x + 6, row.centery - TEMPLATE_THUMB // 2, TEMPLATE_THUMB, TEMPLATE_THUMB)
+        pygame.draw.rect(surface, (255, 255, 255), thumb, border_radius=6)
+        pygame.draw.rect(surface, C_BORDER, thumb, 1, border_radius=6)
+        img = furniture_image_surface(tpl.name, TEMPLATE_THUMB - 4, family=tpl.product_family)
+        if img is not None:
+            scaled = pygame.transform.smoothscale(img, (TEMPLATE_THUMB - 8, TEMPLATE_THUMB - 8))
+            surface.blit(scaled, scaled.get_rect(center=thumb.center))
+        else:
+            color_dot = roi_to_color(tpl.roi)
+            pygame.draw.circle(surface, color_dot, thumb.center, 10)
+        tx = row.x + TEMPLATE_THUMB + 10
+        family = getattr(tpl, "product_family", "") or "未分类"
+        surface.blit(FONT_BODY.render(tpl.name, True, C_TEXT), (tx, row.y + 6))
+        surface.blit(
+            FONT_SMALL.render(f"{family}  ·  ROI {tpl.roi:.1f}", True, C_MUTED),
+            (tx, row.y + 26),
+        )
 
     y = SCREEN_HEIGHT - 110
     pygame.draw.line(surface, C_BORDER, (16, y), (SIDEBAR_WIDTH - 16, y))
@@ -3124,7 +3252,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "框选/Shift多选 | 修改尺寸 | Ctrl+A全选 | Ctrl+G成组 | Ctrl+Z撤销 | Ctrl+C/V复制"
+    hints = "搜索/系列筛选 | 滚轮翻页模板 | Ctrl+A全选 | Ctrl+G成组 | Ctrl+Z撤销"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -3175,10 +3303,12 @@ def handle_toolbar_click(action, buttons):
         start_rename_obstacle()
     elif action == "delete":
         delete_selected()
+    elif action == "family_filter":
+        cycle_family_filter(buttons)
 
 
 def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
-    global search_box_active, selected_template_index
+    global search_box_active, selected_template_index, template_scroll_offset
 
     if buttons is None or input_box is None:
         return
@@ -3196,12 +3326,14 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
             return
 
     filtered = filtered_templates()
-    row_h = 44
-    for i, (idx, tpl) in enumerate(filtered[:6]):
-        row = pygame.Rect(12, template_list_top + 28 + i * row_h, SIDEBAR_WIDTH - 24, row_h - 6)
+    visible_n = template_visible_count(template_list_top)
+    list_y = template_list_top + 44
+    for i, (idx, tpl) in enumerate(filtered[template_scroll_offset : template_scroll_offset + visible_n]):
+        row = pygame.Rect(12, list_y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
         if row.collidepoint(mx, my):
             selected_template_index = idx
-            show_toast(f"已选模板: {tpl.name}")
+            fam = getattr(tpl, "product_family", "") or ""
+            show_toast(f"已选: {tpl.name}" + (f" ({fam})" if fam else ""))
             return
 
 
@@ -3310,7 +3442,7 @@ def main():
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus
     global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot, multi_drag_snapshots
-    global marquee_active, marquee_start, marquee_current
+    global marquee_active, marquee_start, marquee_current, template_scroll_offset, template_family_filter
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -3428,6 +3560,8 @@ def main():
             if (renaming_obstacle or renaming_store) and not startup_active:
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     handle_rename_dialog_click(*event.pos)
+                elif event.type in (pygame.TEXTINPUT, pygame.TEXTEDITING):
+                    handle_rename_text_event(event)
                 elif event.type == pygame.KEYDOWN:
                     handle_rename_dialog_key(event)
                 continue
@@ -3439,10 +3573,21 @@ def main():
 
             if event.type == pygame.MOUSEWHEEL:
                 mx, my = mouse_pos
-                wx, wy = screen_to_world(mx, my)
-                scale = max(MIN_SCALE, min(MAX_SCALE, scale * (ZOOM_IN if event.y > 0 else ZOOM_OUT)))
-                offset_x = wx - (mx - SIDEBAR_WIDTH) / scale
-                offset_y = wy - my / scale
+                if mx < SIDEBAR_WIDTH and not startup_active and template_list_top:
+                    filtered = filtered_templates()
+                    visible_n = template_visible_count(template_list_top)
+                    max_scroll = max(0, len(filtered) - visible_n)
+                    template_scroll_offset = max(0, min(max_scroll, template_scroll_offset - event.y))
+                else:
+                    wx, wy = screen_to_world(mx, my)
+                    scale = max(MIN_SCALE, min(MAX_SCALE, scale * (ZOOM_IN if event.y > 0 else ZOOM_OUT)))
+                    offset_x = wx - (mx - SIDEBAR_WIDTH) / scale
+                    offset_y = wy - my / scale
+
+            elif event.type in (pygame.TEXTINPUT, pygame.TEXTEDITING):
+                if search_box_active and event.type == pygame.TEXTINPUT and event.text:
+                    search_text += event.text
+                    template_scroll_offset = 0
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = ui_pos(event.pos)
@@ -3534,10 +3679,9 @@ def main():
                 if search_box_active:
                     if event.key == pygame.K_BACKSPACE:
                         search_text = search_text[:-1]
+                        template_scroll_offset = 0
                     elif event.key == pygame.K_ESCAPE:
                         search_box_active = False
-                    elif event.unicode and event.unicode.isprintable():
-                        search_text += event.unicode
                 elif drawing_polygon:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         finish_obstacle()
