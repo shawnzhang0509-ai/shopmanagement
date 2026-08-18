@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.6"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -2219,13 +2219,14 @@ def prefetch_furniture_images():
 
 
 def check_collision(furniture, obstacles):
-    store_poly = store_rect_points()
+    """家具与粉色障碍区不可重叠；墙体允许贴边摆放（墙有厚度，若参与碰撞会「弹开」）。"""
     furn_pts = furniture.get_rotated_points()
-    for px, py in furn_pts:
-        if not point_in_poly(px, py, store_poly):
-            return True
+    if not polygon_fully_inside_store(furn_pts):
+        return True
     for col in obstacles:
-        if polygons_overlap(furn_pts, col["points"]):
+        if obstacle_is_wall(col):
+            continue
+        if polygons_interior_overlap(furn_pts, col["points"]):
             return True
     return False
 
