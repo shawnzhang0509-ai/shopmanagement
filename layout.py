@@ -510,6 +510,11 @@ def paste_obstacle():
             continue
         collision_polygons.append(new_ob)
         new_indices.append(len(collision_polygons) - 1)
+    if not new_indices:
+        if _undo_stack:
+            _undo_stack.pop()
+        show_toast("粘贴失败：与现有障碍重叠")
+        return
     set_obstacle_selection(new_indices, toast_msg=f"已粘贴 {len(new_indices)} 项")
 
 
