@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.4"
+APP_VERSION = "1.7.5"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -218,6 +218,20 @@ wall_size_buttons = {}
 wall_length_rect = None
 wall_width_rect = None
 wall_size_edit_index = None
+editing_obstacle_dialog = False
+obstacle_edit_index = None
+obstacle_edit_name = ""
+obstacle_edit_length = ""
+obstacle_edit_width = ""
+obstacle_edit_focus = "name"
+obstacle_edit_composition = ""
+obstacle_edit_buttons = {}
+obstacle_edit_name_rect = None
+obstacle_edit_length_rect = None
+obstacle_edit_width_rect = None
+canvas_last_click_time = 0
+canvas_last_click_pos = None
+DOUBLE_CLICK_MS = 450
 force_rebuild_startup = False
 _store_summary_cache = {}
 _pending_save_snapshot = None
@@ -2141,6 +2155,7 @@ def start_edit_canvas_size():
     editing_canvas_size = True
     editing_wall_size = False
     cancel_rename_dialog()
+    cancel_obstacle_edit_dialog()
     canvas_w_text = f"{store_width_mm / 1000:g}"
     canvas_h_text = f"{store_height_mm / 1000:g}"
     canvas_size_focus = "width"
@@ -2251,6 +2266,7 @@ def start_edit_wall_size():
     wall_size_edit_index = None
     editing_canvas_size = False
     cancel_rename_dialog()
+    cancel_obstacle_edit_dialog()
     toggle_draw_obstacle(False)
     wall_length_text = "3"
     wall_width_text = "0.2"
@@ -2259,25 +2275,251 @@ def start_edit_wall_size():
 
 
 def start_edit_obstacle_size():
-    global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus, wall_size_buttons
-    global editing_canvas_size, wall_size_edit_index
-    if len(selected_collisions) != 1:
-        show_toast("请单选一个长方形障碍或墙体再修改尺寸")
+    start_edit_obstacle_dialog()
+
+
+def build_obstacle_edit_dialog_buttons():
+    cx = SCREEN_WIDTH // 2
+    bw, bh = 88, 34
+    y = SCREEN_HEIGHT // 2 + 88
+    return {
+        "ok": Button((cx - bw - 6, y, bw, bh), "确定", "obstacle_edit_ok", primary=True),
+        "cancel": Button((cx + 6, y, bw, bh), "取消", "obstacle_edit_cancel"),
+    }
+
+
+def _sync_obstacle_edit_ime():
+    try:
+        if obstacle_edit_focus == "name" and obstacle_edit_name_rect:
+            pygame.key.start_text_input()
+            pygame.key.set_text_input_rect(obstacle_edit_name_rect)
+        else:
+            pygame.key.stop_text_input()
+    except Exception:
+        pass
+
+
+def cancel_obstacle_edit_dialog():
+    global editing_obstacle_dialog, obstacle_edit_index, obstacle_edit_name, obstacle_edit_length
+    global obstacle_edit_width, obstacle_edit_focus, obstacle_edit_composition
+    editing_obstacle_dialog = False
+    obstacle_edit_index = None
+    obstacle_edit_name = ""
+    obstacle_edit_length = ""
+    obstacle_edit_width = ""
+    obstacle_edit_focus = "name"
+    obstacle_edit_composition = ""
+    try:
+        pygame.key.stop_text_input()
+    except Exception:
+        pass
+
+
+def start_edit_obstacle_dialog(index=None):
+    global editing_obstacle_dialog, obstacle_edit_index, obstacle_edit_name, obstacle_edit_length
+    global obstacle_edit_width, obstacle_edit_focus, obstacle_edit_composition, obstacle_edit_buttons
+    if index is None:
+        if len(selected_collisions) != 1:
+            show_toast("请单选一个长方形障碍或墙体")
+            return
+        index = selected_collision
+    if index < 0 or index >= len(collision_polygons):
         return
-    metrics = obstacle_rect_metrics(collision_polygons[selected_collision]["points"])
+    metrics = obstacle_rect_metrics(collision_polygons[index]["points"])
     if not metrics:
-        show_toast("仅支持长方形障碍/墙体修改尺寸（多边形请重新绘制）")
+        show_toast("仅支持长方形障碍/墙体（多边形请重新绘制）")
         return
-    _, _, length_mm, width_mm = metrics
-    editing_wall_size = True
-    wall_size_edit_index = selected_collision
-    editing_canvas_size = False
     cancel_rename_dialog()
+    cancel_wall_size_edit()
     toggle_draw_obstacle(False)
-    wall_length_text = f"{length_mm / 1000:g}"
-    wall_width_text = f"{width_mm / 1000:g}"
-    wall_size_focus = "length"
-    wall_size_buttons = build_wall_size_dialog_buttons()
+    _, _, length_mm, width_mm = metrics
+    editing_obstacle_dialog = True
+    obstacle_edit_index = index
+    obstacle_edit_name = collision_polygons[index].get("name", "")
+    obstacle_edit_length = f"{length_mm / 1000:g}"
+    obstacle_edit_width = f"{width_mm / 1000:g}"
+    obstacle_edit_focus = "name"
+    obstacle_edit_composition = ""
+    obstacle_edit_buttons = build_obstacle_edit_dialog_buttons()
+    set_obstacle_selection([index])
+    _sync_obstacle_edit_ime()
+    show_toast("可修改名称与尺寸，Enter 确认")
+
+
+def apply_obstacle_edit_dialog():
+    global editing_obstacle_dialog, obstacle_edit_index
+    if obstacle_edit_index is None or obstacle_edit_index >= len(collision_polygons):
+        cancel_obstacle_edit_dialog()
+        return
+    name = obstacle_edit_name.strip()
+    if not name:
+        show_toast("名称不能为空")
+        return
+    for i, col in enumerate(collision_polygons):
+        if i != obstacle_edit_index and col.get("name") == name:
+            show_toast(f"名称「{name}」已被使用")
+            return
+    try:
+        length_m = float(obstacle_edit_length.strip())
+        width_m = float(obstacle_edit_width.strip())
+    except ValueError:
+        show_toast("请输入有效的长宽数字（米）")
+        return
+    if length_m <= 0 or width_m <= 0:
+        show_toast("长宽必须大于 0")
+        return
+    idx = obstacle_edit_index
+    col = collision_polygons[idx]
+    old_name = col.get("name", "")
+    metrics = obstacle_rect_metrics(col["points"])
+    old_length_m = metrics[2] / 1000 if metrics else 0
+    old_width_m = metrics[3] / 1000 if metrics else 0
+    rename_changed = name != old_name
+    size_changed = abs(length_m - old_length_m) > 0.001 or abs(width_m - old_width_m) > 0.001
+    if not rename_changed and not size_changed:
+        cancel_obstacle_edit_dialog()
+        return
+    push_undo()
+    if rename_changed:
+        col["name"] = name
+    if size_changed and not resize_obstacle_rect(idx, length_m, width_m):
+        return
+    cancel_obstacle_edit_dialog()
+    if rename_changed and size_changed:
+        show_toast(f"已更新为「{name}」 {length_m:g}×{width_m:g} m")
+    elif rename_changed:
+        show_toast("重命名成功")
+    else:
+        show_toast(f"已更新尺寸为 {length_m:g}×{width_m:g} m")
+
+
+def handle_obstacle_edit_dialog_action(action):
+    if action == "obstacle_edit_ok":
+        apply_obstacle_edit_dialog()
+    elif action == "obstacle_edit_cancel":
+        cancel_obstacle_edit_dialog()
+
+
+def handle_obstacle_edit_dialog_click(mx, my):
+    global obstacle_edit_focus, obstacle_edit_length, obstacle_edit_width
+    mx, my = ui_pos((mx, my))
+    if obstacle_edit_name_rect and obstacle_edit_name_rect.collidepoint(mx, my):
+        obstacle_edit_focus = "name"
+        _sync_obstacle_edit_ime()
+        return True
+    if obstacle_edit_length_rect and obstacle_edit_length_rect.collidepoint(mx, my):
+        obstacle_edit_focus = "length"
+        _sync_obstacle_edit_ime()
+        return True
+    if obstacle_edit_width_rect and obstacle_edit_width_rect.collidepoint(mx, my):
+        obstacle_edit_focus = "width"
+        _sync_obstacle_edit_ime()
+        return True
+    for btn in obstacle_edit_buttons.values():
+        if btn.contains((mx, my)):
+            handle_obstacle_edit_dialog_action(btn.action)
+            return True
+    return False
+
+
+def handle_obstacle_edit_text_event(event):
+    global obstacle_edit_name, obstacle_edit_composition
+    if not editing_obstacle_dialog or obstacle_edit_focus != "name":
+        return False
+    if event.type == pygame.TEXTEDITING:
+        obstacle_edit_composition = event.text or ""
+        return True
+    if event.type == pygame.TEXTINPUT:
+        obstacle_edit_composition = ""
+        if event.text:
+            obstacle_edit_name += event.text
+        return True
+    return False
+
+
+def handle_obstacle_edit_dialog_key(event):
+    global obstacle_edit_name, obstacle_edit_length, obstacle_edit_width
+    global obstacle_edit_focus, obstacle_edit_composition
+    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+        apply_obstacle_edit_dialog()
+    elif event.key == pygame.K_ESCAPE:
+        cancel_obstacle_edit_dialog()
+    elif event.key == pygame.K_TAB:
+        order = ("name", "length", "width")
+        i = (order.index(obstacle_edit_focus) + 1) % len(order)
+        obstacle_edit_focus = order[i]
+        _sync_obstacle_edit_ime()
+    elif event.key == pygame.K_BACKSPACE:
+        if obstacle_edit_focus == "name":
+            obstacle_edit_name = obstacle_edit_name[:-1]
+            obstacle_edit_composition = ""
+        elif obstacle_edit_focus == "length":
+            obstacle_edit_length = obstacle_edit_length[:-1]
+        else:
+            obstacle_edit_width = obstacle_edit_width[:-1]
+    elif event.unicode:
+        ch = event.unicode
+        if obstacle_edit_focus == "name":
+            return
+        field = obstacle_edit_length if obstacle_edit_focus == "length" else obstacle_edit_width
+        if ch.isdigit() and len(field) < 6:
+            if obstacle_edit_focus == "length":
+                obstacle_edit_length += ch
+            else:
+                obstacle_edit_width += ch
+        elif ch == "." and "." not in field and len(field) < 6:
+            if obstacle_edit_focus == "length":
+                obstacle_edit_length += ch
+            else:
+                obstacle_edit_width += ch
+
+
+def draw_obstacle_edit_dialog(surface):
+    global obstacle_edit_name_rect, obstacle_edit_length_rect, obstacle_edit_width_rect
+    if not editing_obstacle_dialog or obstacle_edit_index is None:
+        obstacle_edit_name_rect = obstacle_edit_length_rect = obstacle_edit_width_rect = None
+        return
+    col = collision_polygons[obstacle_edit_index]
+    is_wall = obstacle_is_wall(col)
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 120))
+    surface.blit(overlay, (0, 0))
+    box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 130, 440, 270)
+    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
+    title = "编辑墙体" if is_wall else "编辑障碍物"
+    surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(
+        FONT_SMALL.render("名称与尺寸可一并修改  |  Tab 切换  |  Enter 确认", True, C_MUTED),
+        (box.x + 20, box.y + 42),
+    )
+    surface.blit(FONT_SMALL.render("名称", True, C_TEXT), (box.x + 20, box.y + 72))
+    obstacle_edit_name_rect = pygame.Rect(box.x + 20, box.y + 92, box.width - 40, 36)
+    pygame.draw.rect(surface, (248, 250, 252), obstacle_edit_name_rect, border_radius=8)
+    pygame.draw.rect(
+        surface,
+        C_ACCENT if obstacle_edit_focus == "name" else C_BORDER,
+        obstacle_edit_name_rect,
+        2 if obstacle_edit_focus == "name" else 1,
+        border_radius=8,
+    )
+    name_text = obstacle_edit_name + (obstacle_edit_composition if obstacle_edit_focus == "name" else "")
+    if obstacle_edit_focus == "name":
+        name_text += "|"
+    surface.blit(FONT_BODY.render(name_text, True, C_TEXT), (obstacle_edit_name_rect.x + 10, obstacle_edit_name_rect.y + 8))
+    surface.blit(FONT_SMALL.render("长 (m)", True, C_TEXT), (box.x + 20, box.y + 138))
+    obstacle_edit_length_rect = pygame.Rect(box.x + 20, box.y + 158, 180, 36)
+    surface.blit(FONT_SMALL.render("宽 (m)", True, C_TEXT), (box.x + 220, box.y + 138))
+    obstacle_edit_width_rect = pygame.Rect(box.x + 220, box.y + 158, 180, 36)
+    for rect, text, focused in (
+        (obstacle_edit_length_rect, obstacle_edit_length, obstacle_edit_focus == "length"),
+        (obstacle_edit_width_rect, obstacle_edit_width, obstacle_edit_focus == "width"),
+    ):
+        pygame.draw.rect(surface, (248, 250, 252), rect, border_radius=8)
+        pygame.draw.rect(surface, C_ACCENT if focused else C_BORDER, rect, 2 if focused else 1, border_radius=8)
+        surface.blit(FONT_BODY.render(text + ("|" if focused else ""), True, C_TEXT), (rect.x + 10, rect.y + 8))
+    for btn in obstacle_edit_buttons.values():
+        btn.draw(surface)
 
 
 def build_wall_size_dialog_buttons():
@@ -2403,6 +2645,7 @@ def go_to_store_home():
     editing_canvas_size = False
     editing_wall_size = False
     wall_size_edit_index = None
+    cancel_obstacle_edit_dialog()
     force_rebuild_startup = False
     if current_layout_path:
         remember_store_summary(
@@ -2697,7 +2940,7 @@ def _start_rename_text_input():
 
 def handle_rename_text_event(event):
     global input_text, rename_composition
-    if not (renaming_obstacle or renaming_store):
+    if not renaming_store:
         return False
     if event.type == pygame.TEXTEDITING:
         rename_composition = event.text or ""
@@ -2742,10 +2985,7 @@ def apply_rename_store_dialog():
 
 def handle_rename_dialog_action(action):
     if action == "rename_ok":
-        if renaming_store:
-            apply_rename_store_dialog()
-        else:
-            apply_rename_obstacle()
+        apply_rename_store_dialog()
     elif action == "rename_cancel":
         cancel_rename_dialog()
 
@@ -2764,36 +3004,17 @@ def handle_rename_dialog_click(mx, my):
 
 def handle_rename_dialog_key(event):
     global input_text, rename_composition
-    if renaming_store:
-        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-            apply_rename_store_dialog()
-        elif event.key == pygame.K_ESCAPE:
-            cancel_rename_dialog()
-        elif event.key == pygame.K_BACKSPACE:
-            input_text = input_text[:-1]
-            rename_composition = ""
-    elif renaming_obstacle:
-        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-            apply_rename_obstacle()
-        elif event.key == pygame.K_ESCAPE:
-            cancel_rename_dialog()
-        elif event.key == pygame.K_BACKSPACE:
-            input_text = input_text[:-1]
-            rename_composition = ""
+    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+        apply_rename_store_dialog()
+    elif event.key == pygame.K_ESCAPE:
+        cancel_rename_dialog()
+    elif event.key == pygame.K_BACKSPACE:
+        input_text = input_text[:-1]
+        rename_composition = ""
 
 
 def start_rename_obstacle():
-    global renaming_obstacle, renaming_store, input_text, rename_collision_index, rename_dialog_buttons
-    if len(selected_collisions) != 1:
-        show_toast("请单选一个障碍或墙体再重命名")
-        return
-    renaming_obstacle = True
-    renaming_store = False
-    rename_collision_index = selected_collision
-    input_text = collision_polygons[selected_collision]["name"]
-    rename_dialog_buttons = build_rename_dialog_buttons()
-    _start_rename_text_input()
-    show_toast("可输入中文名称，Enter 确认")
+    start_edit_obstacle_dialog()
 
 
 def start_rename_store():
@@ -3173,7 +3394,7 @@ def draw_toast(surface):
 
 def draw_rename_dialog(surface):
     global rename_input_rect
-    if not renaming_obstacle and not renaming_store:
+    if not renaming_store:
         rename_input_rect = None
         return
     overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -3182,8 +3403,7 @@ def draw_rename_dialog(surface):
     box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 90, 440, 170)
     pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
-    title = "重命名门店" if renaming_store else "重命名障碍物"
-    surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(FONT_LABEL.render("重命名门店", True, C_TEXT), (box.x + 20, box.y + 16))
     surface.blit(
         FONT_SMALL.render("Enter 确认  |  Esc 取消", True, C_MUTED),
         (box.x + 20, box.y + 42),
@@ -3457,7 +3677,7 @@ def finish_marquee_selection():
     marquee_current = None
 
 
-def handle_canvas_click(mx, my, button, shift=False):
+def handle_canvas_click(mx, my, button, shift=False, double=False):
     global selected_furniture, selected_feature
     global dragging_furniture, dragging_collision, collision_drag_offset, collision_drag_snapshot, multi_drag_snapshots
     global current_polygon, preview_point
@@ -3473,6 +3693,15 @@ def handle_canvas_click(mx, my, button, shift=False):
         append_obstacle_vertices(verts)
         preview_point = None
         return
+
+    def try_open_obstacle_editor(i):
+        if not double:
+            return False
+        metrics = obstacle_rect_metrics(collision_polygons[i]["points"])
+        if not metrics:
+            return False
+        start_edit_obstacle_dialog(i)
+        return True
 
     def start_obstacle_drag(indices):
         global dragging_collision, collision_drag_offset, collision_drag_snapshot, multi_drag_snapshots
@@ -3503,6 +3732,8 @@ def handle_canvas_click(mx, my, button, shift=False):
     for i in reversed(range(len(collision_polygons))):
         col = collision_polygons[i]
         if obstacle_label_rect(col).collidepoint(mx, my):
+            if try_open_obstacle_editor(i):
+                return
             if shift:
                 toggle_obstacle_selection(i)
             else:
@@ -3520,6 +3751,8 @@ def handle_canvas_click(mx, my, button, shift=False):
 
     for i, col in enumerate(collision_polygons):
         if point_in_poly(wx, wy, col["points"]):
+            if try_open_obstacle_editor(i):
+                return
             if shift:
                 toggle_obstacle_selection(i)
             else:
@@ -3539,6 +3772,8 @@ def main():
     global furniture_templates, startup_active, store_picker_active
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus
+    global editing_obstacle_dialog, obstacle_edit_name, obstacle_edit_length, obstacle_edit_width, obstacle_edit_focus
+    global canvas_last_click_time, canvas_last_click_pos
     global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot, multi_drag_snapshots
     global marquee_active, marquee_start, marquee_current, template_scroll_offset, template_family_filter
 
@@ -3597,6 +3832,15 @@ def main():
                     handle_store_picker_mouseup(*event.pos, store_picker_buttons)
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     close_store_picker()
+                continue
+
+            if editing_obstacle_dialog and not startup_active:
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_obstacle_edit_dialog_click(*event.pos)
+                elif event.type in (pygame.TEXTINPUT, pygame.TEXTEDITING):
+                    handle_obstacle_edit_text_event(event)
+                elif event.type == pygame.KEYDOWN:
+                    handle_obstacle_edit_dialog_key(event)
                 continue
 
             if editing_wall_size and not startup_active:
@@ -3659,7 +3903,7 @@ def main():
                                 canvas_h_text += ch
                 continue
 
-            if (renaming_obstacle or renaming_store) and not startup_active:
+            if renaming_store and not startup_active:
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     handle_rename_dialog_click(*event.pos)
                 elif event.type in (pygame.TEXTINPUT, pygame.TEXTEDITING):
@@ -3701,7 +3945,18 @@ def main():
                 if mx >= SIDEBAR_WIDTH and event.button == 1:
                     mods = pygame.key.get_mods()
                     shift = bool(mods & pygame.KMOD_SHIFT)
-                    result = handle_canvas_click(mx, my, event.button, shift=shift)
+                    is_double = False
+                    now = pygame.time.get_ticks()
+                    if (
+                        canvas_last_click_pos is not None
+                        and abs(mx - canvas_last_click_pos[0]) < 10
+                        and abs(my - canvas_last_click_pos[1]) < 10
+                        and now - canvas_last_click_time < DOUBLE_CLICK_MS
+                    ):
+                        is_double = True
+                    canvas_last_click_time = now
+                    canvas_last_click_pos = (mx, my)
+                    result = handle_canvas_click(mx, my, event.button, shift=shift, double=is_double)
                     if result == "pan":
                         dragging_view = True
                         last_mouse_pos = event.pos
@@ -3793,7 +4048,7 @@ def main():
                         editor_buttons["obstacle"].active = False
                 else:
                     mods = pygame.key.get_mods()
-                    if not search_box_active and not renaming_obstacle and not renaming_store:
+                    if not search_box_active and not renaming_store and not editing_obstacle_dialog:
                         if event.key == pygame.K_z and mods & pygame.KMOD_CTRL:
                             undo_layout()
                             continue
@@ -3856,8 +4111,10 @@ def main():
                 draw_store_picker(screen, store_picker_buttons)
             else:
                 store_picker_buttons = None
-            if renaming_obstacle or renaming_store:
+            if renaming_store:
                 draw_rename_dialog(screen)
+            if editing_obstacle_dialog:
+                draw_obstacle_edit_dialog(screen)
             if editing_canvas_size:
                 draw_canvas_size_dialog(screen)
             if editing_wall_size:
