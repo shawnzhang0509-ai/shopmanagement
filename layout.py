@@ -87,7 +87,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.8"
+APP_VERSION = "1.6.9"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -302,9 +302,12 @@ def try_move_obstacles_batch(indices, dx, dy) -> bool:
         return False
     ignore = tuple(indices)
     originals = {i: [tuple(p) for p in collision_polygons[i]["points"]] for i in indices}
+    dx, dy = clamp_group_translation(originals, dx, dy)
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return False
     trials = {}
     for i in indices:
-        moved = try_translate_obstacle(originals[i], dx, dy)
+        moved = [(x + dx, y + dy) for x, y in originals[i]]
         if obstacle_overlaps_any(moved, *ignore)[0]:
             return False
         trials[i] = moved
@@ -837,6 +840,22 @@ def try_translate_obstacle(points, dx, dy):
     if polygon_fully_inside_store(points) and not polygon_fully_inside_store(new_points):
         return points
     return new_points
+
+
+def clamp_group_translation(originals, dx, dy):
+    """Rigid group move: clamp one dx/dy so every member stays inside the store."""
+    all_pts = [p for pts in originals.values() for p in pts]
+    if not all_pts:
+        return dx, dy
+    if not all(0 <= p[0] <= store_width_mm and 0 <= p[1] <= store_height_mm for p in all_pts):
+        return dx, dy
+    min_x = min(p[0] for p in all_pts)
+    max_x = max(p[0] for p in all_pts)
+    min_y = min(p[1] for p in all_pts)
+    max_y = max(p[1] for p in all_pts)
+    dx = max(-min_x, min(dx, store_width_mm - max_x))
+    dy = max(-min_y, min(dy, store_height_mm - max_y))
+    return dx, dy
 
 
 def rect_points_centered(cx, cy, length_mm, width_mm):
@@ -2291,11 +2310,12 @@ def draw_wall_size_dialog(surface):
 
 def go_to_store_home():
     global startup_active, store_picker_active, force_rebuild_startup, editing_canvas_size, editing_wall_size
-    global startup_buttons
+    global startup_buttons, wall_size_edit_index
     startup_active = True
     store_picker_active = False
     editing_canvas_size = False
     editing_wall_size = False
+    wall_size_edit_index = None
     force_rebuild_startup = False
     if current_layout_path:
         remember_store_summary(
