@@ -110,8 +110,9 @@ def main():
         "obstacles": build_obstacles(),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "draft_note": (
-            "v2 L-footprint: top wing 11×17, corridor to y=52.8, main 26×23.5 bottom-right. "
-            "Large void upper-right (back-of-house). Adjust doors/office/stairs in editor."
+            "v3 floor plan: 43×76.3 m L-footprint from architectural drawing. "
+            "Top wing 11×17 m, corridor 35.8 m, main sales 26×23.5 m, "
+            "office + stairs at bottom. Canvas size matches footprint — do not stretch to 60×90."
         ),
     }
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
