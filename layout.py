@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.7.8"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -344,38 +344,19 @@ def ungroup_selected_obstacles():
 def try_move_obstacles_batch(indices, dx, dy) -> bool:
     if not indices:
         return False
-    ignore = tuple(indices)
     originals = {i: [tuple(p) for p in collision_polygons[i]["points"]] for i in indices}
     dx, dy = clamp_group_translation(originals, dx, dy)
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         return False
-    trials = {}
     for i in indices:
         moved = [(x + dx, y + dy) for x, y in originals[i]]
-        trials[i] = moved
-    idx_list = list(indices)
-    for a in range(len(idx_list)):
-        for b in range(a + 1, len(idx_list)):
-            if polygons_interior_overlap(trials[idx_list[a]], trials[idx_list[b]]):
-                return False
-    for i, moved in trials.items():
-        if obstacle_overlaps_any(moved, *ignore)[0]:
-            return False
-    for i, pts in trials.items():
-        collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in pts]
+        collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in moved]
     return True
 
 
-def batch_has_internal_overlap(indices) -> bool:
-    idxs = list(indices)
-    for a in range(len(idxs)):
-        for b in range(a + 1, len(idxs)):
-            if polygons_interior_overlap(
-                collision_polygons[idxs[a]]["points"],
-                collision_polygons[idxs[b]]["points"],
-            ):
-                return True
-    return False
+def obstacle_overlap_hint(index) -> str | None:
+    _, other_name = obstacle_overlaps_any(collision_polygons[index]["points"], index)
+    return other_name or None
 
 
 def show_toast(msg, duration_ms=2500):
@@ -504,10 +485,6 @@ def paste_obstacle():
         new_ob["points"] = [(x + offset, y + offset) for x, y in new_ob["points"]]
         if not polygon_fully_inside_store(new_ob["points"]):
             new_ob["points"] = [(x - offset, y - offset) for x, y in new_ob["points"]]
-        overlaps, other_name = obstacle_overlaps_any(new_ob["points"])
-        if overlaps:
-            show_toast(f"粘贴会与「{other_name}」重叠，已跳过")
-            continue
         collision_polygons.append(new_ob)
         new_indices.append(len(collision_polygons) - 1)
     if not new_indices:
@@ -1039,10 +1016,6 @@ def resize_obstacle_rect(index, length_m, width_m) -> bool:
     new_points = clip_obstacle_points(new_points)
     if len(new_points) < 3 or polygon_area(new_points) <= 1.0:
         return False
-    overlaps, other_name = obstacle_overlaps_any(new_points, index)
-    if overlaps:
-        show_toast(f"尺寸修改后会与「{other_name}」重叠")
-        return False
     col["points"] = [[int(round(x)), int(round(y))] for x, y in new_points]
     return True
 
@@ -1436,11 +1409,9 @@ def magnet_snap_translate(points, ignore_idx):
 
 
 def try_move_obstacle(points, dx, dy, ignore_idx):
-    """平移 + 店内约束 + 磁吸；若与其它障碍重叠则保持原位。"""
+    """平移 + 店内约束 + 磁吸；允许与其它障碍暂时重叠。"""
     moved = try_translate_obstacle(points, dx, dy)
     moved = magnet_snap_translate(moved, ignore_idx)
-    if obstacle_overlaps_any(moved, ignore_idx)[0]:
-        return points
     return moved
 
 
@@ -1464,8 +1435,6 @@ def rotate_polygon_points(points, angle_deg, origin=None):
 def try_rotate_obstacle(points, angle_deg, ignore_idx):
     rotated = rotate_polygon_points(points, angle_deg)
     if polygon_fully_inside_store(points) and not polygon_fully_inside_store(rotated):
-        return points, False
-    if obstacle_overlaps_any(rotated, ignore_idx)[0]:
         return points, False
     return rotated, True
 
@@ -2543,14 +2512,19 @@ def apply_obstacle_edit_dialog():
     if rename_changed:
         col["name"] = name
     if size_changed and not resize_obstacle_rect(idx, length_m, width_m):
+        show_toast("尺寸无效或未与门店画布重叠")
+        cancel_obstacle_edit_dialog()
         return
     cancel_obstacle_edit_dialog()
+    overlap_name = obstacle_overlap_hint(idx)
     if rename_changed and size_changed:
-        show_toast(f"已更新为「{name}」 {length_m:g}×{width_m:g} m")
+        msg = f"已更新为「{name}」 {length_m:g}×{width_m:g} m"
+        show_toast(msg + (f"（与「{overlap_name}」重叠，可拖动调整）" if overlap_name else ""))
     elif rename_changed:
         show_toast("重命名成功")
     else:
-        show_toast(f"已更新尺寸为 {length_m:g}×{width_m:g} m")
+        msg = f"已更新尺寸为 {length_m:g}×{width_m:g} m"
+        show_toast(msg + (f"（与「{overlap_name}」重叠，可拖动调整）" if overlap_name else ""))
 
 
 def handle_obstacle_edit_dialog_action(action):
@@ -2650,7 +2624,7 @@ def draw_obstacle_edit_dialog(surface):
     title = "编辑墙体" if is_wall else "编辑障碍物"
     surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
     surface.blit(
-        FONT_SMALL.render("名称与尺寸可一并修改  |  Tab 切换  |  Enter 确认", True, C_MUTED),
+        FONT_SMALL.render("名称与尺寸可一并修改；允许暂时重叠，之后拖动调整", True, C_MUTED),
         (box.x + 20, box.y + 42),
     )
     surface.blit(FONT_SMALL.render("名称", True, C_TEXT), (box.x + 20, box.y + 72))
@@ -2719,10 +2693,6 @@ def apply_wall_obstacle():
     points = clip_obstacle_points(rect_points_centered(cx, cy, length_mm, width_mm))
     if len(points) < 3 or polygon_area(points) <= 1.0:
         show_toast("墙体与门店画布无有效重叠，请缩小尺寸")
-        return
-    overlaps, other_name = obstacle_overlaps_any(points)
-    if overlaps:
-        show_toast(f"墙体不能与「{other_name}」重叠")
         return
     push_undo()
     wall_count = sum(1 for c in collision_polygons if c.get("kind") == "wall" or str(c.get("name", "")).startswith("墙体"))
@@ -3012,17 +2982,16 @@ def finish_obstacle():
     if len(snapped) >= 3:
         clipped = clip_obstacle_points(snapped)
         if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
-            overlaps, other_name = obstacle_overlaps_any(clipped)
-            if overlaps:
-                show_toast(f"障碍不能与「{other_name}」重叠")
-            else:
-                push_undo()
-                collision_polygons.append({
-                    "name": f"障碍物{len(collision_polygons) + 1}",
-                    "points": clipped,
-                })
-                set_obstacle_selection([len(collision_polygons) - 1])
-                show_toast(f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）")
+            push_undo()
+            collision_polygons.append({
+                "name": f"障碍物{len(collision_polygons) + 1}",
+                "points": clipped,
+            })
+            idx = len(collision_polygons) - 1
+            set_obstacle_selection([idx])
+            overlap_name = obstacle_overlap_hint(idx)
+            msg = f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）"
+            show_toast(msg + (f"；与「{overlap_name}」重叠，可拖动调整" if overlap_name else ""))
         else:
             show_toast("障碍区域与门店画布无有效重叠，请重新绘制")
     else:
@@ -3054,9 +3023,6 @@ def rotate_selected(direction):
             rotated = rotate_polygon_points(originals[i], step, (ox, oy))
             if polygon_fully_inside_store(originals[i]) and not polygon_fully_inside_store(rotated):
                 show_toast("旋转后会移出门店画布")
-                return
-            if obstacle_overlaps_any(rotated, *ignore)[0]:
-                show_toast("旋转后会与其它障碍重叠")
                 return
             trials[i] = rotated
         for i, pts in trials.items():
@@ -4179,10 +4145,6 @@ def main():
                                 show_toast("障碍不能移出门店画布")
                                 reverted = True
                                 break
-                        if not reverted and len(selected_collisions) > 1 and batch_has_internal_overlap(selected_collisions):
-                            for j, pts in multi_drag_snapshots.items():
-                                collision_polygons[j]["points"] = [list(p) for p in pts]
-                            show_toast("障碍之间不能重叠，已恢复位置")
                     dragging_collision = False
                     collision_drag_snapshot = None
                     multi_drag_snapshots = {}
