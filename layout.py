@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.7"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -108,7 +108,8 @@ OBSTACLE_TOUCH_TOLERANCE_MM = 80  # 贴边容差：小于此间隙不算重叠
 ROTATE_FINE_DEG = 15
 ROTATE_COARSE_DEG = 90
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
-FURNITURE_IMAGE_MIN_SCALE = 0.032  # 放大到此比例以上时在家具上方显示产品图
+FURNITURE_IMAGE_MIN_PX = 10  # zoom out 时仍显示的最小缩略图边长（像素）
+FURNITURE_LABEL_MIN_SPAN_PX = 44  # 家具在屏幕上太小时隐藏名称，避免叠字
 UNDO_LIMIT = 40
 MARKER_SIZE_MM = 1000
 MARKER_HIT_PAD_PX = 14
@@ -1530,26 +1531,36 @@ class Furniture:
         pygame.draw.polygon(surface, border_c, pts, border_w)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        span = max(max(xs) - min(xs), max(ys) - min(ys))
 
-        if scale >= FURNITURE_IMAGE_MIN_SCALE:
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            span = max(max(xs) - min(xs), max(ys) - min(ys), 24)
-            img = furniture_image_surface(self.name, max_px=min(180, int(span * 0.9)))
+        if span >= 6:
+            fetch_px = max(32, min(180, int(max(span, FURNITURE_IMAGE_MIN_PX) * 0.95)))
+            img = furniture_image_surface(self.name, max_px=fetch_px, family=self.product_family)
             if img is not None:
-                img_rect = img.get_rect(midbottom=(int(cx), int(cy - 6)))
-                shadow_rect = img_rect.inflate(8, 8)
-                pygame.draw.rect(surface, (255, 255, 255), shadow_rect, border_radius=6)
-                pygame.draw.rect(surface, C_BORDER, shadow_rect, 1, border_radius=6)
+                display_w = max(FURNITURE_IMAGE_MIN_PX, min(180, int(span * 0.88)))
+                aspect = img.get_height() / max(img.get_width(), 1)
+                display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
+                if img.get_width() != display_w or img.get_height() != display_h:
+                    img = pygame.transform.smoothscale(img, (display_w, display_h))
+                img_rect = img.get_rect(center=(int(cx), int(cy)))
+                if display_w >= 20:
+                    shadow_rect = img_rect.inflate(6, 6)
+                    pygame.draw.rect(surface, (255, 255, 255), shadow_rect, border_radius=4)
+                    pygame.draw.rect(surface, C_BORDER, shadow_rect, 1, border_radius=4)
                 surface.blit(img, img_rect)
 
-        name_surf = FONT_MARK.render(self.name, True, C_TEXT)
-        roi_surf = FONT_MARK.render(f"ROI {self.roi:.1f}", True, C_MUTED)
-        name_rect = name_surf.get_rect(midbottom=(cx, cy - 2))
-        roi_rect = roi_surf.get_rect(midtop=(cx, cy + 2))
-        surface.blit(name_surf, name_rect)
-        surface.blit(roi_surf, roi_rect)
-        self._label_rect = name_rect.union(roi_rect).inflate(LABEL_HIT_PAD * 2, LABEL_HIT_PAD * 2)
+        if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
+            name_surf = FONT_MARK.render(self.name, True, C_TEXT)
+            roi_surf = FONT_MARK.render(f"ROI {self.roi:.1f}", True, C_MUTED)
+            name_rect = name_surf.get_rect(midbottom=(cx, cy - 2))
+            roi_rect = roi_surf.get_rect(midtop=(cx, cy + 2))
+            surface.blit(name_surf, name_rect)
+            surface.blit(roi_surf, roi_rect)
+            self._label_rect = name_rect.union(roi_rect).inflate(LABEL_HIT_PAD * 2, LABEL_HIT_PAD * 2)
+        else:
+            self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, 16, 16)
 
     def is_label_clicked(self, mx, my):
         rect = getattr(self, "_label_rect", None)
@@ -2202,11 +2213,11 @@ def prefetch_template_list_images(items):
 
 
 def prefetch_furniture_images():
-    if scale < FURNITURE_IMAGE_MIN_SCALE:
-        return
     urls = []
     for furn in placed_furnitures:
         url = image_url_for_product(furn.name)
+        if not url and furn.product_family:
+            url = image_url_for_product(furn.product_family)
         if url:
             urls.append(url)
     if urls:
@@ -2219,13 +2230,14 @@ def prefetch_furniture_images():
 
 
 def check_collision(furniture, obstacles):
-    store_poly = store_rect_points()
+    """家具与粉色障碍区不可重叠；墙体允许贴边摆放（墙有厚度，若参与碰撞会「弹开」）。"""
     furn_pts = furniture.get_rotated_points()
-    for px, py in furn_pts:
-        if not point_in_poly(px, py, store_poly):
-            return True
+    if not polygon_fully_inside_store(furn_pts):
+        return True
     for col in obstacles:
-        if polygons_overlap(furn_pts, col["points"]):
+        if obstacle_is_wall(col):
+            continue
+        if polygons_interior_overlap(furn_pts, col["points"]):
             return True
     return False
 
