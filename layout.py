@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -232,6 +232,8 @@ obstacle_edit_buttons = {}
 obstacle_edit_name_rect = None
 obstacle_edit_length_rect = None
 obstacle_edit_width_rect = None
+obstacle_edit_show_label = False
+obstacle_edit_show_label_rect = None
 canvas_last_click_time = 0
 canvas_last_click_pos = None
 DOUBLE_CLICK_MS = 450
@@ -2641,11 +2643,21 @@ def start_edit_obstacle_size():
 def build_obstacle_edit_dialog_buttons():
     cx = SCREEN_WIDTH // 2
     bw, bh = 88, 34
-    y = SCREEN_HEIGHT // 2 + 88
+    y = SCREEN_HEIGHT // 2 + 118
     return {
         "ok": Button((cx - bw - 6, y, bw, bh), "确定", "obstacle_edit_ok", primary=True),
         "cancel": Button((cx + 6, y, bw, bh), "取消", "obstacle_edit_cancel"),
     }
+
+
+def draw_inline_checkbox(surface, rect, checked, label):
+    pygame.draw.rect(surface, (255, 255, 255), rect, border_radius=4)
+    pygame.draw.rect(surface, C_ACCENT if checked else C_BORDER, rect, 2, border_radius=4)
+    if checked:
+        inner = rect.inflate(-8, -8)
+        pygame.draw.rect(surface, C_ACCENT, inner, border_radius=2)
+    text = FONT_SMALL.render(label, True, C_TEXT)
+    surface.blit(text, (rect.right + 10, rect.centery - text.get_height() // 2))
 
 
 def _sync_obstacle_edit_ime():
@@ -2661,7 +2673,7 @@ def _sync_obstacle_edit_ime():
 
 def cancel_obstacle_edit_dialog():
     global editing_obstacle_dialog, obstacle_edit_index, obstacle_edit_name, obstacle_edit_length
-    global obstacle_edit_width, obstacle_edit_focus, obstacle_edit_composition
+    global obstacle_edit_width, obstacle_edit_focus, obstacle_edit_composition, obstacle_edit_show_label
     editing_obstacle_dialog = False
     obstacle_edit_index = None
     obstacle_edit_name = ""
@@ -2669,6 +2681,7 @@ def cancel_obstacle_edit_dialog():
     obstacle_edit_width = ""
     obstacle_edit_focus = "name"
     obstacle_edit_composition = ""
+    obstacle_edit_show_label = False
     try:
         pygame.key.stop_text_input()
     except Exception:
@@ -2678,6 +2691,7 @@ def cancel_obstacle_edit_dialog():
 def start_edit_obstacle_dialog(index=None):
     global editing_obstacle_dialog, obstacle_edit_index, obstacle_edit_name, obstacle_edit_length
     global obstacle_edit_width, obstacle_edit_focus, obstacle_edit_composition, obstacle_edit_buttons
+    global obstacle_edit_show_label
     if index is None:
         if len(selected_collisions) != 1:
             show_toast("请单选一个长方形障碍或墙体")
@@ -2700,6 +2714,7 @@ def start_edit_obstacle_dialog(index=None):
     obstacle_edit_width = f"{width_mm / 1000:g}"
     obstacle_edit_focus = "name"
     obstacle_edit_composition = ""
+    obstacle_edit_show_label = bool(collision_polygons[index].get("user_named"))
     obstacle_edit_buttons = build_obstacle_edit_dialog_buttons()
     set_obstacle_selection([index])
     _sync_obstacle_edit_ime()
@@ -2707,7 +2722,7 @@ def start_edit_obstacle_dialog(index=None):
 
 
 def apply_obstacle_edit_dialog():
-    global editing_obstacle_dialog, obstacle_edit_index
+    global editing_obstacle_dialog, obstacle_edit_index, obstacle_edit_show_label
     if obstacle_edit_index is None or obstacle_edit_index >= len(collision_polygons):
         cancel_obstacle_edit_dialog()
         return
@@ -2736,13 +2751,17 @@ def apply_obstacle_edit_dialog():
     old_width_m = metrics[3] / 1000 if metrics else 0
     rename_changed = name != old_name
     size_changed = abs(length_m - old_length_m) > 0.001 or abs(width_m - old_width_m) > 0.001
-    if not rename_changed and not size_changed:
+    label_changed = bool(col.get("user_named")) != obstacle_edit_show_label
+    if not rename_changed and not size_changed and not label_changed:
         cancel_obstacle_edit_dialog()
         return
     push_undo()
     if rename_changed:
         col["name"] = name
+    if obstacle_edit_show_label:
         col["user_named"] = True
+    else:
+        col.pop("user_named", None)
     if size_changed and not resize_obstacle_rect(idx, length_m, width_m):
         show_toast("尺寸无效或未与门店画布重叠")
         cancel_obstacle_edit_dialog()
@@ -2753,6 +2772,8 @@ def apply_obstacle_edit_dialog():
         show_toast(msg)
     elif rename_changed:
         show_toast("重命名成功")
+    elif label_changed:
+        show_toast("已在画布显示名称" if obstacle_edit_show_label else "已隐藏画布名称")
     else:
         show_toast(f"已更新尺寸为 {length_m:g}×{width_m:g} m")
 
@@ -2765,8 +2786,13 @@ def handle_obstacle_edit_dialog_action(action):
 
 
 def handle_obstacle_edit_dialog_click(mx, my):
-    global obstacle_edit_focus, obstacle_edit_length, obstacle_edit_width
+    global obstacle_edit_focus, obstacle_edit_length, obstacle_edit_width, obstacle_edit_show_label
     mx, my = ui_pos((mx, my))
+    if obstacle_edit_show_label_rect and obstacle_edit_show_label_rect.collidepoint(mx, my):
+        obstacle_edit_show_label = not obstacle_edit_show_label
+        obstacle_edit_focus = "label"
+        _sync_obstacle_edit_ime()
+        return True
     if obstacle_edit_name_rect and obstacle_edit_name_rect.collidepoint(mx, my):
         obstacle_edit_focus = "name"
         _sync_obstacle_edit_ime()
@@ -2885,21 +2911,23 @@ def handle_obstacle_edit_dialog_key(event):
 
 def draw_obstacle_edit_dialog(surface):
     global obstacle_edit_name_rect, obstacle_edit_length_rect, obstacle_edit_width_rect
+    global obstacle_edit_show_label_rect
     if not editing_obstacle_dialog or obstacle_edit_index is None:
         obstacle_edit_name_rect = obstacle_edit_length_rect = obstacle_edit_width_rect = None
+        obstacle_edit_show_label_rect = None
         return
     col = collision_polygons[obstacle_edit_index]
     is_wall = obstacle_is_wall(col)
     overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
     overlay.fill((15, 23, 42, 120))
     surface.blit(overlay, (0, 0))
-    box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 130, 440, 270)
+    box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 130, 440, 300)
     pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
     title = "编辑墙体" if is_wall else "编辑障碍物"
     surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
     surface.blit(
-        FONT_SMALL.render("重命名后画布才显示名称；选中时始终显示标签", True, C_MUTED),
+        FONT_SMALL.render("勾选后在画布显示名称；单击选中时仍会临时显示", True, C_MUTED),
         (box.x + 20, box.y + 42),
     )
     surface.blit(FONT_SMALL.render("名称", True, C_TEXT), (box.x + 20, box.y + 72))
@@ -2927,6 +2955,9 @@ def draw_obstacle_edit_dialog(surface):
         pygame.draw.rect(surface, (248, 250, 252), rect, border_radius=8)
         pygame.draw.rect(surface, C_ACCENT if focused else C_BORDER, rect, 2 if focused else 1, border_radius=8)
         surface.blit(FONT_BODY.render(text + ("|" if focused else ""), True, C_TEXT), (rect.x + 10, rect.y + 8))
+    label_text = "在画布显示名称"
+    obstacle_edit_show_label_rect = pygame.Rect(box.x + 20, box.y + 206, 22, 22)
+    draw_inline_checkbox(surface, obstacle_edit_show_label_rect, obstacle_edit_show_label, label_text)
     for btn in obstacle_edit_buttons.values():
         btn.draw(surface)
 
