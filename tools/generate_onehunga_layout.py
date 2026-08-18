@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 OUT = os.path.join(ROOT, "data", "layouts", "onehunga.json")
+TEMPLATE_OUT = os.path.join(ROOT, "data", "layouts", "_templates", "onehunga.json")
 
 WALL_T = 200
 DOOR = 1400
+LAYOUT_VERSION = 4
 
 
 def m(v: float) -> int:
@@ -63,7 +66,6 @@ def split_v(name: str, x: int, y1: int, y2: int, gap_y: int, gap: int = DOOR) ->
 
 
 def build_obstacles() -> list[dict]:
-    # Plan constants (mm)
     x_top = m(11)
     x_corridor = m(17)
     x_right = m(43)
@@ -74,15 +76,11 @@ def build_obstacles() -> list[dict]:
 
     obstacles: list[dict] = []
 
-    # --- Non-sales voids (outside L-footprint inside bbox) ---
-    obstacles.append(void_rect("外部-顶右缺口", x_top, 0, x_right, y_top))
-    obstacles.append(void_rect("外部-上右后场", x_corridor, y_top, x_right, y_main))
-
-    # --- Fixed interior non-sales ---
+    obstacles.append(void_rect("外部空地-顶右", x_top, 0, x_right, y_top))
+    obstacles.append(void_rect("外部空地-上右后场", x_corridor, y_top, x_right, y_main))
     obstacles.append(void_rect("Office", 0, y_office, m(26), y_bottom))
     obstacles.append(void_rect("楼梯间", x_right - m(5), y_office, x_right, y_bottom))
 
-    # --- Exterior walls along L-shaped footprint ---
     obstacles.append(wall_h("外墙-顶", 0, x_top, 0))
     obstacles.append(wall_v("外墙-顶翼东", x_top - WALL_T, 0, y_top))
     obstacles.append(wall_h("外墙-翼底", 0, x_corridor, y_top - WALL_T))
@@ -92,33 +90,43 @@ def build_obstacles() -> list[dict]:
     obstacles.extend(split_v("外墙-右", x_right - WALL_T, y_main, y_bottom, (y_main + y_bottom) // 2))
     obstacles.append(wall_h("外墙-底", 0, x_right, y_bottom - WALL_T))
 
-    # --- Interior partitions (from plan) ---
     obstacles.extend(split_v("内墙-左室", x_corridor - WALL_T, y_top, y_top + m(23.5), y_top + m(12)))
     obstacles.extend(split_h("内墙-Office上", m(11.2), m(26), y_office - WALL_T, m(18)))
 
     return obstacles
 
 
-def main():
+def build_layout_data() -> dict:
     width_mm = m(43)
     height_mm = m(76.3)
-    data = {
+    return {
         "name": "Onehunga店",
         "store_slug": "onehunga",
+        "layout_version": LAYOUT_VERSION,
         "store": {"width_mm": width_mm, "height_mm": height_mm},
         "furnitures": [],
         "obstacles": build_obstacles(),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "draft_note": (
-            "v3 floor plan: 43×76.3 m L-footprint from architectural drawing. "
-            "Top wing 11×17 m, corridor 35.8 m, main sales 26×23.5 m, "
-            "office + stairs at bottom. Canvas size matches footprint — do not stretch to 60×90."
+            "v4 floor plan: 43×76.3 m L-footprint. Top wing 11×17 m, corridor 35.8 m, "
+            "main sales 26×23.5 m. Use 恢复默认布局 if canvas shows 60×90 or walls overlap."
         ),
     }
+
+
+def main():
+    data = build_layout_data()
+    width_mm = data["store"]["width_mm"]
+    height_mm = data["store"]["height_mm"]
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    os.makedirs(os.path.dirname(TEMPLATE_OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"Wrote {OUT} ({width_mm / 1000:g}×{height_mm / 1000:g} m, {len(data['obstacles'])} obstacles)")
+    shutil.copy2(OUT, TEMPLATE_OUT)
+    print(
+        f"Wrote {OUT} and {TEMPLATE_OUT} "
+        f"({width_mm / 1000:g}×{height_mm / 1000:g} m, {len(data['obstacles'])} obstacles)"
+    )
 
 
 if __name__ == "__main__":
