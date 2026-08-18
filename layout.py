@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.8"
+APP_VERSION = "1.7.9"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -144,6 +144,7 @@ def init_display():
     pygame.mouse.set_visible(True)
     pygame.event.set_grab(False)
     pygame.event.clear()
+    pygame.key.set_repeat(400, 35)
 
 
 def handle_window_resize(w, h):
@@ -235,6 +236,8 @@ canvas_last_click_pos = None
 DOUBLE_CLICK_MS = 450
 pending_reset_confirm = False
 reset_confirm_buttons = {}
+_backspace_hold_start = 0
+_backspace_last_delete = 0
 force_rebuild_startup = False
 _store_summary_cache = {}
 _pending_save_snapshot = None
@@ -348,14 +351,39 @@ def try_move_obstacles_batch(indices, dx, dy) -> bool:
     dx, dy = clamp_group_translation(originals, dx, dy)
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         return False
+    trials = {}
     for i in indices:
-        moved = [(x + dx, y + dy) for x, y in originals[i]]
-        collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in moved]
+        trials[i] = [(x + dx, y + dy) for x, y in originals[i]]
+    zone_indices = [i for i in indices if obstacle_is_zone(collision_polygons[i])]
+    for a in range(len(zone_indices)):
+        for b in range(a + 1, len(zone_indices)):
+            ia, ib = zone_indices[a], zone_indices[b]
+            if polygons_interior_overlap(trials[ia], trials[ib]):
+                return False
+    for i in zone_indices:
+        if zone_overlaps_any(trials[i], *indices)[0]:
+            return False
+    for i, pts in trials.items():
+        collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in pts]
     return True
 
 
-def obstacle_overlap_hint(index) -> str | None:
-    _, other_name = obstacle_overlaps_any(collision_polygons[index]["points"], index)
+def batch_has_zone_overlap(indices) -> bool:
+    idxs = [i for i in indices if obstacle_is_zone(collision_polygons[i])]
+    for a in range(len(idxs)):
+        for b in range(a + 1, len(idxs)):
+            if polygons_interior_overlap(
+                collision_polygons[idxs[a]]["points"],
+                collision_polygons[idxs[b]]["points"],
+            ):
+                return True
+    return False
+
+
+def zone_overlap_hint(index) -> str | None:
+    if not obstacle_is_zone(collision_polygons[index]):
+        return None
+    _, other_name = zone_overlaps_any(collision_polygons[index]["points"], index)
     return other_name or None
 
 
@@ -485,6 +513,9 @@ def paste_obstacle():
         new_ob["points"] = [(x + offset, y + offset) for x, y in new_ob["points"]]
         if not polygon_fully_inside_store(new_ob["points"]):
             new_ob["points"] = [(x - offset, y - offset) for x, y in new_ob["points"]]
+        if obstacle_is_zone(new_ob) and zone_overlaps_any(new_ob["points"])[0]:
+            show_toast("粘贴会与其它障碍区域重叠，已跳过")
+            continue
         collision_polygons.append(new_ob)
         new_indices.append(len(collision_polygons) - 1)
     if not new_indices:
@@ -1016,6 +1047,11 @@ def resize_obstacle_rect(index, length_m, width_m) -> bool:
     new_points = clip_obstacle_points(new_points)
     if len(new_points) < 3 or polygon_area(new_points) <= 1.0:
         return False
+    if obstacle_is_zone(col):
+        overlaps, other_name = zone_overlaps_any(new_points, index)
+        if overlaps:
+            show_toast(f"尺寸修改后会与障碍「{other_name}」重叠")
+            return False
     col["points"] = [[int(round(x)), int(round(y))] for x, y in new_points]
     return True
 
@@ -1167,6 +1203,25 @@ def _inset_polygon(points, inset_mm=OBSTACLE_TOUCH_TOLERANCE_MM):
 def polygons_interior_overlap(poly_a, poly_b):
     """仅检测面积重叠，贴边相邻不算重叠。"""
     return polygons_overlap(_inset_polygon(poly_a), _inset_polygon(poly_b))
+
+
+def obstacle_is_wall(col) -> bool:
+    return col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
+
+
+def obstacle_is_zone(col) -> bool:
+    return not obstacle_is_wall(col)
+
+
+def zone_overlaps_any(points, *ignore_indices):
+    """粉色障碍区域之间不可重叠；与墙体允许贴边/重叠。"""
+    ignore = set(ignore_indices)
+    for i, col in enumerate(collision_polygons):
+        if i in ignore or not obstacle_is_zone(col):
+            continue
+        if polygons_interior_overlap(points, col["points"]):
+            return True, col.get("name", "")
+    return False, ""
 
 
 def obstacle_overlaps_any(points, *ignore_indices):
@@ -2516,15 +2571,13 @@ def apply_obstacle_edit_dialog():
         cancel_obstacle_edit_dialog()
         return
     cancel_obstacle_edit_dialog()
-    overlap_name = obstacle_overlap_hint(idx)
     if rename_changed and size_changed:
         msg = f"已更新为「{name}」 {length_m:g}×{width_m:g} m"
-        show_toast(msg + (f"（与「{overlap_name}」重叠，可拖动调整）" if overlap_name else ""))
+        show_toast(msg)
     elif rename_changed:
         show_toast("重命名成功")
     else:
-        msg = f"已更新尺寸为 {length_m:g}×{width_m:g} m"
-        show_toast(msg + (f"（与「{overlap_name}」重叠，可拖动调整）" if overlap_name else ""))
+        show_toast(f"已更新尺寸为 {length_m:g}×{width_m:g} m")
 
 
 def handle_obstacle_edit_dialog_action(action):
@@ -2571,6 +2624,56 @@ def handle_obstacle_edit_text_event(event):
     return False
 
 
+def _delete_obstacle_edit_char():
+    global obstacle_edit_name, obstacle_edit_composition, obstacle_edit_length, obstacle_edit_width
+    if obstacle_edit_focus == "name":
+        if obstacle_edit_composition:
+            obstacle_edit_composition = obstacle_edit_composition[:-1]
+        elif obstacle_edit_name:
+            obstacle_edit_name = obstacle_edit_name[:-1]
+    elif obstacle_edit_focus == "length" and obstacle_edit_length:
+        obstacle_edit_length = obstacle_edit_length[:-1]
+    elif obstacle_edit_focus == "width" and obstacle_edit_width:
+        obstacle_edit_width = obstacle_edit_width[:-1]
+
+
+def _delete_rename_char():
+    global input_text, rename_composition
+    if rename_composition:
+        rename_composition = rename_composition[:-1]
+    elif input_text:
+        input_text = input_text[:-1]
+
+
+def _note_backspace_pressed():
+    global _backspace_hold_start, _backspace_last_delete
+    now = pygame.time.get_ticks()
+    _backspace_hold_start = now
+    _backspace_last_delete = now
+
+
+def poll_dialog_backspace_repeat():
+    global _backspace_hold_start, _backspace_last_delete
+    if not (editing_obstacle_dialog or renaming_store):
+        _backspace_hold_start = 0
+        return
+    if not pygame.key.get_pressed()[pygame.K_BACKSPACE]:
+        _backspace_hold_start = 0
+        return
+    now = pygame.time.get_ticks()
+    if _backspace_hold_start == 0:
+        return
+    if now - _backspace_hold_start < 400:
+        return
+    if _backspace_last_delete and now - _backspace_last_delete < 35:
+        return
+    _backspace_last_delete = now
+    if editing_obstacle_dialog:
+        _delete_obstacle_edit_char()
+    else:
+        _delete_rename_char()
+
+
 def handle_obstacle_edit_dialog_key(event):
     global obstacle_edit_name, obstacle_edit_length, obstacle_edit_width
     global obstacle_edit_focus, obstacle_edit_composition
@@ -2584,13 +2687,8 @@ def handle_obstacle_edit_dialog_key(event):
         obstacle_edit_focus = order[i]
         _sync_obstacle_edit_ime()
     elif event.key == pygame.K_BACKSPACE:
-        if obstacle_edit_focus == "name":
-            obstacle_edit_name = obstacle_edit_name[:-1]
-            obstacle_edit_composition = ""
-        elif obstacle_edit_focus == "length":
-            obstacle_edit_length = obstacle_edit_length[:-1]
-        else:
-            obstacle_edit_width = obstacle_edit_width[:-1]
+        _note_backspace_pressed()
+        _delete_obstacle_edit_char()
     elif event.unicode:
         ch = event.unicode
         if obstacle_edit_focus == "name":
@@ -2624,7 +2722,7 @@ def draw_obstacle_edit_dialog(surface):
     title = "编辑墙体" if is_wall else "编辑障碍物"
     surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
     surface.blit(
-        FONT_SMALL.render("名称与尺寸可一并修改；允许暂时重叠，之后拖动调整", True, C_MUTED),
+        FONT_SMALL.render("名称与尺寸可一并修改；障碍之间不可重叠，与墙体可贴边", True, C_MUTED),
         (box.x + 20, box.y + 42),
     )
     surface.blit(FONT_SMALL.render("名称", True, C_TEXT), (box.x + 20, box.y + 72))
@@ -2982,16 +3080,18 @@ def finish_obstacle():
     if len(snapped) >= 3:
         clipped = clip_obstacle_points(snapped)
         if len(clipped) >= 3 and polygon_area(clipped) > 1.0:
-            push_undo()
-            collision_polygons.append({
-                "name": f"障碍物{len(collision_polygons) + 1}",
-                "points": clipped,
-            })
-            idx = len(collision_polygons) - 1
-            set_obstacle_selection([idx])
-            overlap_name = obstacle_overlap_hint(idx)
-            msg = f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）"
-            show_toast(msg + (f"；与「{overlap_name}」重叠，可拖动调整" if overlap_name else ""))
+            overlaps, other_name = zone_overlaps_any(clipped)
+            if overlaps:
+                show_toast(f"障碍不能与「{other_name}」重叠")
+            else:
+                push_undo()
+                collision_polygons.append({
+                    "name": f"障碍物{len(collision_polygons) + 1}",
+                    "points": clipped,
+                })
+                idx = len(collision_polygons) - 1
+                set_obstacle_selection([idx])
+                show_toast(f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）")
         else:
             show_toast("障碍区域与门店画布无有效重叠，请重新绘制")
     else:
@@ -3139,8 +3239,8 @@ def handle_rename_dialog_key(event):
     elif event.key == pygame.K_ESCAPE:
         cancel_rename_dialog()
     elif event.key == pygame.K_BACKSPACE:
-        input_text = input_text[:-1]
-        rename_composition = ""
+        _note_backspace_pressed()
+        _delete_rename_char()
 
 
 def start_rename_obstacle():
@@ -3280,10 +3380,6 @@ def obstacle_screen_rect(col) -> pygame.Rect:
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     return pygame.Rect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
-
-
-def obstacle_is_wall(col) -> bool:
-    return col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
 
 
 def obstacle_length_mm(col) -> float:
@@ -4144,6 +4240,10 @@ def main():
                                 show_toast("障碍不能移出门店画布")
                                 reverted = True
                                 break
+                        if not reverted and batch_has_zone_overlap(selected_collisions):
+                            for j, pts in multi_drag_snapshots.items():
+                                collision_polygons[j]["points"] = [list(p) for p in pts]
+                            show_toast("障碍区域之间不能重叠，已恢复位置")
                     dragging_collision = False
                     collision_drag_snapshot = None
                     multi_drag_snapshots = {}
@@ -4276,6 +4376,7 @@ def main():
             _catalog_refresh_ready = False
             startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
         clock.tick(60)
+        poll_dialog_backspace_repeat()
 
     pygame.quit()
     sys.exit()
