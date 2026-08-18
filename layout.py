@@ -96,13 +96,14 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.7"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
 WALL_LABEL_NAME_MIN_PX = 68  # 足够宽时显示名称 + 长度
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
+OBSTACLE_TOUCH_TOLERANCE_MM = 80  # 贴边容差：小于此间隙不算重叠
 ROTATE_FINE_DEG = 15
 ROTATE_COARSE_DEG = 90
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
@@ -232,6 +233,8 @@ obstacle_edit_width_rect = None
 canvas_last_click_time = 0
 canvas_last_click_pos = None
 DOUBLE_CLICK_MS = 450
+pending_reset_confirm = False
+reset_confirm_buttons = {}
 force_rebuild_startup = False
 _store_summary_cache = {}
 _pending_save_snapshot = None
@@ -349,12 +352,30 @@ def try_move_obstacles_batch(indices, dx, dy) -> bool:
     trials = {}
     for i in indices:
         moved = [(x + dx, y + dy) for x, y in originals[i]]
+        trials[i] = moved
+    idx_list = list(indices)
+    for a in range(len(idx_list)):
+        for b in range(a + 1, len(idx_list)):
+            if polygons_interior_overlap(trials[idx_list[a]], trials[idx_list[b]]):
+                return False
+    for i, moved in trials.items():
         if obstacle_overlaps_any(moved, *ignore)[0]:
             return False
-        trials[i] = moved
     for i, pts in trials.items():
         collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in pts]
     return True
+
+
+def batch_has_internal_overlap(indices) -> bool:
+    idxs = list(indices)
+    for a in range(len(idxs)):
+        for b in range(a + 1, len(idxs)):
+            if polygons_interior_overlap(
+                collision_polygons[idxs[a]]["points"],
+                collision_polygons[idxs[b]]["points"],
+            ):
+                return True
+    return False
 
 
 def show_toast(msg, duration_ms=2500):
@@ -398,6 +419,9 @@ def capture_layout_state():
     return {
         "collision_polygons": copy.deepcopy(collision_polygons),
         "placed_furnitures": _furniture_snapshot(placed_furnitures),
+        "store_width_mm": store_width_mm,
+        "store_height_mm": store_height_mm,
+        "store_name": store_name,
     }
 
 
@@ -415,13 +439,16 @@ def clear_undo():
 
 def undo_layout():
     global collision_polygons, placed_furnitures, selected_collision, selected_collisions
-    global selected_furniture, selected_feature
+    global selected_furniture, selected_feature, store_width_mm, store_height_mm, store_name
     if not _undo_stack:
         show_toast("无可撤销的操作")
         return
     state = _undo_stack.pop()
     collision_polygons = state["collision_polygons"]
     placed_furnitures = _furnitures_from_snapshot(state["placed_furnitures"])
+    store_width_mm = state.get("store_width_mm", store_width_mm)
+    store_height_mm = state.get("store_height_mm", store_height_mm)
+    store_name = state.get("store_name", store_name)
     clear_obstacle_selection()
     selected_furniture = selected_feature = None
     show_toast("已撤销")
@@ -477,8 +504,17 @@ def paste_obstacle():
         new_ob["points"] = [(x + offset, y + offset) for x, y in new_ob["points"]]
         if not polygon_fully_inside_store(new_ob["points"]):
             new_ob["points"] = [(x - offset, y - offset) for x, y in new_ob["points"]]
+        overlaps, other_name = obstacle_overlaps_any(new_ob["points"])
+        if overlaps:
+            show_toast(f"粘贴会与「{other_name}」重叠，已跳过")
+            continue
         collision_polygons.append(new_ob)
         new_indices.append(len(collision_polygons) - 1)
+    if not new_indices:
+        if _undo_stack:
+            _undo_stack.pop()
+        show_toast("粘贴失败：与现有障碍重叠")
+        return
     set_obstacle_selection(new_indices, toast_msg=f"已粘贴 {len(new_indices)} 项")
 
 
@@ -601,6 +637,55 @@ def fit_view_to_store():
     canvas_cy = SCREEN_HEIGHT / 2
     offset_x = store_cx - (canvas_cx - SIDEBAR_WIDTH) / scale
     offset_y = store_cy - canvas_cy / scale
+
+
+def viewport_world_center():
+    return screen_to_world(SIDEBAR_WIDTH + CANVAS_RECT.width / 2, SCREEN_HEIGHT / 2)
+
+
+def furniture_shape_centroid(furn):
+    return (
+        sum(p[0] for p in furn.points) / len(furn.points),
+        sum(p[1] for p in furn.points) / len(furn.points),
+    )
+
+
+def furniture_overlaps_zone(furn) -> bool:
+    pts = furn.get_rotated_points()
+    for col in collision_polygons:
+        if obstacle_is_wall(col):
+            continue
+        if polygons_interior_overlap(pts, col["points"]):
+            return True
+    return False
+
+
+def place_furniture_at_world(furn, wx, wy):
+    local_cx, local_cy = furniture_shape_centroid(furn)
+    furn.x = wx - local_cx
+    furn.y = wy - local_cy
+
+
+def find_clear_furniture_position(furn, wx, wy):
+    place_furniture_at_world(furn, wx, wy)
+    if polygon_fully_inside_store(furn.get_rotated_points()) and not furniture_overlaps_zone(furn):
+        return
+    step = 800
+    for ring in range(1, 20):
+        for dx, dy in (
+            (step * ring, 0),
+            (-step * ring, 0),
+            (0, step * ring),
+            (0, -step * ring),
+            (step * ring, step * ring),
+            (-step * ring, step * ring),
+            (step * ring, -step * ring),
+            (-step * ring, -step * ring),
+        ):
+            place_furniture_at_world(furn, wx + dx, wy + dy)
+            if polygon_fully_inside_store(furn.get_rotated_points()) and not furniture_overlaps_zone(furn):
+                return
+    place_furniture_at_world(furn, wx, wy)
 
 
 def snap_world_mm(value):
@@ -1089,17 +1174,26 @@ def polygons_overlap(poly_a, poly_b):
     return False
 
 
-def _shrink_polygon(points, factor=0.985):
+def _inset_polygon(points, inset_mm=OBSTACLE_TOUCH_TOLERANCE_MM):
     if len(points) < 3:
         return points
     cx = sum(p[0] for p in points) / len(points)
     cy = sum(p[1] for p in points) / len(points)
-    return [(cx + (x - cx) * factor, cy + (y - cy) * factor) for x, y in points]
+    inset_pts = []
+    for x, y in points:
+        dx, dy = cx - x, cy - y
+        dist = math.hypot(dx, dy)
+        if dist < 1:
+            inset_pts.append((x, y))
+            continue
+        move = min(inset_mm, dist * 0.45)
+        inset_pts.append((x + dx / dist * move, y + dy / dist * move))
+    return inset_pts
 
 
 def polygons_interior_overlap(poly_a, poly_b):
     """仅检测面积重叠，贴边相邻不算重叠。"""
-    return polygons_overlap(_shrink_polygon(poly_a), _shrink_polygon(poly_b))
+    return polygons_overlap(_inset_polygon(poly_a), _inset_polygon(poly_b))
 
 
 def obstacle_overlaps_any(points, *ignore_indices):
@@ -1879,7 +1973,7 @@ def refresh_catalog_cache_async():
     _catalog_refresh_thread.start()
 
 
-def load_layout(filepath):
+def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path
     with open(filepath, "r", encoding="utf-8") as f:
@@ -1916,31 +2010,97 @@ def load_layout(filepath):
         if store_width_mm != exp_w or store_height_mm != exp_h:
             show_toast(
                 f"画布尺寸与默认户型不符（应为 {exp_w / 1000:g}×{exp_h / 1000:g} m），"
-                f"请点侧栏「恢复默认布局」"
+                f"请点侧栏「恢复默认」"
             )
-    clear_undo()
+    if not keep_undo:
+        clear_undo()
 
 
-def reset_catalog_layout():
+def build_reset_confirm_buttons():
+    cx = SCREEN_WIDTH // 2
+    bw, bh = 100, 34
+    y = SCREEN_HEIGHT // 2 + 36
+    return {
+        "ok": Button((cx - bw - 6, y, bw, bh), "确认恢复", "reset_ok", danger=True),
+        "cancel": Button((cx + 6, y, bw, bh), "取消", "reset_cancel"),
+    }
+
+
+def cancel_reset_confirm():
+    global pending_reset_confirm
+    pending_reset_confirm = False
+
+
+def start_reset_catalog_layout():
+    global pending_reset_confirm, reset_confirm_buttons
     slug = catalog_slug_for_path(current_layout_path)
     if not slug:
         show_toast("仅内置门店可恢复默认布局")
         return
     tpl = template_path_for_slug(slug)
-    path = layout_path_for_slug(slug)
     if not os.path.isfile(tpl):
         show_toast("未找到默认模板，请运行 tools/generate_onehunga_layout.py")
         return
+    pending_reset_confirm = True
+    reset_confirm_buttons = build_reset_confirm_buttons()
+
+
+def apply_reset_catalog_layout():
+    global pending_reset_confirm
+    slug = catalog_slug_for_path(current_layout_path)
+    tpl = template_path_for_slug(slug)
+    path = layout_path_for_slug(slug)
+    pending_reset_confirm = False
     flush_deferred_save(block=True)
+    push_undo()
     try:
         shutil.copy2(tpl, path)
     except OSError as exc:
         show_toast(f"恢复失败: {exc}")
         return
-    load_layout(path)
+    load_layout(path, keep_undo=True)
     fit_view_to_store()
     remember_last_store(path)
-    show_toast("已恢复默认布局")
+    show_toast("已恢复默认布局，可按 Ctrl+Z 撤销")
+
+
+def handle_reset_confirm_click(mx, my):
+    mx, my = ui_pos((mx, my))
+    for btn in reset_confirm_buttons.values():
+        if btn.contains((mx, my)):
+            if btn.action == "reset_ok":
+                apply_reset_catalog_layout()
+            else:
+                cancel_reset_confirm()
+            return True
+    return False
+
+
+def draw_reset_confirm_dialog(surface):
+    if not pending_reset_confirm:
+        return
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((15, 23, 42, 120))
+    surface.blit(overlay, (0, 0))
+    box = pygame.Rect(SCREEN_WIDTH // 2 - 240, SCREEN_HEIGHT // 2 - 88, 480, 190)
+    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
+    surface.blit(FONT_LABEL.render("恢复默认布局？", True, C_TEXT), (box.x + 20, box.y + 16))
+    lines = [
+        "将用内置模板覆盖当前门店的全部障碍、墙体与家具。",
+        "若只想把画面居中，请点侧栏「居中视图」。",
+        "确认后仍可用 Ctrl+Z 撤销。",
+    ]
+    y = box.y + 48
+    for line in lines:
+        surface.blit(FONT_SMALL.render(line, True, C_MUTED), (box.x + 20, y))
+        y += 22
+    for btn in reset_confirm_buttons.values():
+        btn.draw(surface)
+
+
+def reset_catalog_layout():
+    start_reset_catalog_layout()
 
 
 def create_store_layout(name, width_m, height_m, filepath=None):
@@ -2646,6 +2806,7 @@ def go_to_store_home():
     editing_wall_size = False
     wall_size_edit_index = None
     cancel_obstacle_edit_dialog()
+    cancel_reset_confirm()
     force_rebuild_startup = False
     if current_layout_path:
         remember_store_summary(
@@ -2793,14 +2954,18 @@ def handle_startup_action(action):
 def add_furniture_to_canvas():
     global selected_furniture, selected_feature, selected_collision
     tpl = furniture_templates[selected_template_index]
-    new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points])
-    new_furn.x = store_width_mm / 2
-    new_furn.y = store_height_mm / 2
+    new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points], product_family=tpl.product_family)
+    wx, wy = viewport_world_center()
+    find_clear_furniture_position(new_furn, wx, wy)
+    push_undo()
     placed_furnitures.append(new_furn)
     selected_furniture = new_furn
     selected_feature = new_furn
     clear_obstacle_selection()
-    show_toast(f"已添加: {tpl.name}（可拖动到合适位置）")
+    if furniture_overlaps_zone(new_furn):
+        show_toast(f"已添加: {tpl.name}（在障碍区内，请拖到卖场区域）")
+    else:
+        show_toast(f"已添加: {tpl.name}（已放在当前视图中心，可拖动调整）")
 
 
 def delete_selected():
@@ -3436,7 +3601,8 @@ def build_sidebar_ui():
     y += 42
     buttons["store"] = Button((pad, y, w, 34), "修改画布尺寸", "store")
     y += 42
-    buttons["reset_layout"] = Button((pad, y, w, 34), "恢复默认布局", "reset_layout")
+    buttons["fit_view"] = Button((pad, y, bw, 34), "居中视图", "fit_view")
+    buttons["reset_layout"] = Button((pad + bw + 8, y, bw, 34), "恢复默认", "reset_layout")
     y += 42
     buttons["obstacle"] = Button((pad, y, bw, 34), "刨除障碍", "obstacle", toggle=True)
     buttons["wall"] = Button((pad + bw + 8, y, bw, 34), "添加墙体", "wall")
@@ -3479,7 +3645,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.draw(surface)
 
     for key in (
-        "save", "home", "rename_store", "store", "reset_layout", "obstacle", "wall", "merge",
+        "save", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
         "rotate_mode", "resize", "rename", "delete", "family_filter",
     ):
@@ -3592,6 +3758,9 @@ def handle_toolbar_click(action, buttons):
         start_rename_store()
     elif action == "store":
         start_edit_canvas_size()
+    elif action == "fit_view":
+        fit_view_to_store()
+        show_toast("视图已居中到门店")
     elif action == "reset_layout":
         reset_catalog_layout()
     elif action == "obstacle":
@@ -3773,7 +3942,7 @@ def main():
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus
     global editing_obstacle_dialog, obstacle_edit_name, obstacle_edit_length, obstacle_edit_width, obstacle_edit_focus
-    global canvas_last_click_time, canvas_last_click_pos
+    global canvas_last_click_time, canvas_last_click_pos, pending_reset_confirm
     global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot, multi_drag_snapshots
     global marquee_active, marquee_start, marquee_current, template_scroll_offset, template_family_filter
 
@@ -3832,6 +4001,16 @@ def main():
                     handle_store_picker_mouseup(*event.pos, store_picker_buttons)
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     close_store_picker()
+                continue
+
+            if pending_reset_confirm and not startup_active:
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    handle_reset_confirm_click(*event.pos)
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        cancel_reset_confirm()
+                    elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        apply_reset_catalog_layout()
                 continue
 
             if editing_obstacle_dialog and not startup_active:
@@ -3986,7 +4165,8 @@ def main():
                     if dragging_furniture:
                         dragging_furniture.dragging = False
                         dragging_furniture = None
-                    if selected_collisions and not drawing_polygon and dragging_collision:
+                    if selected_collisions and not drawing_polygon and dragging_collision and multi_drag_snapshots:
+                        reverted = False
                         for i in selected_collisions:
                             snap = multi_drag_snapshots.get(i)
                             if (
@@ -3997,7 +4177,12 @@ def main():
                                 for j, pts in multi_drag_snapshots.items():
                                     collision_polygons[j]["points"] = [list(p) for p in pts]
                                 show_toast("障碍不能移出门店画布")
+                                reverted = True
                                 break
+                        if not reverted and len(selected_collisions) > 1 and batch_has_internal_overlap(selected_collisions):
+                            for j, pts in multi_drag_snapshots.items():
+                                collision_polygons[j]["points"] = [list(p) for p in pts]
+                            show_toast("障碍之间不能重叠，已恢复位置")
                     dragging_collision = False
                     collision_drag_snapshot = None
                     multi_drag_snapshots = {}
@@ -4094,10 +4279,13 @@ def main():
             pygame.draw.rect(screen, C_OUTSIDE, CANVAS_RECT)
             draw_grid(screen)
             draw_store_floor(screen)
-            for f in placed_furnitures:
-                f.draw(screen, selected=(f is selected_furniture))
-            prefetch_furniture_images()
             draw_obstacles(screen)
+            for f in placed_furnitures:
+                if f is not selected_furniture:
+                    f.draw(screen, selected=False)
+            if selected_furniture is not None:
+                selected_furniture.draw(screen, selected=True)
+            prefetch_furniture_images()
             draw_selection_overlay(screen)
             draw_marquee(screen)
             draw_polygon_preview(screen)
@@ -4111,6 +4299,8 @@ def main():
                 draw_store_picker(screen, store_picker_buttons)
             else:
                 store_picker_buttons = None
+            if pending_reset_confirm:
+                draw_reset_confirm_dialog(screen)
             if renaming_store:
                 draw_rename_dialog(screen)
             if editing_obstacle_dialog:
