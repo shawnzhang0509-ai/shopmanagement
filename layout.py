@@ -87,7 +87,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.7"
+APP_VERSION = "1.6.8"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -190,6 +190,7 @@ wall_size_focus = "length"
 wall_size_buttons = {}
 wall_length_rect = None
 wall_width_rect = None
+wall_size_edit_index = None
 force_rebuild_startup = False
 _store_summary_cache = {}
 _pending_save_snapshot = None
@@ -304,7 +305,6 @@ def try_move_obstacles_batch(indices, dx, dy) -> bool:
     trials = {}
     for i in indices:
         moved = try_translate_obstacle(originals[i], dx, dy)
-        moved = magnet_snap_translate(moved, ignore)
         if obstacle_overlaps_any(moved, *ignore)[0]:
             return False
         trials[i] = moved
@@ -847,6 +847,59 @@ def rect_points_centered(cx, cy, length_mm, width_mm):
         (cx + hl, cy + hw),
         (cx - hl, cy + hw),
     ]
+
+
+def obstacle_rect_metrics(points, tol=OBSTACLE_SNAP_MM):
+    """Axis-aligned rectangle obstacles return (cx, cy, length_mm, width_mm)."""
+    if len(points) != 4:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    if span_x < tol or span_y < tol:
+        return None
+    for x, y in points:
+        on_corner = (
+            (abs(x - min_x) <= tol or abs(x - max_x) <= tol)
+            and (abs(y - min_y) <= tol or abs(y - max_y) <= tol)
+        )
+        if not on_corner:
+            return None
+    cx = (min_x + max_x) / 2
+    cy = (min_y + max_y) / 2
+    length_mm = max(span_x, span_y)
+    width_mm = min(span_x, span_y)
+    return cx, cy, length_mm, width_mm
+
+
+def resize_obstacle_rect(index, length_m, width_m) -> bool:
+    col = collision_polygons[index]
+    metrics = obstacle_rect_metrics(col["points"])
+    if not metrics:
+        return False
+    cx, cy, _, _ = metrics
+    length_mm = length_m * 1000
+    width_mm = width_m * 1000
+    xs = [p[0] for p in col["points"]]
+    ys = [p[1] for p in col["points"]]
+    span_x = max(xs) - min(xs)
+    span_y = max(ys) - min(ys)
+    if span_x >= span_y:
+        new_points = rect_points_centered(cx, cy, length_mm, width_mm)
+    else:
+        new_points = rect_points_centered(cx, cy, width_mm, length_mm)
+    new_points = clip_obstacle_points(new_points)
+    if len(new_points) < 3 or polygon_area(new_points) <= 1.0:
+        return False
+    overlaps, other_name = obstacle_overlaps_any(new_points, index)
+    if overlaps:
+        show_toast(f"尺寸修改后会与「{other_name}」重叠")
+        return False
+    col["points"] = [[int(round(x)), int(round(y))] for x, y in new_points]
+    return True
 
 
 def roi_to_color(roi):
@@ -2087,8 +2140,9 @@ def draw_canvas_size_dialog(surface):
 
 def start_edit_wall_size():
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus, wall_size_buttons
-    global editing_canvas_size
+    global editing_canvas_size, wall_size_edit_index
     editing_wall_size = True
+    wall_size_edit_index = None
     editing_canvas_size = False
     cancel_rename_dialog()
     toggle_draw_obstacle(False)
@@ -2098,18 +2152,41 @@ def start_edit_wall_size():
     wall_size_buttons = build_wall_size_dialog_buttons()
 
 
+def start_edit_obstacle_size():
+    global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus, wall_size_buttons
+    global editing_canvas_size, wall_size_edit_index
+    if len(selected_collisions) != 1:
+        show_toast("请单选一个长方形障碍或墙体再修改尺寸")
+        return
+    metrics = obstacle_rect_metrics(collision_polygons[selected_collision]["points"])
+    if not metrics:
+        show_toast("仅支持长方形障碍/墙体修改尺寸（多边形请重新绘制）")
+        return
+    _, _, length_mm, width_mm = metrics
+    editing_wall_size = True
+    wall_size_edit_index = selected_collision
+    editing_canvas_size = False
+    cancel_rename_dialog()
+    toggle_draw_obstacle(False)
+    wall_length_text = f"{length_mm / 1000:g}"
+    wall_width_text = f"{width_mm / 1000:g}"
+    wall_size_focus = "length"
+    wall_size_buttons = build_wall_size_dialog_buttons()
+
+
 def build_wall_size_dialog_buttons():
     cx = SCREEN_WIDTH // 2
     bw, bh = 88, 34
     y = SCREEN_HEIGHT // 2 + 36
+    ok_label = "确定" if wall_size_edit_index is not None else "放置"
     return {
-        "ok": Button((cx - bw - 6, y, bw, bh), "放置", "wall_ok", primary=True),
+        "ok": Button((cx - bw - 6, y, bw, bh), ok_label, "wall_ok", primary=True),
         "cancel": Button((cx + 6, y, bw, bh), "取消", "wall_cancel"),
     }
 
 
 def apply_wall_obstacle():
-    global editing_wall_size, selected_collision
+    global editing_wall_size, wall_size_edit_index
     try:
         length_m = float(wall_length_text.strip())
         width_m = float(wall_width_text.strip())
@@ -2118,6 +2195,14 @@ def apply_wall_obstacle():
         return
     if length_m <= 0 or width_m <= 0:
         show_toast("长宽必须大于 0")
+        return
+    if wall_size_edit_index is not None:
+        push_undo()
+        name = collision_polygons[wall_size_edit_index].get("name", "障碍物")
+        if resize_obstacle_rect(wall_size_edit_index, length_m, width_m):
+            editing_wall_size = False
+            wall_size_edit_index = None
+            show_toast(f"已更新 {name} 尺寸为 {length_m:g}×{width_m:g} m")
         return
     length_mm = length_m * 1000
     width_mm = width_m * 1000
@@ -2145,8 +2230,9 @@ def apply_wall_obstacle():
 
 
 def cancel_wall_size_edit():
-    global editing_wall_size
+    global editing_wall_size, wall_size_edit_index
     editing_wall_size = False
+    wall_size_edit_index = None
 
 
 def handle_wall_size_action(action):
@@ -2180,11 +2266,14 @@ def draw_wall_size_dialog(surface):
     box = pygame.Rect(SCREEN_WIDTH // 2 - 220, SCREEN_HEIGHT // 2 - 120, 440, 240)
     pygame.draw.rect(surface, (255, 255, 255), box, border_radius=12)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=12)
-    surface.blit(FONT_LABEL.render("添加墙体", True, C_TEXT), (box.x + 20, box.y + 16))
-    surface.blit(
-        FONT_SMALL.render("输入长方形长宽（米），将放置在门店中心，可拖动调整", True, C_MUTED),
-        (box.x + 20, box.y + 44),
-    )
+    if wall_size_edit_index is not None:
+        title = "修改障碍/墙体尺寸"
+        hint = "输入新的长宽（米），中心位置不变"
+    else:
+        title = "添加墙体"
+        hint = "输入长方形长宽（米），将放置在门店中心，可拖动调整"
+    surface.blit(FONT_LABEL.render(title, True, C_TEXT), (box.x + 20, box.y + 16))
+    surface.blit(FONT_SMALL.render(hint, True, C_MUTED), (box.x + 20, box.y + 44))
     surface.blit(FONT_SMALL.render("长 (m)", True, C_TEXT), (box.x + 20, box.y + 78))
     wall_length_rect = pygame.Rect(box.x + 20, box.y + 100, 180, 36)
     surface.blit(FONT_SMALL.render("宽 (m)", True, C_TEXT), (box.x + 220, box.y + 78))
@@ -2771,15 +2860,29 @@ def draw_polygon_preview(surface):
 
 
 def draw_scale_bar(surface):
-    ppm = scale * 1000
-    if ppm > 400:
-        bar_len, label = 120, "10 m"
-    elif ppm < 8:
-        bar_len, label = max(20, int(ppm * 100)), "1 m"
-    else:
-        bar_len, label = int(min(ppm, 120)), "1 m"
+    px_per_m = scale * 1000
+    if px_per_m <= 0:
+        return
+    candidates_m = [0.5, 1, 2, 5, 10, 20, 50, 100]
+    target_px = 90
+    chosen_m = 1
+    bar_len = px_per_m
+    best_err = float("inf")
+    for m in candidates_m:
+        length_px = m * px_per_m
+        if 50 <= length_px <= 140:
+            chosen_m, bar_len = m, length_px
+            break
+        err = abs(length_px - target_px)
+        if err < best_err:
+            best_err = err
+            chosen_m, bar_len = m, length_px
+    bar_len = max(20, int(round(bar_len)))
+    label = f"{chosen_m:g} m"
     x0, y0 = SIDEBAR_WIDTH + 24, SCREEN_HEIGHT - 36
     pygame.draw.line(surface, C_TEXT, (x0, y0), (x0 + bar_len, y0), 3)
+    pygame.draw.line(surface, C_TEXT, (x0, y0 - 4), (x0, y0 + 4), 2)
+    pygame.draw.line(surface, C_TEXT, (x0 + bar_len, y0 - 4), (x0 + bar_len, y0 + 4), 2)
     surface.blit(FONT_SMALL.render(label, True, C_TEXT), (x0, y0 - 18))
 
 
@@ -2868,6 +2971,8 @@ def build_sidebar_ui():
     y += 42
     buttons["rotate_mode"] = Button((pad, y, w, 30), "旋转: 微调 15°", "rotate_mode", toggle=True)
     y += 38
+    buttons["resize"] = Button((pad, y, w, 34), "修改尺寸", "resize")
+    y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
     buttons["delete"] = Button((pad + bw + 8, y, bw, 34), "删除", "delete", danger=True)
     template_list_top = y + 50
@@ -2889,7 +2994,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     for key in (
         "save", "home", "rename_store", "store", "obstacle", "wall", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
-        "rotate_mode", "rename", "delete",
+        "rotate_mode", "resize", "rename", "delete",
     ):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
@@ -2936,16 +3041,27 @@ def draw_sidebar(buttons, input_box, template_list_top):
             for i in selected_collisions
             if collision_polygons[i].get("group_id")
         })
+        metrics = None
+        if len(selected_collisions) == 1:
+            metrics = obstacle_rect_metrics(collision_polygons[selected_collision]["points"])
+        dim_text = ""
+        if metrics:
+            _, _, length_mm, width_mm = metrics
+            dim_text = f"  |  {length_mm / 1000:g}×{width_mm / 1000:g} m"
         extra = f"  |  组 {', '.join(gids)}" if gids else ""
         surface.blit(
-            FONT_SMALL.render(f"可旋转/拖动{extra}  |  模式 {rotation_mode_label()}", True, C_MUTED),
+            FONT_SMALL.render(
+                f"可旋转/拖动{dim_text}{extra}  |  模式 {rotation_mode_label()}",
+                True,
+                C_MUTED,
+            ),
             (16, y),
         )
     else:
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "框选/Shift多选 | Ctrl+A全选 | Ctrl+G成组 | Ctrl+Shift+G解组 | Ctrl+Z撤销 | Ctrl+C/V复制"
+    hints = "框选/Shift多选 | 修改尺寸 | Ctrl+A全选 | Ctrl+G成组 | Ctrl+Z撤销 | Ctrl+C/V复制"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -2988,6 +3104,8 @@ def handle_toolbar_click(action, buttons):
         rotate_selected(1)
     elif action == "rotate_mode":
         toggle_rotation_mode()
+    elif action == "resize":
+        start_edit_obstacle_size()
     elif action == "rename":
         start_rename_obstacle()
     elif action == "delete":
