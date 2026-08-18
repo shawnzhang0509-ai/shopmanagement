@@ -87,7 +87,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.6.6"
+APP_VERSION = "1.6.7"
 OBSTACLE_SNAP_MM = 100  # 0.1 m grid for obstacle vertices
 OBSTACLE_MAGNET_MM = 300  # 拖动时顶点磁吸贴合（30cm）
 ROTATE_FINE_DEG = 15
@@ -144,6 +144,7 @@ drawing_polygon = False
 current_polygon = []
 preview_point = None
 selected_collision = None
+selected_collisions: list[int] = []
 collision_polygons = []
 selected_furniture = None
 dragging_furniture = None
@@ -196,6 +197,120 @@ _save_thread = None
 _save_generation = 0
 _catalog_refresh_thread = None
 _catalog_refresh_ready = False
+marquee_active = False
+marquee_start = None
+marquee_current = None
+multi_drag_snapshots: dict[int, list] = {}
+_next_group_id = 1
+
+
+def clear_obstacle_selection():
+    global selected_collision, selected_collisions
+    selected_collision = None
+    selected_collisions = []
+
+
+def set_obstacle_selection(indices, *, toast_msg: str | None = None):
+    global selected_collision, selected_collisions, selected_furniture, selected_feature
+    selected_collisions = sorted({i for i in indices if 0 <= i < len(collision_polygons)})
+    selected_collision = selected_collisions[0] if selected_collisions else None
+    selected_furniture = selected_feature = None
+    if toast_msg is not None:
+        show_toast(toast_msg)
+    elif len(selected_collisions) == 1:
+        show_toast(f"选中: {collision_polygons[selected_collision]['name']}")
+    elif len(selected_collisions) > 1:
+        show_toast(f"已选 {len(selected_collisions)} 个障碍/墙体")
+
+
+def expand_group_members(indices) -> list[int]:
+    out = set(indices)
+    for i in list(out):
+        if 0 <= i < len(collision_polygons):
+            gid = collision_polygons[i].get("group_id")
+            if gid:
+                for j, col in enumerate(collision_polygons):
+                    if col.get("group_id") == gid:
+                        out.add(j)
+    return sorted(out)
+
+
+def obstacle_bbox(col) -> tuple[float, float, float, float]:
+    pts = col["points"]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def obstacles_in_screen_rect(x1, y1, x2, y2) -> list[int]:
+    left, right = sorted([x1, x2])
+    top, bottom = sorted([y1, y2])
+    wx1, wy1 = screen_to_world(left, top)
+    wx2, wy2 = screen_to_world(right, bottom)
+    bl, bt = min(wx1, wx2), min(wy1, wy2)
+    br, bb = max(wx1, wx2), max(wy1, wy2)
+    hits = []
+    for i, col in enumerate(collision_polygons):
+        cl, ct, cr, cb = obstacle_bbox(col)
+        if cr >= bl and cl <= br and cb >= bt and ct <= bb:
+            hits.append(i)
+    return hits
+
+
+def select_all_obstacles():
+    if not collision_polygons:
+        show_toast("画布上没有障碍或墙体")
+        return
+    set_obstacle_selection(range(len(collision_polygons)), toast_msg=f"已全选 {len(collision_polygons)} 项")
+
+
+def group_selected_obstacles():
+    global _next_group_id
+    if len(selected_collisions) < 2:
+        show_toast("请至少选中 2 个障碍/墙体再成组")
+        return
+    push_undo()
+    gid = f"g{_next_group_id}"
+    _next_group_id += 1
+    for i in selected_collisions:
+        collision_polygons[i]["group_id"] = gid
+    show_toast(f"已成组 {len(selected_collisions)} 项（移动/旋转联动）")
+
+
+def ungroup_selected_obstacles():
+    if not selected_collisions:
+        show_toast("请先选中要解组的障碍/墙体")
+        return
+    push_undo()
+    gids = {
+        collision_polygons[i].get("group_id")
+        for i in selected_collisions
+        if collision_polygons[i].get("group_id")
+    }
+    if not gids:
+        show_toast("选中项未在组内")
+        return
+    for col in collision_polygons:
+        if col.get("group_id") in gids:
+            col.pop("group_id", None)
+    show_toast("已解组")
+
+
+def try_move_obstacles_batch(indices, dx, dy) -> bool:
+    if not indices:
+        return False
+    ignore = tuple(indices)
+    originals = {i: [tuple(p) for p in collision_polygons[i]["points"]] for i in indices}
+    trials = {}
+    for i in indices:
+        moved = try_translate_obstacle(originals[i], dx, dy)
+        moved = magnet_snap_translate(moved, *ignore)
+        if obstacle_overlaps_any(moved, *ignore)[0]:
+            return False
+        trials[i] = moved
+    for i, pts in trials.items():
+        collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in pts]
+    return True
 
 
 def show_toast(msg, duration_ms=2500):
@@ -255,51 +370,72 @@ def clear_undo():
 
 
 def undo_layout():
-    global collision_polygons, placed_furnitures, selected_collision, selected_furniture, selected_feature
+    global collision_polygons, placed_furnitures, selected_collision, selected_collisions
+    global selected_furniture, selected_feature
     if not _undo_stack:
         show_toast("无可撤销的操作")
         return
     state = _undo_stack.pop()
     collision_polygons = state["collision_polygons"]
     placed_furnitures = _furnitures_from_snapshot(state["placed_furnitures"])
-    selected_collision = None
+    clear_obstacle_selection()
     selected_furniture = selected_feature = None
     show_toast("已撤销")
 
 
+def sync_group_id_counter():
+    global _next_group_id
+    max_n = 0
+    for col in collision_polygons:
+        gid = col.get("group_id", "")
+        if isinstance(gid, str) and gid.startswith("g"):
+            try:
+                max_n = max(max_n, int(gid[1:]))
+            except ValueError:
+                pass
+    _next_group_id = max_n + 1
+
+
 def copy_selected_obstacle():
     global _obstacle_clipboard
-    if selected_collision is None:
+    if not selected_collisions:
         show_toast("请先选中障碍或墙体")
         return False
-    _obstacle_clipboard = copy.deepcopy(collision_polygons[selected_collision])
-    show_toast(f"已复制: {_obstacle_clipboard['name']}")
+    if len(selected_collisions) == 1:
+        _obstacle_clipboard = copy.deepcopy(collision_polygons[selected_collisions[0]])
+        show_toast(f"已复制: {_obstacle_clipboard['name']}")
+    else:
+        _obstacle_clipboard = [copy.deepcopy(collision_polygons[i]) for i in selected_collisions]
+        show_toast(f"已复制 {len(_obstacle_clipboard)} 项")
     return True
 
 
 def paste_obstacle():
-    global selected_collision, selected_furniture, selected_feature
+    global selected_collision, selected_furniture, selected_feature, selected_collisions
     if not _obstacle_clipboard:
         show_toast("剪贴板为空，请先 Ctrl+C 复制")
         return
     push_undo()
-    new_ob = copy.deepcopy(_obstacle_clipboard)
-    base_name = new_ob.get("name", "障碍物")
-    candidate = f"{base_name}_copy"
-    n = 2
+    items = _obstacle_clipboard if isinstance(_obstacle_clipboard, list) else [_obstacle_clipboard]
     names = {c.get("name") for c in collision_polygons}
-    while candidate in names:
-        candidate = f"{base_name}_copy{n}"
-        n += 1
-    new_ob["name"] = candidate
+    new_indices = []
     offset = OBSTACLE_SNAP_MM * 3
-    new_ob["points"] = [(x + offset, y + offset) for x, y in new_ob["points"]]
-    if not polygon_fully_inside_store(new_ob["points"]):
-        new_ob["points"] = [(x - offset, y - offset) for x, y in new_ob["points"]]
-    collision_polygons.append(new_ob)
-    selected_collision = len(collision_polygons) - 1
-    selected_furniture = selected_feature = None
-    show_toast(f"已粘贴: {candidate}")
+    for src in items:
+        new_ob = copy.deepcopy(src)
+        base_name = new_ob.get("name", "障碍物")
+        candidate = f"{base_name}_copy"
+        n = 2
+        while candidate in names:
+            candidate = f"{base_name}_copy{n}"
+            n += 1
+        new_ob["name"] = candidate
+        names.add(candidate)
+        new_ob["points"] = [(x + offset, y + offset) for x, y in new_ob["points"]]
+        if not polygon_fully_inside_store(new_ob["points"]):
+            new_ob["points"] = [(x - offset, y - offset) for x, y in new_ob["points"]]
+        collision_polygons.append(new_ob)
+        new_indices.append(len(collision_polygons) - 1)
+    set_obstacle_selection(new_indices, toast_msg=f"已粘贴 {len(new_indices)} 项")
 
 
 # ── UI 组件 ─────────────────────────────────────────────────
@@ -1159,8 +1295,7 @@ def find_merge_partner(idx):
 
 
 def merge_selected_obstacle():
-    global selected_collision
-    if selected_collision is None:
+    if len(selected_collisions) != 1:
         show_toast("请先选中要融合的障碍或墙体")
         return
     idx = selected_collision
@@ -1198,8 +1333,7 @@ def merge_selected_obstacle():
     if is_wall or partner_wall:
         entry["kind"] = "wall"
     collision_polygons.append(entry)
-    selected_collision = len(collision_polygons) - 1
-    show_toast(f"已融合为 {new_name}（共边 {shared / 1000:.1f}m · {len(merged)} 顶点）")
+    set_obstacle_selection([len(collision_polygons) - 1], toast_msg=f"已融合为 {new_name}（共边 {shared / 1000:.1f}m · {len(merged)} 顶点）")
 
 
 def obstacle_label_rect(col):
@@ -1619,6 +1753,8 @@ def load_layout(filepath):
         furniture.rotation = f.get("rotation", 0)
         placed_furnitures.append(furniture)
     collision_polygons = data.get("obstacles", [])
+    clear_obstacle_selection()
+    sync_group_id_counter()
     remember_store_summary(
         current_layout_path,
         width_m=store_width_mm / 1000,
@@ -2002,7 +2138,7 @@ def apply_wall_obstacle():
         "kind": "wall",
     }
     collision_polygons.append(obstacle)
-    selected_collision = len(collision_polygons) - 1
+    set_obstacle_selection([len(collision_polygons) - 1])
     editing_wall_size = False
     show_toast(f"已放置墙体 {length_m:g}×{width_m:g} m，可拖动调整位置")
 
@@ -2223,24 +2359,28 @@ def add_furniture_to_canvas():
     placed_furnitures.append(new_furn)
     selected_furniture = new_furn
     selected_feature = new_furn
-    selected_collision = None
+    clear_obstacle_selection()
     show_toast(f"已添加: {tpl.name}（可拖动到合适位置）")
 
 
 def delete_selected():
-    global selected_furniture, selected_feature, selected_collision
+    global selected_furniture, selected_feature
     if selected_furniture is not None:
         push_undo()
         name = selected_furniture.name
         placed_furnitures.remove(selected_furniture)
         selected_furniture = selected_feature = None
         show_toast(f"已删除家具: {name}")
-    elif selected_collision is not None:
+    elif selected_collisions:
         push_undo()
-        name = collision_polygons[selected_collision]["name"]
-        collision_polygons.pop(selected_collision)
-        selected_collision = None
-        show_toast(f"已删除障碍物: {name}")
+        names = [collision_polygons[i]["name"] for i in selected_collisions]
+        for i in sorted(selected_collisions, reverse=True):
+            collision_polygons.pop(i)
+        clear_obstacle_selection()
+        if len(names) == 1:
+            show_toast(f"已删除障碍物: {names[0]}")
+        else:
+            show_toast(f"已删除 {len(names)} 个障碍/墙体")
     else:
         show_toast("请先选中要删除的对象")
 
@@ -2276,7 +2416,7 @@ def finish_obstacle():
                     "name": f"障碍物{len(collision_polygons) + 1}",
                     "points": clipped,
                 })
-                selected_collision = len(collision_polygons) - 1
+                set_obstacle_selection([len(collision_polygons) - 1])
                 show_toast(f"障碍区域已刨除（0.1m 对齐，画布内 {len(clipped)} 个顶点）")
         else:
             show_toast("障碍区域与门店画布无有效重叠，请重新绘制")
@@ -2288,27 +2428,38 @@ def finish_obstacle():
 
 
 def rotate_selected(direction):
-    """direction: -1 左转, +1 右转。支持家具与障碍/墙体。"""
+    """direction: -1 左转, +1 右转。支持家具与障碍/墙体（含多选）。"""
     step = rotation_step_degrees() * direction
     if selected_feature:
         push_undo()
         selected_feature.rotate_by(step)
         show_toast(f"旋转至 {selected_feature.rotation:.0f}°（{rotation_mode_label()}）")
         return
-    if selected_collision is not None:
-        poly = collision_polygons[selected_collision]
-        old_points = poly["points"]
-        new_points, ok = try_rotate_obstacle(old_points, step, selected_collision)
-        if not ok:
-            trial = rotate_polygon_points(old_points, step)
-            if polygon_fully_inside_store(old_points) and not polygon_fully_inside_store(trial):
-                show_toast("旋转后会移出门店画布")
-            else:
-                show_toast("旋转后会与其它障碍重叠")
-            return
+    if selected_collisions:
         push_undo()
-        poly["points"] = new_points
-        show_toast(f"已旋转 {poly.get('name', '障碍物')}（{rotation_mode_label()}）")
+        ignore = tuple(selected_collisions)
+        all_pts = []
+        for i in selected_collisions:
+            all_pts.extend(collision_polygons[i]["points"])
+        ox = sum(p[0] for p in all_pts) / len(all_pts)
+        oy = sum(p[1] for p in all_pts) / len(all_pts)
+        originals = {i: collision_polygons[i]["points"][:] for i in selected_collisions}
+        trials = {}
+        for i in selected_collisions:
+            rotated = rotate_polygon_points(originals[i], step, (ox, oy))
+            if polygon_fully_inside_store(originals[i]) and not polygon_fully_inside_store(rotated):
+                show_toast("旋转后会移出门店画布")
+                return
+            if obstacle_overlaps_any(rotated, *ignore)[0]:
+                show_toast("旋转后会与其它障碍重叠")
+                return
+            trials[i] = rotated
+        for i, pts in trials.items():
+            collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in pts]
+        if len(selected_collisions) == 1:
+            show_toast(f"已旋转 {collision_polygons[selected_collisions[0]].get('name', '障碍物')}（{rotation_mode_label()}）")
+        else:
+            show_toast(f"已旋转 {len(selected_collisions)} 项（{rotation_mode_label()}）")
         return
     show_toast("请先选中家具、障碍或墙体")
 
@@ -2407,8 +2558,8 @@ def handle_rename_dialog_key(event):
 
 def start_rename_obstacle():
     global renaming_obstacle, renaming_store, input_text, rename_collision_index, rename_dialog_buttons
-    if selected_collision is None:
-        show_toast("请先选中障碍或墙体")
+    if len(selected_collisions) != 1:
+        show_toast("请单选一个障碍或墙体再重命名")
         return
     renaming_obstacle = True
     renaming_store = False
@@ -2523,7 +2674,7 @@ def draw_store_floor(surface):
 def draw_obstacles(surface):
     for idx, col in enumerate(collision_polygons):
         pts = [world_to_screen(x, y) for x, y in col["points"]]
-        selected = idx == selected_collision
+        selected = idx in selected_collisions
         is_wall = col.get("kind") == "wall" or str(col.get("name", "")).startswith("墙体")
         if is_wall:
             fill = (210, 218, 228) if not selected else (180, 195, 215)
@@ -2539,6 +2690,39 @@ def draw_obstacles(surface):
         cy = sum(p[1] for p in pts) / len(pts)
         label = FONT_BODY.render(col["name"], True, label_color)
         surface.blit(label, label.get_rect(center=(cx, cy)))
+
+
+def draw_selection_overlay(surface):
+    if len(selected_collisions) < 2:
+        return
+    all_pts = []
+    for i in selected_collisions:
+        all_pts.extend(collision_polygons[i]["points"])
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    tl = world_to_screen(min(xs), min(ys))
+    br = world_to_screen(max(xs), max(ys))
+    rect = pygame.Rect(int(tl[0]), int(tl[1]), int(br[0] - tl[0]), int(br[1] - tl[1]))
+    overlay = pygame.Surface((max(1, rect.width), max(1, rect.height)), pygame.SRCALPHA)
+    overlay.fill((37, 99, 235, 28))
+    surface.blit(overlay, rect.topleft)
+    pygame.draw.rect(surface, C_ACCENT, rect, 2)
+
+
+def draw_marquee(surface):
+    if not marquee_active or marquee_start is None or marquee_current is None:
+        return
+    x1, y1 = marquee_start
+    x2, y2 = marquee_current
+    left, right = sorted([x1, x2])
+    top, bottom = sorted([y1, y2])
+    rect = pygame.Rect(left, top, right - left, bottom - top)
+    if rect.width < 1 or rect.height < 1:
+        return
+    overlay = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    overlay.fill((37, 99, 235, 40))
+    surface.blit(overlay, rect.topleft)
+    pygame.draw.rect(surface, C_ACCENT, rect, 1)
 
 
 def draw_polygon_preview(surface):
@@ -2671,6 +2855,11 @@ def build_sidebar_ui():
     y += 42
     buttons["merge"] = Button((pad, y, w, 34), "融合相邻", "merge")
     y += 42
+    buttons["select_all"] = Button((pad, y, bw, 34), "全选", "select_all")
+    buttons["group"] = Button((pad + bw + 8, y, bw, 34), "成组", "group")
+    y += 42
+    buttons["ungroup"] = Button((pad, y, w, 34), "解组", "ungroup")
+    y += 42
     buttons["add"] = Button((pad, y, w, 40), "＋ 添加到画布", "add", primary=True)
     y += 48
     buttons["rotate_l"] = Button((pad, y, bw, 34), "左转", "rotate_l")
@@ -2696,7 +2885,11 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.rect.y = 58
     input_box.draw(surface)
 
-    for key in ("save", "home", "rename_store", "store", "obstacle", "wall", "merge", "add", "rotate_l", "rotate_r", "rotate_mode", "rename", "delete"):
+    for key in (
+        "save", "home", "rename_store", "store", "obstacle", "wall", "merge",
+        "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
+        "rotate_mode", "rename", "delete",
+    ):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
     buttons["rotate_mode"].active = rotation_mode == "90"
@@ -2727,19 +2920,31 @@ def draw_sidebar(buttons, input_box, template_list_top):
         surface.blit(FONT_SMALL.render(f"选中: {selected_feature.name}", True, C_ACCENT), (16, y))
         y += 20
         surface.blit(FONT_SMALL.render(f"旋转 {selected_feature.rotation:.0f}°  |  ROI {selected_feature.roi:.1f}", True, C_MUTED), (16, y))
-    elif selected_collision is not None:
-        name = collision_polygons[selected_collision]["name"]
-        surface.blit(FONT_SMALL.render(f"选中障碍物: {name}", True, C_DANGER), (16, y))
+    elif selected_collisions:
+        if len(selected_collisions) == 1:
+            name = collision_polygons[selected_collision]["name"]
+            surface.blit(FONT_SMALL.render(f"选中障碍物: {name}", True, C_DANGER), (16, y))
+        else:
+            surface.blit(
+                FONT_SMALL.render(f"已选 {len(selected_collisions)} 个障碍/墙体", True, C_DANGER),
+                (16, y),
+            )
         y += 20
+        gids = sorted({
+            collision_polygons[i].get("group_id")
+            for i in selected_collisions
+            if collision_polygons[i].get("group_id")
+        })
+        extra = f"  |  组 {', '.join(gids)}" if gids else ""
         surface.blit(
-            FONT_SMALL.render(f"可旋转  |  模式 {rotation_mode_label()}", True, C_MUTED),
+            FONT_SMALL.render(f"可旋转/拖动{extra}  |  模式 {rotation_mode_label()}", True, C_MUTED),
             (16, y),
         )
     else:
         surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
 
     y += 28
-    hints = "←/→或Q/E旋转 | 右键拖动画布 | 滚轮缩放 | Ctrl+Z撤销 | Ctrl+C/V复制障碍 | 靠近自动磁吸"
+    hints = "框选/Shift多选 | Ctrl+A全选 | Ctrl+G成组 | Ctrl+Shift+G解组 | Ctrl+Z撤销 | Ctrl+C/V复制"
     surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
     y += 18
     surface.blit(
@@ -2768,6 +2973,12 @@ def handle_toolbar_click(action, buttons):
         start_edit_wall_size()
     elif action == "merge":
         merge_selected_obstacle()
+    elif action == "select_all":
+        select_all_obstacles()
+    elif action == "group":
+        group_selected_obstacles()
+    elif action == "ungroup":
+        ungroup_selected_obstacles()
     elif action == "add":
         add_furniture_to_canvas()
     elif action == "rotate_l":
@@ -2810,9 +3021,31 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
             return
 
 
-def handle_canvas_click(mx, my, button):
-    global selected_furniture, selected_feature, selected_collision
-    global dragging_furniture, dragging_collision, collision_drag_offset, collision_drag_snapshot
+def finish_marquee_selection():
+    global marquee_active, marquee_start, marquee_current
+    if not marquee_active or marquee_start is None or marquee_current is None:
+        marquee_active = False
+        marquee_start = None
+        marquee_current = None
+        return
+    x1, y1 = marquee_start
+    x2, y2 = marquee_current
+    if abs(x2 - x1) < 5 and abs(y2 - y1) < 5:
+        clear_obstacle_selection()
+    else:
+        hits = obstacles_in_screen_rect(x1, y1, x2, y2)
+        if hits:
+            set_obstacle_selection(expand_group_members(hits))
+        else:
+            clear_obstacle_selection()
+    marquee_active = False
+    marquee_start = None
+    marquee_current = None
+
+
+def handle_canvas_click(mx, my, button, shift=False):
+    global selected_furniture, selected_feature
+    global dragging_furniture, dragging_collision, collision_drag_offset, collision_drag_snapshot, multi_drag_snapshots
     global current_polygon, preview_point
 
     wx, wy = screen_to_world(mx, my)
@@ -2827,19 +3060,39 @@ def handle_canvas_click(mx, my, button):
         preview_point = None
         return
 
+    def start_obstacle_drag(indices):
+        global dragging_collision, collision_drag_offset, collision_drag_snapshot, multi_drag_snapshots
+        indices = expand_group_members(indices)
+        set_obstacle_selection(indices)
+        push_undo()
+        dragging_collision = True
+        multi_drag_snapshots = {
+            i: [tuple(p) for p in collision_polygons[i]["points"]] for i in indices
+        }
+        collision_drag_snapshot = multi_drag_snapshots.get(selected_collision)
+        all_pts = []
+        for i in indices:
+            all_pts.extend(collision_polygons[i]["points"])
+        cx = sum(p[0] for p in all_pts) / len(all_pts)
+        cy = sum(p[1] for p in all_pts) / len(all_pts)
+        collision_drag_offset = (cx - wx, cy - wy)
+
+    def toggle_obstacle_selection(i):
+        cur = set(selected_collisions)
+        expanded = set(expand_group_members([i]))
+        if expanded <= cur:
+            cur -= expanded
+        else:
+            cur |= expanded
+        set_obstacle_selection(cur)
+
     for i in reversed(range(len(collision_polygons))):
         col = collision_polygons[i]
         if obstacle_label_rect(col).collidepoint(mx, my):
-            push_undo()
-            selected_collision = i
-            selected_furniture = selected_feature = None
-            dragging_collision = True
-            collision_drag_snapshot = [tuple(p) for p in col["points"]]
-            pts = col["points"]
-            cx = sum(p[0] for p in pts) / len(pts)
-            cy = sum(p[1] for p in pts) / len(pts)
-            collision_drag_offset = (cx - wx, cy - wy)
-            show_toast(f"选中: {col['name']}")
+            if shift:
+                toggle_obstacle_selection(i)
+            else:
+                start_obstacle_drag([i])
             return
 
     for f in reversed(placed_furnitures):
@@ -2848,37 +3101,32 @@ def handle_canvas_click(mx, my, button):
             f.dragging = True
             selected_furniture = f
             selected_feature = f
-            selected_collision = None
+            clear_obstacle_selection()
             return
 
     for i, col in enumerate(collision_polygons):
         if point_in_poly(wx, wy, col["points"]):
-            push_undo()
-            selected_collision = i
-            selected_furniture = selected_feature = None
-            dragging_collision = True
-            collision_drag_snapshot = [tuple(p) for p in col["points"]]
-            pts = col["points"]
-            cx = sum(p[0] for p in pts) / len(pts)
-            cy = sum(p[1] for p in pts) / len(pts)
-            collision_drag_offset = (cx - wx, cy - wy)
-            show_toast(f"选中: {col['name']}")
+            if shift:
+                toggle_obstacle_selection(i)
+            else:
+                start_obstacle_drag([i])
             return
 
     selected_furniture = selected_feature = None
-    selected_collision = None
+    return "marquee"
 
 
 def main():
     global offset_x, offset_y, scale, dragging_view, last_mouse_pos
     global drawing_polygon, current_polygon, preview_point
-    global selected_collision, selected_furniture, dragging_furniture, selected_feature
+    global selected_collision, selected_collisions, selected_furniture, dragging_furniture, selected_feature
     global placed_furnitures, collision_polygons, selected_template_index, dragging_collision, collision_drag_offset
     global renaming_obstacle, renaming_store, input_text, search_text, search_box_active, mouse_pos
     global furniture_templates, startup_active, store_picker_active
     global editing_canvas_size, canvas_w_text, canvas_h_text, canvas_size_focus, force_rebuild_startup
     global editing_wall_size, wall_length_text, wall_width_text, wall_size_focus
-    global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot
+    global startup_buttons, _catalog_refresh_ready, collision_drag_snapshot, multi_drag_snapshots
+    global marquee_active, marquee_start, marquee_current
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -3020,10 +3268,16 @@ def main():
                         go_to_store_home()
                         continue
                 if mx >= SIDEBAR_WIDTH and event.button == 1:
-                    result = handle_canvas_click(mx, my, event.button)
+                    mods = pygame.key.get_mods()
+                    shift = bool(mods & pygame.KMOD_SHIFT)
+                    result = handle_canvas_click(mx, my, event.button, shift=shift)
                     if result == "pan":
                         dragging_view = True
                         last_mouse_pos = event.pos
+                    elif result == "marquee":
+                        marquee_active = True
+                        marquee_start = (mx, my)
+                        marquee_current = (mx, my)
                 elif event.button == 3:
                     dragging_view = True
                     last_mouse_pos = event.pos
@@ -3031,7 +3285,10 @@ def main():
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
                     mx, my = ui_pos(event.pos)
-                    if mx < SIDEBAR_WIDTH:
+                    if marquee_active:
+                        marquee_current = (mx, my)
+                        finish_marquee_selection()
+                    elif mx < SIDEBAR_WIDTH:
                         home_btn = editor_buttons.get("home") if editor_buttons else None
                         if home_btn and home_btn.contains((mx, my)):
                             pass
@@ -3043,42 +3300,46 @@ def main():
                     if dragging_furniture:
                         dragging_furniture.dragging = False
                         dragging_furniture = None
-                    if selected_collision is not None and not drawing_polygon:
-                        was_dragging = dragging_collision
-                        poly = collision_polygons[selected_collision]
-                        points = poly["points"]
-                        if (
-                            was_dragging
-                            and collision_drag_snapshot is not None
-                            and polygon_fully_inside_store(collision_drag_snapshot)
-                            and not polygon_fully_inside_store(points)
-                        ):
-                            poly["points"] = collision_drag_snapshot
-                            show_toast("障碍不能移出门店画布")
+                    if selected_collisions and not drawing_polygon and dragging_collision:
+                        for i in selected_collisions:
+                            snap = multi_drag_snapshots.get(i)
+                            if (
+                                snap
+                                and polygon_fully_inside_store(snap)
+                                and not polygon_fully_inside_store(collision_polygons[i]["points"])
+                            ):
+                                for j, pts in multi_drag_snapshots.items():
+                                    collision_polygons[j]["points"] = [list(p) for p in pts]
+                                show_toast("障碍不能移出门店画布")
+                                break
                     dragging_collision = False
                     collision_drag_snapshot = None
+                    multi_drag_snapshots = {}
 
             elif event.type == pygame.MOUSEMOTION:
-                mx, my = event.pos
+                mx, my = ui_pos(event.pos)
                 wx, wy = screen_to_world(mx, my)
                 if dragging_view:
                     offset_x += (last_mouse_pos[0] - mx) / scale
                     offset_y += (last_mouse_pos[1] - my) / scale
                     last_mouse_pos = (mx, my)
+                elif marquee_active:
+                    marquee_current = (mx, my)
                 elif dragging_furniture and dragging_furniture.dragging:
                     old_x, old_y = dragging_furniture.x, dragging_furniture.y
                     dragging_furniture.x, dragging_furniture.y = wx, wy
                     if check_collision(dragging_furniture, collision_polygons):
                         dragging_furniture.x, dragging_furniture.y = old_x, old_y
-                elif dragging_collision and selected_collision is not None:
-                    poly = collision_polygons[selected_collision]
-                    old = poly["points"]
-                    cx = sum(p[0] for p in old) / len(old)
-                    cy = sum(p[1] for p in old) / len(old)
+                elif dragging_collision and selected_collisions:
+                    all_pts = []
+                    for i in selected_collisions:
+                        all_pts.extend(collision_polygons[i]["points"])
+                    cx = sum(p[0] for p in all_pts) / len(all_pts)
+                    cy = sum(p[1] for p in all_pts) / len(all_pts)
                     ncx = wx + collision_drag_offset[0]
                     ncy = wy + collision_drag_offset[1]
                     dx, dy = ncx - cx, ncy - cy
-                    poly["points"] = try_move_obstacle(old, dx, dy, selected_collision)
+                    try_move_obstacles_batch(selected_collisions, dx, dy)
                 elif drawing_polygon:
                     last = current_polygon[-1] if current_polygon else None
                     preview_point = obstacle_draw_target(last, wx, wy)
@@ -3105,6 +3366,15 @@ def main():
                     if not search_box_active and not renaming_obstacle and not renaming_store:
                         if event.key == pygame.K_z and mods & pygame.KMOD_CTRL:
                             undo_layout()
+                            continue
+                        if event.key == pygame.K_a and mods & pygame.KMOD_CTRL:
+                            select_all_obstacles()
+                            continue
+                        if event.key == pygame.K_g and mods & pygame.KMOD_CTRL:
+                            if mods & pygame.KMOD_SHIFT:
+                                ungroup_selected_obstacles()
+                            else:
+                                group_selected_obstacles()
                             continue
                         if event.key == pygame.K_c and mods & pygame.KMOD_CTRL:
                             copy_selected_obstacle()
@@ -3143,6 +3413,8 @@ def main():
                 f.draw(screen, selected=(f is selected_furniture))
             prefetch_furniture_images()
             draw_obstacles(screen)
+            draw_selection_overlay(screen)
+            draw_marquee(screen)
             draw_polygon_preview(screen)
             draw_scale_bar(screen)
             draw_banner(screen)
