@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.7.6"
+APP_VERSION = "1.7.7"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -637,6 +637,55 @@ def fit_view_to_store():
     canvas_cy = SCREEN_HEIGHT / 2
     offset_x = store_cx - (canvas_cx - SIDEBAR_WIDTH) / scale
     offset_y = store_cy - canvas_cy / scale
+
+
+def viewport_world_center():
+    return screen_to_world(SIDEBAR_WIDTH + CANVAS_RECT.width / 2, SCREEN_HEIGHT / 2)
+
+
+def furniture_shape_centroid(furn):
+    return (
+        sum(p[0] for p in furn.points) / len(furn.points),
+        sum(p[1] for p in furn.points) / len(furn.points),
+    )
+
+
+def furniture_overlaps_zone(furn) -> bool:
+    pts = furn.get_rotated_points()
+    for col in collision_polygons:
+        if obstacle_is_wall(col):
+            continue
+        if polygons_interior_overlap(pts, col["points"]):
+            return True
+    return False
+
+
+def place_furniture_at_world(furn, wx, wy):
+    local_cx, local_cy = furniture_shape_centroid(furn)
+    furn.x = wx - local_cx
+    furn.y = wy - local_cy
+
+
+def find_clear_furniture_position(furn, wx, wy):
+    place_furniture_at_world(furn, wx, wy)
+    if polygon_fully_inside_store(furn.get_rotated_points()) and not furniture_overlaps_zone(furn):
+        return
+    step = 800
+    for ring in range(1, 20):
+        for dx, dy in (
+            (step * ring, 0),
+            (-step * ring, 0),
+            (0, step * ring),
+            (0, -step * ring),
+            (step * ring, step * ring),
+            (-step * ring, step * ring),
+            (step * ring, -step * ring),
+            (-step * ring, -step * ring),
+        ):
+            place_furniture_at_world(furn, wx + dx, wy + dy)
+            if polygon_fully_inside_store(furn.get_rotated_points()) and not furniture_overlaps_zone(furn):
+                return
+    place_furniture_at_world(furn, wx, wy)
 
 
 def snap_world_mm(value):
@@ -2905,14 +2954,18 @@ def handle_startup_action(action):
 def add_furniture_to_canvas():
     global selected_furniture, selected_feature, selected_collision
     tpl = furniture_templates[selected_template_index]
-    new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points])
-    new_furn.x = store_width_mm / 2
-    new_furn.y = store_height_mm / 2
+    new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points], product_family=tpl.product_family)
+    wx, wy = viewport_world_center()
+    find_clear_furniture_position(new_furn, wx, wy)
+    push_undo()
     placed_furnitures.append(new_furn)
     selected_furniture = new_furn
     selected_feature = new_furn
     clear_obstacle_selection()
-    show_toast(f"已添加: {tpl.name}（可拖动到合适位置）")
+    if furniture_overlaps_zone(new_furn):
+        show_toast(f"已添加: {tpl.name}（在障碍区内，请拖到卖场区域）")
+    else:
+        show_toast(f"已添加: {tpl.name}（已放在当前视图中心，可拖动调整）")
 
 
 def delete_selected():
@@ -4226,10 +4279,13 @@ def main():
             pygame.draw.rect(screen, C_OUTSIDE, CANVAS_RECT)
             draw_grid(screen)
             draw_store_floor(screen)
-            for f in placed_furnitures:
-                f.draw(screen, selected=(f is selected_furniture))
-            prefetch_furniture_images()
             draw_obstacles(screen)
+            for f in placed_furnitures:
+                if f is not selected_furniture:
+                    f.draw(screen, selected=False)
+            if selected_furniture is not None:
+                selected_furniture.draw(screen, selected=True)
+            prefetch_furniture_images()
             draw_selection_overlay(screen)
             draw_marquee(screen)
             draw_polygon_preview(screen)
