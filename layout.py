@@ -1615,6 +1615,14 @@ def roi_to_color(roi):
     return tuple(int(start[i] + t * (end[i] - start[i])) for i in range(3))
 
 
+def _shade_color(color, factor=0.55):
+    return tuple(max(0, min(255, int(c * factor))) for c in color[:3])
+
+
+def _blend_colors(a, b, t=0.35):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
 def shape_to_points(item):
     shape_type = item.get("type", "")
     if shape_type == "polygon":
@@ -1687,7 +1695,10 @@ class Furniture:
         fill = roi_to_color(self.roi)
         pygame.draw.polygon(surface, fill, pts)
         border_w = 3 if selected else 2
-        border_c = C_SELECTION if selected else (30, 41, 59)
+        if selected:
+            border_c = C_SELECTION
+        else:
+            border_c = _shade_color(fill, 0.45)
         pygame.draw.polygon(surface, border_c, pts, border_w)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
@@ -1706,9 +1717,17 @@ class Furniture:
                 img_rect = img.get_rect(center=(int(cx), int(cy)))
                 if display_w >= 20:
                     shadow_rect = img_rect.inflate(6, 6)
-                    pygame.draw.rect(surface, (255, 255, 255), shadow_rect, border_radius=4)
-                    pygame.draw.rect(surface, C_BORDER, shadow_rect, 1, border_radius=4)
+                    backdrop = _blend_colors(fill, (255, 255, 255), 0.25)
+                    pygame.draw.rect(surface, backdrop, shadow_rect, border_radius=4)
+                    pygame.draw.rect(surface, _shade_color(fill, 0.5), shadow_rect, 2, border_radius=4)
                 surface.blit(img, img_rect)
+            else:
+                inner = [
+                    (int(cx + (p[0] - cx) * 0.72), int(cy + (p[1] - cy) * 0.72))
+                    for p in pts
+                ]
+                if len(inner) >= 3:
+                    pygame.draw.polygon(surface, _shade_color(fill, 0.75), inner)
 
         if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
             name_surf, roi_surf = self._label_surfaces(selected)
