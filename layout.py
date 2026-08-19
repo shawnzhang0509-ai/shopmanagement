@@ -30,6 +30,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from roi_lookup import lookup_roi, resolve_furniture_roi
+from heatmap_metrics import (
+    format_revenue_per_sqm,
+    lookup_sales_amount,
+    revenue_per_sqm,
+    revenue_per_sqm_to_color,
+    clear_heatmap_cache,
+    list_recent_week_keys,
+    sales_data_ready,
+)
 
 pygame.init()
 
@@ -96,7 +105,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.9.0"
+APP_VERSION = "2.0.0"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -306,6 +315,9 @@ _last_furniture_prefetch_ms = 0
 _next_furniture_instance_id = 1
 pending_bind_child = None
 show_roi_overlap_hatch = False
+heatmap_week_count = 4
+heatmap_vmin = 0.0
+heatmap_vmax = 1.0
 furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
 
 
@@ -629,7 +641,7 @@ def toggle_roi_overlap_hatch(buttons=None):
     show_roi_overlap_hatch = not show_roi_overlap_hatch
     if buttons and "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_hatch
-    show_toast("已显示重叠 ROI 条纹" if show_roi_overlap_hatch else "已隐藏重叠 ROI 条纹")
+    show_toast("已显示重叠坪效条纹" if show_roi_overlap_hatch else "已隐藏重叠坪效条纹")
 
 
 def capture_layout_state():
@@ -1609,10 +1621,58 @@ def resize_obstacle_rect(index, length_m, width_m) -> bool:
 
 
 def roi_to_color(roi):
+    """兼容旧 ROI 0–10；新坪效请用 revenue_per_sqm_to_color。"""
     roi = max(0, min(10, roi))
     start, end = (173, 216, 230), (178, 34, 34)
     t = roi / 10
     return tuple(int(start[i] + t * (end[i] - start[i])) for i in range(3))
+
+
+def current_store_slug() -> str | None:
+    if current_layout_path:
+        return catalog_slug_for_path(current_layout_path)
+    return None
+
+
+def furniture_area_mm2(furn) -> float:
+    return polygon_area(furn.get_rotated_points())
+
+
+def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> float:
+    area = furniture_area_mm2(furn)
+    amount = lookup_sales_amount(
+        furn.name,
+        furn.product_family,
+        shop_id=shop_slug,
+        num_weeks=heatmap_week_count,
+    )
+    return revenue_per_sqm(amount, area)
+
+
+def recompute_heatmap_metrics() -> None:
+    global heatmap_vmin, heatmap_vmax
+    slug = current_store_slug()
+    values: list[float] = []
+    for furn in placed_furnitures:
+        furn.revenue_per_sqm = compute_furniture_revenue_per_sqm(furn, slug)
+        if furn.revenue_per_sqm > 0:
+            values.append(furn.revenue_per_sqm)
+    heatmap_vmin = min(values) if values else 0.0
+    heatmap_vmax = max(values) if values else 1.0
+
+
+def change_heatmap_weeks(delta: int, buttons=None) -> None:
+    global heatmap_week_count
+    heatmap_week_count = max(1, min(52, heatmap_week_count + int(delta)))
+    clear_heatmap_cache()
+    recompute_heatmap_metrics()
+    if buttons and "heatmap_weeks" in buttons:
+        buttons["heatmap_weeks"].label = f"统计: 近{heatmap_week_count}周"
+    show_toast(f"坪效统计：近 {heatmap_week_count} 周")
+
+
+def heatmap_color_for_value(value: float) -> tuple[int, int, int]:
+    return revenue_per_sqm_to_color(value, heatmap_vmin, heatmap_vmax)
 
 
 def _shade_color(color, factor=0.55):
@@ -1653,6 +1713,7 @@ class Furniture:
     def __init__(self, name, roi, points, x=0, y=0, rotation=0, product_family=""):
         self.name = name
         self.roi = roi
+        self.revenue_per_sqm = 0.0
         self.points = points
         self.product_family = product_family or ""
         self.x = x
@@ -1666,11 +1727,12 @@ class Furniture:
         self._roi_label_surf = None
 
     def _label_surfaces(self, selected: bool):
-        key = (self.name, self.roi, selected)
+        key = (self.name, self.revenue_per_sqm, selected)
         if self._label_cache_key != key:
             self._label_cache_key = key
             self._name_label_surf = FONT_MARK.render(self.name, True, C_TEXT)
-            self._roi_label_surf = FONT_MARK.render(f"ROI {self.roi:.1f}", True, C_MUTED)
+            metric = format_revenue_per_sqm(self.revenue_per_sqm)
+            self._roi_label_surf = FONT_MARK.render(metric, True, C_MUTED)
         return self._name_label_surf, self._roi_label_surf
 
     def rotate_by(self, angle):
@@ -1692,7 +1754,7 @@ class Furniture:
             self._label_rect = None
             return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
-        fill = roi_to_color(self.roi)
+        fill = heatmap_color_for_value(self.revenue_per_sqm)
         pygame.draw.polygon(surface, fill, pts)
         border_w = 3 if selected else 2
         if selected:
@@ -1893,8 +1955,8 @@ def draw_furniture_roi_overlaps(surface):
             if len(overlap) < 3:
                 continue
             screen_pts = [world_to_screen(x, y) for x, y in overlap]
-            color_a = roi_to_color(a.roi)
-            color_b = roi_to_color(b.roi)
+            color_a = heatmap_color_for_value(a.revenue_per_sqm)
+            color_b = heatmap_color_for_value(b.revenue_per_sqm)
             draw_crosshatch_polygon(surface, screen_pts, color_a, color_b)
             cx = sum(p[0] for p in screen_pts) / len(screen_pts)
             cy = sum(p[1] for p in screen_pts) / len(screen_pts)
@@ -2858,6 +2920,7 @@ def build_layout_data(filepath):
         ],
         "obstacles": collision_polygons,
         "markers": layout_markers,
+        "heatmap": {"week_count": heatmap_week_count},
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -2956,6 +3019,7 @@ def refresh_catalog_cache_async():
 def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
+    global heatmap_week_count
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -2963,6 +3027,9 @@ def load_layout(filepath, *, keep_undo=False):
     store = data.get("store", {})
     store_width_mm = int(store.get("width_mm", store_width_mm))
     store_height_mm = int(store.get("height_mm", store_height_mm))
+    heatmap = data.get("heatmap") or {}
+    heatmap_week_count = max(1, min(52, int(heatmap.get("week_count") or heatmap_week_count)))
+    clear_heatmap_cache()
     store_slug = data.get("store_slug") or catalog_slug_for_path(filepath)
     placed_furnitures = []
     for f in data.get("furnitures", []):
@@ -2993,6 +3060,7 @@ def load_layout(filepath, *, keep_undo=False):
     clear_obstacle_selection()
     selected_marker_index = None
     sync_group_id_counter()
+    recompute_heatmap_metrics()
     remember_store_summary(
         current_layout_path,
         width_m=store_width_mm / 1000,
@@ -4336,6 +4404,7 @@ def add_furniture_to_canvas():
         show_toast(f"已添加: {tpl.name}（在障碍区内，请拖到卖场区域）")
     else:
         show_toast(f"已添加: {tpl.name}（已放在当前视图中心，可拖动调整）")
+    recompute_heatmap_metrics()
 
 
 def delete_selected():
@@ -4926,6 +4995,41 @@ def draw_scale_bar(surface):
     surface.blit(FONT_SMALL.render(label, True, C_TEXT), (x0, y0 - 18))
 
 
+def draw_heatmap_legend(surface):
+    if not placed_furnitures or not sales_data_ready():
+        return
+    bar_w, bar_h = 18, 128
+    pad = 12
+    box_w = 150
+    box_h = bar_h + 54
+    x0 = SCREEN_WIDTH - box_w - 16
+    y0 = SCREEN_HEIGHT - box_h - 16
+    box = pygame.Rect(x0, y0, box_w, box_h)
+    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=8)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=8)
+    title = FONT_SMALL.render(f"元/㎡ · 近{heatmap_week_count}周", True, C_TEXT)
+    surface.blit(title, (box.x + pad, box.y + 8))
+    bx = box.right - pad - bar_w
+    by = box.y + 34
+    for i in range(bar_h):
+        t = 1.0 - (i / max(1, bar_h - 1))
+        probe = heatmap_vmin + (heatmap_vmax - heatmap_vmin) * t
+        color = revenue_per_sqm_to_color(probe, heatmap_vmin, heatmap_vmax)
+        pygame.draw.line(surface, color, (bx, by + i), (bx + bar_w, by + i))
+    pygame.draw.rect(surface, C_BORDER, pygame.Rect(bx, by, bar_w, bar_h), 1)
+    high_txt = format_revenue_per_sqm(heatmap_vmax)
+    low_txt = format_revenue_per_sqm(heatmap_vmin if heatmap_vmax > heatmap_vmin else 0)
+    surface.blit(FONT_MARK.render(high_txt, True, C_MUTED), (box.x + pad, by))
+    surface.blit(
+        FONT_MARK.render(low_txt, True, C_MUTED),
+        (box.x + pad, by + bar_h - FONT_MARK.get_height()),
+    )
+    weeks = list_recent_week_keys(current_store_slug(), heatmap_week_count)
+    if weeks:
+        week_hint = FONT_MARK.render(f"{weeks[0]} … {weeks[-1]}", True, C_MUTED)
+        surface.blit(week_hint, (box.x + pad, box.bottom - 18))
+
+
 def draw_banner(surface):
     if drawing_polygon:
         rect = pygame.Rect(SIDEBAR_WIDTH + 16, 12, CANVAS_RECT.width - 32, 36)
@@ -5035,8 +5139,13 @@ def build_sidebar_ui():
     buttons["bind_parent"] = Button((pad, y, bw, 34), "绑定父件", "bind_parent")
     buttons["unbind"] = Button((pad + bw + 8, y, bw, 34), "解绑", "unbind")
     y += 42
-    buttons["roi_overlap"] = Button((pad, y, w, 30), "重叠 ROI 条纹", "roi_overlap", toggle=True)
+    buttons["roi_overlap"] = Button((pad, y, w, 30), "重叠坪效条纹", "roi_overlap", toggle=True)
     y += 38
+    buttons["weeks_less"] = Button((pad, y, bw, 34), "周数 −", "weeks_less")
+    buttons["weeks_more"] = Button((pad + bw + 8, y, bw, 34), "周数 +", "weeks_more")
+    y += 42
+    buttons["heatmap_weeks"] = Button((pad, y, w, 28), f"统计: 近{heatmap_week_count}周", "heatmap_weeks")
+    y += 34
     buttons["resize"] = Button((pad, y, w, 34), "修改尺寸", "resize")
     y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
@@ -5065,6 +5174,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         "add_entrance", "add_stairs", "add_cashier", "add_fire_exit", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
         "rotate_mode", "layer_front", "layer_back", "bind_parent", "unbind", "roi_overlap",
+        "weeks_less", "weeks_more", "heatmap_weeks",
         "resize", "rename", "delete", "family_filter",
     ):
         buttons[key].draw(surface)
@@ -5073,6 +5183,8 @@ def draw_sidebar(buttons, input_box, template_list_top):
     buttons["rotate_mode"].label = f"旋转: {rotation_mode_label()}"
     if "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_hatch
+    if "heatmap_weeks" in buttons:
+        buttons["heatmap_weeks"].label = f"统计: 近{heatmap_week_count}周"
     fam = template_family_filter or "全部"
     if "family_filter" in buttons:
         buttons["family_filter"].label = f"系列: {fam}"
@@ -5086,6 +5198,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     template_scroll_offset = min(template_scroll_offset, max_scroll)
     visible = filtered[template_scroll_offset : template_scroll_offset + visible_n]
     prefetch_template_list_images(visible)
+    slug = current_store_slug()
     count_label = f"{len(filtered)} 项" + (f" · 显示 {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}" if len(filtered) > visible_n else "")
     surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (16, y))
     y += 20
@@ -5104,13 +5217,23 @@ def draw_sidebar(buttons, input_box, template_list_top):
             scaled = pygame.transform.smoothscale(img, (TEMPLATE_THUMB - 8, TEMPLATE_THUMB - 8))
             surface.blit(scaled, scaled.get_rect(center=thumb.center))
         else:
-            color_dot = roi_to_color(tpl.roi)
+            area = polygon_area(tpl.points)
+            amt = lookup_sales_amount(
+                tpl.name, tpl.product_family, shop_id=slug, num_weeks=heatmap_week_count
+            )
+            rps = revenue_per_sqm(amt, area)
+            color_dot = revenue_per_sqm_to_color(rps, heatmap_vmin, heatmap_vmax)
             pygame.draw.circle(surface, color_dot, thumb.center, 10)
         tx = row.x + TEMPLATE_THUMB + 10
         family = getattr(tpl, "product_family", "") or "未分类"
+        area = polygon_area(tpl.points)
+        amt = lookup_sales_amount(
+            tpl.name, tpl.product_family, shop_id=slug, num_weeks=heatmap_week_count
+        )
+        rps = revenue_per_sqm(amt, area)
         surface.blit(FONT_BODY.render(tpl.name, True, C_TEXT), (tx, row.y + 6))
         surface.blit(
-            FONT_SMALL.render(f"{family}  ·  ROI {tpl.roi:.1f}", True, C_MUTED),
+            FONT_SMALL.render(f"{family}  ·  {format_revenue_per_sqm(rps)}", True, C_MUTED),
             (tx, row.y + 26),
         )
 
@@ -5141,7 +5264,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         parent_txt = f"  |  绑定→{parent.name}" if parent else ""
         surface.blit(
             FONT_SMALL.render(
-                f"旋转 {selected_feature.rotation:.0f}°  |  ROI {selected_feature.roi:.1f}  |  层 {layer_idx}/{len(placed_furnitures)}{parent_txt}",
+                f"旋转 {selected_feature.rotation:.0f}°  |  {format_revenue_per_sqm(selected_feature.revenue_per_sqm)}  |  层 {layer_idx}/{len(placed_furnitures)}{parent_txt}",
                 True,
                 C_MUTED,
             ),
@@ -5257,6 +5380,10 @@ def handle_toolbar_click(action, buttons):
         unbind_furniture()
     elif action == "roi_overlap":
         toggle_roi_overlap_hatch(buttons)
+    elif action == "weeks_less":
+        change_heatmap_weeks(-1, buttons)
+    elif action == "weeks_more":
+        change_heatmap_weeks(1, buttons)
     elif action == "resize":
         if selected_marker_index is not None:
             start_edit_marker_dialog(focus_size=True)
@@ -5869,6 +5996,7 @@ def main():
             draw_marquee(screen)
             draw_polygon_preview(screen)
             draw_scale_bar(screen)
+            draw_heatmap_legend(screen)
             draw_banner(screen)
             draw_sidebar(editor_buttons, input_box, template_list_top)
             draw_toast(screen)
