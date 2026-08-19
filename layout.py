@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.8"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -110,6 +110,10 @@ ROTATE_COARSE_DEG = 90
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
 FURNITURE_IMAGE_MIN_PX = 10  # zoom out 时仍显示的最小缩略图边长（像素）
 FURNITURE_LABEL_MIN_SPAN_PX = 44  # 家具在屏幕上太小时隐藏名称，避免叠字
+FURNITURE_IMG_SOURCE_PX = 96  # 统一从该尺寸解码，缩放走缓存
+FURNITURE_DISPLAY_BUCKET_PX = 8  # 显示尺寸分桶，zoom 时减少重复 smoothscale
+FURNITURE_DISPLAY_CACHE_MAX = 512
+FURNITURE_PREFETCH_INTERVAL_MS = 1200
 UNDO_LIMIT = 40
 MARKER_SIZE_MM = 1000
 MARKER_HIT_PAD_PX = 14
@@ -296,6 +300,9 @@ marker_edit_length_rect = None
 marker_edit_width_rect = None
 dragging_wall_endpoint = None
 wall_endpoint_snapshot = None
+_furniture_display_cache: dict[tuple[str, str, int, int], object] = {}
+_furniture_aspect_cache: dict[tuple[str, str], float] = {}
+_last_furniture_prefetch_ms = 0
 
 
 def clear_obstacle_selection():
@@ -1507,6 +1514,17 @@ class Furniture:
         self.y = y
         self.rotation = rotation
         self.dragging = False
+        self._label_cache_key = None
+        self._name_label_surf = None
+        self._roi_label_surf = None
+
+    def _label_surfaces(self, selected: bool):
+        key = (self.name, self.roi, selected)
+        if self._label_cache_key != key:
+            self._label_cache_key = key
+            self._name_label_surf = FONT_MARK.render(self.name, True, C_TEXT)
+            self._roi_label_surf = FONT_MARK.render(f"ROI {self.roi:.1f}", True, C_MUTED)
+        return self._name_label_surf, self._roi_label_surf
 
     def rotate_by(self, angle):
         self.rotation = (self.rotation + angle) % 360
@@ -1523,6 +1541,9 @@ class Furniture:
         return rotated
 
     def draw(self, surface, selected=False):
+        if not furniture_on_screen(self):
+            self._label_rect = None
+            return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
         fill = roi_to_color(self.roi)
         pygame.draw.polygon(surface, fill, pts)
@@ -1536,14 +1557,13 @@ class Furniture:
         span = max(max(xs) - min(xs), max(ys) - min(ys))
 
         if span >= 6:
-            fetch_px = max(32, min(180, int(max(span, FURNITURE_IMAGE_MIN_PX) * 0.95)))
-            img = furniture_image_surface(self.name, max_px=fetch_px, family=self.product_family)
+            display_w = max(FURNITURE_IMAGE_MIN_PX, min(180, int(span * 0.88)))
+            aspect = _furniture_aspect(self.name, self.product_family)
+            display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
+            img = furniture_display_image(
+                self.name, display_w, display_h, family=self.product_family
+            )
             if img is not None:
-                display_w = max(FURNITURE_IMAGE_MIN_PX, min(180, int(span * 0.88)))
-                aspect = img.get_height() / max(img.get_width(), 1)
-                display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
-                if img.get_width() != display_w or img.get_height() != display_h:
-                    img = pygame.transform.smoothscale(img, (display_w, display_h))
                 img_rect = img.get_rect(center=(int(cx), int(cy)))
                 if display_w >= 20:
                     shadow_rect = img_rect.inflate(6, 6)
@@ -1552,8 +1572,7 @@ class Furniture:
                 surface.blit(img, img_rect)
 
         if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
-            name_surf = FONT_MARK.render(self.name, True, C_TEXT)
-            roi_surf = FONT_MARK.render(f"ROI {self.roi:.1f}", True, C_MUTED)
+            name_surf, roi_surf = self._label_surfaces(selected)
             name_rect = name_surf.get_rect(midbottom=(cx, cy - 2))
             roi_rect = roi_surf.get_rect(midtop=(cx, cy + 2))
             surface.blit(name_surf, name_rect)
@@ -2183,6 +2202,74 @@ def image_url_for_template(tpl) -> str:
     return url
 
 
+def clear_furniture_display_cache():
+    global _furniture_display_cache, _furniture_aspect_cache
+    _furniture_display_cache = {}
+    _furniture_aspect_cache = {}
+
+
+def _furniture_aspect(name: str, family: str = "") -> float:
+    fam = family or ""
+    key = (name, fam)
+    if key in _furniture_aspect_cache:
+        return _furniture_aspect_cache[key]
+    base = furniture_image_surface(name, max_px=FURNITURE_IMG_SOURCE_PX, family=fam)
+    if base is None:
+        return 0.75
+    aspect = base.get_height() / max(base.get_width(), 1)
+    _furniture_aspect_cache[key] = aspect
+    return aspect
+
+
+def _bucket_display_px(px: int) -> int:
+    return max(
+        FURNITURE_IMAGE_MIN_PX,
+        int(round(px / FURNITURE_DISPLAY_BUCKET_PX)) * FURNITURE_DISPLAY_BUCKET_PX,
+    )
+
+
+def furniture_display_image(name: str, display_w: int, display_h: int, *, family: str = ""):
+    """Return a cached, bucket-sized thumbnail; avoids per-frame smoothscale during zoom."""
+    bw = _bucket_display_px(display_w)
+    bh = max(FURNITURE_IMAGE_MIN_PX, int(bw * display_h / max(display_w, 1)))
+    bh = _bucket_display_px(bh)
+    fam = family or ""
+    key = (name, fam, bw, bh)
+    cached = _furniture_display_cache.get(key)
+    if cached is not None:
+        return cached
+    base = furniture_image_surface(name, max_px=FURNITURE_IMG_SOURCE_PX, family=fam)
+    if base is None:
+        return None
+    if base.get_width() == bw and base.get_height() == bh:
+        scaled = base
+    elif max(bw, bh) <= 28:
+        scaled = pygame.transform.scale(base, (bw, bh))
+    else:
+        scaled = pygame.transform.smoothscale(base, (bw, bh))
+    if len(_furniture_display_cache) >= FURNITURE_DISPLAY_CACHE_MAX:
+        clear_furniture_display_cache()
+    _furniture_display_cache[key] = scaled
+    return scaled
+
+
+def furniture_screen_bbox(furn) -> tuple[float, float, float, float]:
+    pts = [world_to_screen(x, y) for x, y in furn.get_rotated_points()]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def furniture_on_screen(furn, margin: int = 48) -> bool:
+    x1, y1, x2, y2 = furniture_screen_bbox(furn)
+    return not (
+        x2 < SIDEBAR_WIDTH - margin
+        or x1 > SCREEN_WIDTH + margin
+        or y2 < -margin
+        or y1 > SCREEN_HEIGHT + margin
+    )
+
+
 def furniture_image_surface(name: str, max_px: int = 96, *, family: str = ""):
     url = image_url_for_product(name)
     if not url and family:
@@ -2213,6 +2300,11 @@ def prefetch_template_list_images(items):
 
 
 def prefetch_furniture_images():
+    global _last_furniture_prefetch_ms
+    now = pygame.time.get_ticks()
+    if now - _last_furniture_prefetch_ms < FURNITURE_PREFETCH_INTERVAL_MS:
+        return
+    _last_furniture_prefetch_ms = now
     urls = []
     for furn in placed_furnitures:
         url = image_url_for_product(furn.name)
@@ -2592,6 +2684,7 @@ def load_layout(filepath, *, keep_undo=False):
         placed_furnitures.append(furniture)
     collision_polygons = data.get("obstacles", [])
     layout_markers = normalize_layout_markers(data.get("markers", []))
+    clear_furniture_display_cache()
     clear_obstacle_selection()
     selected_marker_index = None
     sync_group_id_counter()
