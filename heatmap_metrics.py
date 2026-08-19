@@ -41,6 +41,27 @@ def clear_heatmap_cache() -> None:
     _amount_cache = {}
 
 
+def list_all_week_keys(shop_id: str | None = None) -> list[str]:
+    """门店全部有数据的自然周（升序）。"""
+    weeks: set[str] = set()
+    for row in load_weekly_sales():
+        if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
+            continue
+        wk = _week_key(row.year_week_period)
+        if wk:
+            weeks.add(wk)
+    return sorted(weeks)
+
+
+def week_period_display(shop_id: str | None, week_key: str) -> str:
+    for row in load_weekly_sales():
+        if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
+            continue
+        if _week_key(row.year_week_period) == week_key:
+            return str(row.year_week_period or week_key)
+    return week_key
+
+
 def list_recent_week_keys(shop_id: str | None = None, num_weeks: int = 4) -> list[str]:
     num_weeks = max(1, int(num_weeks or 1))
     cache_key = (shop_id, num_weeks)
@@ -65,14 +86,25 @@ def lookup_sales_amount(
     *,
     shop_id: str | None = None,
     num_weeks: int = 4,
+    week_keys: list[str] | None = None,
 ) -> float:
     sku = str(sku or "").strip()
     family = str(product_family or "").strip()
-    cache_key = (_normalize_key(sku), _normalize_key(family), shop_id, max(1, int(num_weeks)))
+    wk_tuple = tuple(sorted(week_keys)) if week_keys else None
+    cache_key = (
+        _normalize_key(sku),
+        _normalize_key(family),
+        shop_id,
+        wk_tuple,
+        max(1, int(num_weeks)),
+    )
     if cache_key in _amount_cache:
         return _amount_cache[cache_key]
 
-    allowed = set(list_recent_week_keys(shop_id, num_weeks))
+    if week_keys:
+        allowed = {_week_key(w) or w for w in week_keys}
+    else:
+        allowed = set(list_recent_week_keys(shop_id, num_weeks))
     if not allowed:
         _amount_cache[cache_key] = 0.0
         return 0.0

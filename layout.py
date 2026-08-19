@@ -34,12 +34,14 @@ from heatmap_metrics import (
     adaptive_color_step,
     format_revenue_per_sqm,
     legend_tick_values,
+    list_all_week_keys,
     lookup_sales_amount,
     revenue_per_sqm,
     revenue_per_sqm_to_color,
     clear_heatmap_cache,
     list_recent_week_keys,
     sales_data_ready,
+    week_period_display,
 )
 
 pygame.init()
@@ -107,7 +109,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -318,9 +320,12 @@ _next_furniture_instance_id = 1
 pending_bind_child = None
 show_roi_overlap_hatch = False
 heatmap_week_count = 4
+heatmap_week_mode = "single"  # single | range
+heatmap_week_index = -1
 heatmap_vmin = 0.0
 heatmap_vmax = 1.0
 heatmap_color_step = 200.0
+heatmap_week_bar_rects: dict[str, pygame.Rect] = {}
 furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
 
 
@@ -1641,6 +1646,89 @@ def furniture_area_mm2(furn) -> float:
     return polygon_area(furn.get_rotated_points())
 
 
+def heatmap_store_weeks() -> list[str]:
+    return list_all_week_keys(current_store_slug())
+
+
+def active_heatmap_week_keys() -> list[str]:
+    slug = current_store_slug()
+    if heatmap_week_mode == "range":
+        return list_recent_week_keys(slug, heatmap_week_count)
+    weeks = heatmap_store_weeks()
+    if not weeks:
+        return []
+    idx = heatmap_week_index
+    if idx < 0 or idx >= len(weeks):
+        idx = len(weeks) - 1
+    return [weeks[idx]]
+
+
+def heatmap_period_title() -> str:
+    keys = active_heatmap_week_keys()
+    slug = current_store_slug()
+    if heatmap_week_mode == "range":
+        if not keys:
+            return f"汇总近 {heatmap_week_count} 周（无数据）"
+        if len(keys) == 1:
+            return f"汇总 1 周 · {week_period_display(slug, keys[0])}"
+        return f"汇总 {len(keys)} 周 · {keys[0]} … {keys[-1]}"
+    if not keys:
+        return "暂无周销量 — 请先 grab_sales"
+    return week_period_display(slug, keys[0])
+
+
+def sync_heatmap_week_ui(buttons=None) -> None:
+    if not buttons:
+        return
+    is_range = heatmap_week_mode == "range"
+    if "week_mode" in buttons:
+        buttons["week_mode"].label = "汇总多周" if is_range else "单周查看"
+        buttons["week_mode"].active = is_range
+    if "week_prev" in buttons:
+        buttons["week_prev"].enabled = not is_range and bool(heatmap_store_weeks())
+    if "week_next" in buttons:
+        buttons["week_next"].enabled = not is_range and bool(heatmap_store_weeks())
+    if "range_less" in buttons:
+        buttons["range_less"].enabled = is_range
+    if "range_more" in buttons:
+        buttons["range_more"].enabled = is_range
+
+
+def navigate_heatmap_week(delta: int, buttons=None) -> None:
+    global heatmap_week_mode, heatmap_week_index
+    weeks = heatmap_store_weeks()
+    if not weeks:
+        show_toast("暂无周销量数据，请先运行 grab_sales.bat")
+        return
+    heatmap_week_mode = "single"
+    if heatmap_week_index < 0:
+        heatmap_week_index = len(weeks) - 1
+    heatmap_week_index = max(0, min(len(weeks) - 1, heatmap_week_index + int(delta)))
+    clear_heatmap_cache()
+    recompute_heatmap_metrics()
+    sync_heatmap_week_ui(buttons)
+    show_toast(heatmap_period_title())
+
+
+def toggle_heatmap_week_mode(buttons=None) -> None:
+    global heatmap_week_mode
+    heatmap_week_mode = "range" if heatmap_week_mode == "single" else "single"
+    clear_heatmap_cache()
+    recompute_heatmap_metrics()
+    sync_heatmap_week_ui(buttons)
+    show_toast(heatmap_period_title())
+
+
+def change_heatmap_range_weeks(delta: int, buttons=None) -> None:
+    global heatmap_week_mode, heatmap_week_count
+    heatmap_week_mode = "range"
+    heatmap_week_count = max(1, min(52, heatmap_week_count + int(delta)))
+    clear_heatmap_cache()
+    recompute_heatmap_metrics()
+    sync_heatmap_week_ui(buttons)
+    show_toast(heatmap_period_title())
+
+
 def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> float:
     area = furniture_area_mm2(furn)
     amount = lookup_sales_amount(
@@ -1648,6 +1736,7 @@ def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> flo
         furn.product_family,
         shop_id=shop_slug,
         num_weeks=heatmap_week_count,
+        week_keys=active_heatmap_week_keys(),
     )
     return revenue_per_sqm(amount, area)
 
@@ -1665,14 +1754,12 @@ def recompute_heatmap_metrics() -> None:
     heatmap_color_step = adaptive_color_step(heatmap_vmin, heatmap_vmax)
 
 
-def change_heatmap_weeks(delta: int, buttons=None) -> None:
-    global heatmap_week_count
-    heatmap_week_count = max(1, min(52, heatmap_week_count + int(delta)))
-    clear_heatmap_cache()
-    recompute_heatmap_metrics()
-    if buttons and "heatmap_weeks" in buttons:
-        buttons["heatmap_weeks"].label = f"统计: 近{heatmap_week_count}周"
-    show_toast(f"坪效统计：近 {heatmap_week_count} 周")
+def heatmap_lookup_kwargs() -> dict:
+    return {
+        "shop_id": current_store_slug(),
+        "num_weeks": heatmap_week_count,
+        "week_keys": active_heatmap_week_keys(),
+    }
 
 
 def heatmap_color_for_value(value: float) -> tuple[int, int, int]:
@@ -2926,7 +3013,11 @@ def build_layout_data(filepath):
         ],
         "obstacles": collision_polygons,
         "markers": layout_markers,
-        "heatmap": {"week_count": heatmap_week_count},
+        "heatmap": {
+            "week_count": heatmap_week_count,
+            "week_mode": heatmap_week_mode,
+            "selected_week": (active_heatmap_week_keys()[0] if heatmap_week_mode == "single" and active_heatmap_week_keys() else ""),
+        },
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -3025,7 +3116,7 @@ def refresh_catalog_cache_async():
 def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
-    global heatmap_week_count
+    global heatmap_week_count, heatmap_week_mode, heatmap_week_index
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -3035,8 +3126,17 @@ def load_layout(filepath, *, keep_undo=False):
     store_height_mm = int(store.get("height_mm", store_height_mm))
     heatmap = data.get("heatmap") or {}
     heatmap_week_count = max(1, min(52, int(heatmap.get("week_count") or heatmap_week_count)))
+    heatmap_week_mode = heatmap.get("week_mode") or heatmap_week_mode
+    if heatmap_week_mode not in ("single", "range"):
+        heatmap_week_mode = "single"
     clear_heatmap_cache()
     store_slug = data.get("store_slug") or catalog_slug_for_path(filepath)
+    weeks = list_all_week_keys(store_slug)
+    saved_week = str(heatmap.get("selected_week") or "").strip()
+    if saved_week and saved_week in weeks:
+        heatmap_week_index = weeks.index(saved_week)
+    else:
+        heatmap_week_index = len(weeks) - 1 if weeks else -1
     placed_furnitures = []
     for f in data.get("furnitures", []):
         name = f.get("name", "")
@@ -5007,17 +5107,23 @@ def draw_heatmap_legend(surface):
     bar_w, bar_h = 20, 150
     pad = 12
     box_w = 168
-    box_h = bar_h + 72
+    box_h = bar_h + 82
     x0 = SCREEN_WIDTH - box_w - 16
     y0 = SCREEN_HEIGHT - box_h - 16
     box = pygame.Rect(x0, y0, box_w, box_h)
     pygame.draw.rect(surface, (255, 255, 255), box, border_radius=8)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=8)
     step = heatmap_color_step
-    title = FONT_SMALL.render(f"元/㎡ · 近{heatmap_week_count}周 · 每档≈${step:.0f}", True, C_TEXT)
+    title = FONT_SMALL.render(heatmap_period_title()[:42], True, C_TEXT)
     surface.blit(title, (box.x + pad, box.y + 8))
+    sub = FONT_MARK.render(
+        ("汇总模式" if heatmap_week_mode == "range" else "单周模式") + f" · 每档≈${step:.0f}",
+        True,
+        C_MUTED,
+    )
+    surface.blit(sub, (box.x + pad, box.y + 26))
     bx = box.right - pad - bar_w
-    by = box.y + 36
+    by = box.y + 44
     for i in range(bar_h):
         t = 1.0 - (i / max(1, bar_h - 1))
         probe = heatmap_vmin + (heatmap_vmax - heatmap_vmin) * t
@@ -5034,10 +5140,54 @@ def draw_heatmap_legend(surface):
         pygame.draw.line(surface, C_BORDER, (bx - 4, ty), (bx, ty), 1)
         label = FONT_MARK.render(format_revenue_per_sqm(tick), True, C_MUTED)
         surface.blit(label, (box.x + pad, ty - label.get_height() // 2))
-    weeks = list_recent_week_keys(current_store_slug(), heatmap_week_count)
+    weeks = active_heatmap_week_keys()
     if weeks:
-        week_hint = FONT_MARK.render(f"{weeks[0]} … {weeks[-1]}", True, C_MUTED)
+        week_hint = FONT_MARK.render(f"{weeks[0]}" + (f" … {weeks[-1]}" if len(weeks) > 1 else ""), True, C_MUTED)
         surface.blit(week_hint, (box.x + pad, box.bottom - 18))
+
+
+def draw_heatmap_week_bar(surface):
+    global heatmap_week_bar_rects
+    heatmap_week_bar_rects = {}
+    if startup_active or not sales_data_ready():
+        return
+    bar = pygame.Rect(SIDEBAR_WIDTH + 16, 10, max(420, CANVAS_RECT.width - 32), 64)
+    pygame.draw.rect(surface, (255, 255, 255), bar, border_radius=12)
+    pygame.draw.rect(surface, C_ACCENT, bar, 2, border_radius=12)
+
+    title = heatmap_period_title()
+    if len(title) > 52:
+        title = title[:49] + "…"
+    title_surf = FONT_BODY.render(title, True, C_TEXT)
+    surface.blit(title_surf, title_surf.get_rect(midtop=(bar.centerx, bar.y + 8)))
+
+    prev_r = pygame.Rect(bar.x + 12, bar.bottom - 40, 100, 32)
+    next_r = pygame.Rect(bar.right - 112, bar.bottom - 40, 100, 32)
+    mode_r = pygame.Rect(bar.centerx - 58, bar.bottom - 40, 116, 32)
+    heatmap_week_bar_rects["week_prev"] = prev_r
+    heatmap_week_bar_rects["week_next"] = next_r
+    heatmap_week_bar_rects["week_mode"] = mode_r
+
+    for rect, label in (
+        (prev_r, "◀ 上一周"),
+        (next_r, "下一周 ▶"),
+        (mode_r, "汇总" if heatmap_week_mode == "single" else "单周"),
+    ):
+        hover = rect.collidepoint(ui_pos(mouse_pos))
+        bg = C_ACCENT_LIGHT if hover else (248, 250, 252)
+        pygame.draw.rect(surface, bg, rect, border_radius=8)
+        pygame.draw.rect(surface, C_BORDER, rect, 1, border_radius=8)
+        txt = FONT_SMALL.render(label, True, C_ACCENT if hover else C_TEXT)
+        surface.blit(txt, txt.get_rect(center=rect.center))
+
+
+def handle_heatmap_week_bar_click(mx, my, buttons=None) -> bool:
+    pos = ui_pos((mx, my))
+    for action, rect in heatmap_week_bar_rects.items():
+        if rect.collidepoint(pos):
+            handle_toolbar_click(action, buttons)
+            return True
+    return False
 
 
 def draw_banner(surface):
@@ -5151,11 +5301,14 @@ def build_sidebar_ui():
     y += 42
     buttons["roi_overlap"] = Button((pad, y, w, 30), "重叠坪效条纹", "roi_overlap", toggle=True)
     y += 38
-    buttons["weeks_less"] = Button((pad, y, bw, 34), "周数 −", "weeks_less")
-    buttons["weeks_more"] = Button((pad + bw + 8, y, bw, 34), "周数 +", "weeks_more")
+    buttons["week_prev"] = Button((pad, y, bw, 42), "◀ 上一周", "week_prev")
+    buttons["week_next"] = Button((pad + bw + 8, y, bw, 42), "下一周 ▶", "week_next")
+    y += 48
+    buttons["week_mode"] = Button((pad, y, w, 36), "单周查看", "week_mode", toggle=True)
     y += 42
-    buttons["heatmap_weeks"] = Button((pad, y, w, 28), f"统计: 近{heatmap_week_count}周", "heatmap_weeks")
-    y += 34
+    buttons["range_less"] = Button((pad, y, bw, 34), "汇总周数 −", "range_less")
+    buttons["range_more"] = Button((pad + bw + 8, y, bw, 34), "汇总周数 +", "range_more")
+    y += 42
     buttons["resize"] = Button((pad, y, w, 34), "修改尺寸", "resize")
     y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
@@ -5184,7 +5337,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         "add_entrance", "add_stairs", "add_cashier", "add_fire_exit", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
         "rotate_mode", "layer_front", "layer_back", "bind_parent", "unbind", "roi_overlap",
-        "weeks_less", "weeks_more", "heatmap_weeks",
+        "week_prev", "week_next", "week_mode", "range_less", "range_more",
         "resize", "rename", "delete", "family_filter",
     ):
         buttons[key].draw(surface)
@@ -5193,8 +5346,18 @@ def draw_sidebar(buttons, input_box, template_list_top):
     buttons["rotate_mode"].label = f"旋转: {rotation_mode_label()}"
     if "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_hatch
-    if "heatmap_weeks" in buttons:
-        buttons["heatmap_weeks"].label = f"统计: 近{heatmap_week_count}周"
+    sync_heatmap_week_ui(buttons)
+    if "week_prev" in buttons:
+        panel_top = buttons["week_prev"].rect.y - 10
+        panel_bottom = buttons["range_more"].rect.bottom + 28
+        panel = pygame.Rect(10, panel_top, SIDEBAR_WIDTH - 20, panel_bottom - panel_top)
+        pygame.draw.rect(surface, (236, 242, 255), panel, border_radius=10)
+        pygame.draw.rect(surface, C_ACCENT, panel, 1, border_radius=10)
+        surface.blit(FONT_LABEL.render("坪效周次", True, C_TEXT), (panel.x + 12, panel.y + 8))
+        period = heatmap_period_title()
+        if len(period) > 34:
+            period = period[:31] + "…"
+        surface.blit(FONT_SMALL.render(period, True, C_ACCENT), (panel.x + 12, panel.bottom - 22))
     fam = template_family_filter or "全部"
     if "family_filter" in buttons:
         buttons["family_filter"].label = f"系列: {fam}"
@@ -5208,7 +5371,6 @@ def draw_sidebar(buttons, input_box, template_list_top):
     template_scroll_offset = min(template_scroll_offset, max_scroll)
     visible = filtered[template_scroll_offset : template_scroll_offset + visible_n]
     prefetch_template_list_images(visible)
-    slug = current_store_slug()
     count_label = f"{len(filtered)} 项" + (f" · 显示 {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}" if len(filtered) > visible_n else "")
     surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (16, y))
     y += 20
@@ -5228,18 +5390,14 @@ def draw_sidebar(buttons, input_box, template_list_top):
             surface.blit(scaled, scaled.get_rect(center=thumb.center))
         else:
             area = polygon_area(tpl.points)
-            amt = lookup_sales_amount(
-                tpl.name, tpl.product_family, shop_id=slug, num_weeks=heatmap_week_count
-            )
+            amt = lookup_sales_amount(tpl.name, tpl.product_family, **heatmap_lookup_kwargs())
             rps = revenue_per_sqm(amt, area)
             color_dot = revenue_per_sqm_to_color(rps, heatmap_vmin, heatmap_vmax)
             pygame.draw.circle(surface, color_dot, thumb.center, 10)
         tx = row.x + TEMPLATE_THUMB + 10
         family = getattr(tpl, "product_family", "") or "未分类"
         area = polygon_area(tpl.points)
-        amt = lookup_sales_amount(
-            tpl.name, tpl.product_family, shop_id=slug, num_weeks=heatmap_week_count
-        )
+        amt = lookup_sales_amount(tpl.name, tpl.product_family, **heatmap_lookup_kwargs())
         rps = revenue_per_sqm(amt, area)
         surface.blit(FONT_BODY.render(tpl.name, True, C_TEXT), (tx, row.y + 6))
         surface.blit(
@@ -5390,10 +5548,16 @@ def handle_toolbar_click(action, buttons):
         unbind_furniture()
     elif action == "roi_overlap":
         toggle_roi_overlap_hatch(buttons)
-    elif action == "weeks_less":
-        change_heatmap_weeks(-1, buttons)
-    elif action == "weeks_more":
-        change_heatmap_weeks(1, buttons)
+    elif action == "week_prev":
+        navigate_heatmap_week(-1, buttons)
+    elif action == "week_next":
+        navigate_heatmap_week(1, buttons)
+    elif action == "week_mode":
+        toggle_heatmap_week_mode(buttons)
+    elif action == "range_less":
+        change_heatmap_range_weeks(-1, buttons)
+    elif action == "range_more":
+        change_heatmap_range_weeks(1, buttons)
     elif action == "resize":
         if selected_marker_index is not None:
             start_edit_marker_dialog(focus_size=True)
@@ -5821,6 +5985,8 @@ def main():
                     if marquee_active:
                         marquee_current = (mx, my)
                         finish_marquee_selection()
+                    elif mx >= SIDEBAR_WIDTH and handle_heatmap_week_bar_click(event.pos[0], event.pos[1], editor_buttons):
+                        pass
                     elif mx < SIDEBAR_WIDTH:
                         home_btn = editor_buttons.get("home") if editor_buttons else None
                         if home_btn and home_btn.contains((mx, my)):
@@ -6007,6 +6173,7 @@ def main():
             draw_polygon_preview(screen)
             draw_scale_bar(screen)
             draw_heatmap_legend(screen)
+            draw_heatmap_week_bar(screen)
             draw_banner(screen)
             draw_sidebar(editor_buttons, input_box, template_list_top)
             draw_toast(screen)
