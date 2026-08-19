@@ -96,7 +96,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "1.8.8"
+APP_VERSION = "1.9.0"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -303,6 +303,10 @@ wall_endpoint_snapshot = None
 _furniture_display_cache: dict[tuple[str, str, int, int], object] = {}
 _furniture_aspect_cache: dict[tuple[str, str], float] = {}
 _last_furniture_prefetch_ms = 0
+_next_furniture_instance_id = 1
+pending_bind_child = None
+show_roi_overlap_hatch = False
+furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
 
 
 def clear_obstacle_selection():
@@ -475,6 +479,9 @@ def _furniture_snapshot(furnitures):
             "x": f.x,
             "y": f.y,
             "rotation": f.rotation,
+            "instance_id": getattr(f, "instance_id", "") or "",
+            "attach_to": getattr(f, "attach_to", "") or "",
+            "product_family": getattr(f, "product_family", "") or "",
         }
         for f in furnitures
     ]
@@ -483,17 +490,146 @@ def _furniture_snapshot(furnitures):
 def _furnitures_from_snapshot(snap):
     out = []
     for d in snap:
-        out.append(
-            Furniture(
-                d["name"],
-                d["roi"],
-                [tuple(p) for p in d["points"]],
-                d["x"],
-                d["y"],
-                d["rotation"],
-            )
+        furn = Furniture(
+            d["name"],
+            d["roi"],
+            [tuple(p) for p in d["points"]],
+            d.get("x", 0),
+            d.get("y", 0),
+            d.get("rotation", 0),
+            product_family=d.get("product_family", "") or "",
         )
+        furn.instance_id = d.get("instance_id", "") or ""
+        furn.attach_to = d.get("attach_to", "") or ""
+        out.append(furn)
     return out
+
+
+def _alloc_furniture_instance_id() -> str:
+    global _next_furniture_instance_id
+    iid = f"f{_next_furniture_instance_id}"
+    _next_furniture_instance_id += 1
+    return iid
+
+
+def sync_furniture_instance_ids():
+    global _next_furniture_instance_id
+    max_n = 0
+    for furn in placed_furnitures:
+        iid = getattr(furn, "instance_id", "") or ""
+        if not iid:
+            furn.instance_id = _alloc_furniture_instance_id()
+            iid = furn.instance_id
+        if isinstance(iid, str) and iid.startswith("f"):
+            try:
+                max_n = max(max_n, int(iid[1:]))
+            except ValueError:
+                pass
+    _next_furniture_instance_id = max(max_n + 1, _next_furniture_instance_id)
+
+
+def furniture_by_instance_id(instance_id: str):
+    if not instance_id:
+        return None
+    for furn in placed_furnitures:
+        if getattr(furn, "instance_id", "") == instance_id:
+            return furn
+    return None
+
+
+def furniture_attached_descendants(root) -> list:
+    if root is None:
+        return []
+    ids = {root.instance_id}
+    out: list = []
+    changed = True
+    while changed:
+        changed = False
+        for furn in placed_furnitures:
+            if furn.attach_to in ids and furn.instance_id not in ids:
+                ids.add(furn.instance_id)
+                out.append(furn)
+                changed = True
+    return out
+
+
+def furniture_drag_pack(root):
+    if root is None:
+        return []
+    return [root, *furniture_attached_descendants(root)]
+
+
+def bring_furniture_to_front(furn):
+    global placed_furnitures
+    if furn not in placed_furnitures:
+        return
+    push_undo()
+    placed_furnitures.remove(furn)
+    placed_furnitures.append(furn)
+    show_toast(f"{furn.name} 已置于顶层")
+
+
+def send_furniture_to_back(furn):
+    global placed_furnitures
+    if furn not in placed_furnitures:
+        return
+    push_undo()
+    placed_furnitures.remove(furn)
+    placed_furnitures.insert(0, furn)
+    show_toast(f"{furn.name} 已置于底层")
+
+
+def start_bind_to_parent():
+    global pending_bind_child
+    if selected_furniture is None:
+        show_toast("请先选中子件（如床垫）")
+        return
+    pending_bind_child = selected_furniture
+    show_toast(f"已选子件 {selected_furniture.name}，请点父件（如床架）")
+
+
+def cancel_bind_to_parent():
+    global pending_bind_child
+    pending_bind_child = None
+
+
+def complete_bind_to_parent(parent):
+    global pending_bind_child
+    child = pending_bind_child
+    if child is None or parent is None or child is parent:
+        return False
+    if parent.attach_to == child.instance_id:
+        show_toast("不能循环绑定")
+        pending_bind_child = None
+        return True
+    push_undo()
+    child.attach_to = parent.instance_id
+    pending_bind_child = None
+    show_toast(f"已绑定：{child.name} → {parent.name}（拖父件时联动）")
+    return True
+
+
+def unbind_furniture(furn=None):
+    global pending_bind_child
+    furn = furn or selected_furniture
+    if furn is None:
+        show_toast("请先选中要解绑的家具")
+        return
+    if not furn.attach_to:
+        show_toast("该家具未绑定父件")
+        return
+    push_undo()
+    furn.attach_to = ""
+    pending_bind_child = None
+    show_toast(f"已解绑 {furn.name}")
+
+
+def toggle_roi_overlap_hatch(buttons=None):
+    global show_roi_overlap_hatch
+    show_roi_overlap_hatch = not show_roi_overlap_hatch
+    if buttons and "roi_overlap" in buttons:
+        buttons["roi_overlap"].active = show_roi_overlap_hatch
+    show_toast("已显示重叠 ROI 条纹" if show_roi_overlap_hatch else "已隐藏重叠 ROI 条纹")
 
 
 def capture_layout_state():
@@ -529,6 +665,7 @@ def undo_layout():
     state = _undo_stack.pop()
     collision_polygons = state["collision_polygons"]
     placed_furnitures = _furnitures_from_snapshot(state["placed_furnitures"])
+    sync_furniture_instance_ids()
     layout_markers = state.get("layout_markers", [])
     store_width_mm = state.get("store_width_mm", store_width_mm)
     store_height_mm = state.get("store_height_mm", store_height_mm)
@@ -1513,6 +1650,8 @@ class Furniture:
         self.x = x
         self.y = y
         self.rotation = rotation
+        self.instance_id = ""
+        self.attach_to = ""
         self.dragging = False
         self._label_cache_key = None
         self._name_label_surf = None
@@ -1640,6 +1779,116 @@ def _inset_polygon(points, inset_mm=OBSTACLE_TOUCH_TOLERANCE_MM):
 def polygons_interior_overlap(poly_a, poly_b):
     """仅检测面积重叠，贴边相邻不算重叠。"""
     return polygons_overlap(_inset_polygon(poly_a), _inset_polygon(poly_b))
+
+
+def _line_intersection(p1, p2, p3, p4):
+    x1, y1, x2, y2 = p1[0], p1[1], p2[0], p2[1]
+    x3, y3, x4, y4 = p3[0], p3[1], p4[0], p4[1]
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(den) < 1e-9:
+        return p1
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+    return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+
+
+def _clip_polygon_half_plane(subject, edge_a, edge_b):
+    if not subject:
+        return []
+    output = []
+    for i in range(len(subject)):
+        curr = subject[i]
+        prev = subject[i - 1]
+        curr_in = _edge_inside(curr, edge_a, edge_b)
+        prev_in = _edge_inside(prev, edge_a, edge_b)
+        if curr_in:
+            if not prev_in:
+                output.append(_line_intersection(prev, curr, edge_a, edge_b))
+            output.append(curr)
+        elif prev_in:
+            output.append(_line_intersection(prev, curr, edge_a, edge_b))
+    return output
+
+
+def _edge_inside(point, edge_a, edge_b):
+    return (
+        (edge_b[0] - edge_a[0]) * (point[1] - edge_a[1])
+        - (edge_b[1] - edge_a[1]) * (point[0] - edge_a[0])
+    ) >= -1e-6
+
+
+def convex_polygon_intersection(poly_a, poly_b):
+    if len(poly_a) < 3 or len(poly_b) < 3:
+        return []
+    output = list(poly_a)
+    for i in range(len(poly_b)):
+        edge_a = poly_b[i]
+        edge_b = poly_b[(i + 1) % len(poly_b)]
+        output = _clip_polygon_half_plane(output, edge_a, edge_b)
+        if not output:
+            return []
+    return output
+
+
+def _darken_color(color, factor=0.55):
+    return tuple(max(0, min(255, int(c * factor))) for c in color[:3])
+
+
+def draw_crosshatch_polygon(surface, screen_pts, color_a, color_b, spacing=7):
+    if len(screen_pts) < 3:
+        return
+    xs = [p[0] for p in screen_pts]
+    ys = [p[1] for p in screen_pts]
+    min_x, max_x = int(min(xs)), int(max(xs))
+    min_y, max_y = int(min(ys)), int(max(ys))
+    w = max_x - min_x + 1
+    h = max_y - min_y + 1
+    if w < 3 or h < 3:
+        return
+    local_pts = [(p[0] - min_x, p[1] - min_y) for p in screen_pts]
+    mask = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.polygon(mask, (255, 255, 255, 150), local_pts)
+    ca = (*color_a[:3], 130)
+    cb = (*color_b[:3], 130)
+    for i in range(-h, w + h, spacing):
+        pygame.draw.line(mask, ca, (i, 0), (i + h, h), 1)
+    for i in range(-h, w + h, spacing):
+        pygame.draw.line(mask, cb, (i, h), (i + h, 0), 1)
+    surface.blit(mask, (min_x, min_y))
+
+
+def draw_furniture_roi_overlaps(surface):
+    if not show_roi_overlap_hatch or len(placed_furnitures) < 2:
+        return
+    n = len(placed_furnitures)
+    for i in range(n):
+        for j in range(i + 1, n):
+            a = placed_furnitures[i]
+            b = placed_furnitures[j]
+            if not furniture_on_screen(a) and not furniture_on_screen(b):
+                continue
+            pts_a = a.get_rotated_points()
+            pts_b = b.get_rotated_points()
+            if not polygons_overlap(pts_a, pts_b):
+                continue
+            overlap = convex_polygon_intersection(pts_a, pts_b)
+            if len(overlap) < 3:
+                continue
+            screen_pts = [world_to_screen(x, y) for x, y in overlap]
+            color_a = roi_to_color(a.roi)
+            color_b = roi_to_color(b.roi)
+            draw_crosshatch_polygon(surface, screen_pts, color_a, color_b)
+            cx = sum(p[0] for p in screen_pts) / len(screen_pts)
+            cy = sum(p[1] for p in screen_pts) / len(screen_pts)
+            if max(max(p[0] for p in screen_pts) - min(p[0] for p in screen_pts), 28) >= 28:
+                label = f"{a.name}∩{b.name}"
+                draw_label_pill(
+                    surface,
+                    label,
+                    (cx, cy),
+                    font=FONT_TINY,
+                    fg=C_TEXT,
+                    bg=(255, 255, 255, 220),
+                )
 
 
 def obstacle_is_wall(col) -> bool:
@@ -2565,7 +2814,17 @@ def build_layout_data(filepath):
         "store_slug": catalog_slug_for_path(filepath),
         "store": {"width_mm": store_width_mm, "height_mm": store_height_mm},
         "furnitures": [
-            {"name": f.name, "roi": f.roi, "x": f.x, "y": f.y, "rotation": f.rotation, "points": f.points}
+            {
+                "name": f.name,
+                "roi": f.roi,
+                "x": f.x,
+                "y": f.y,
+                "rotation": f.rotation,
+                "points": f.points,
+                "instance_id": getattr(f, "instance_id", "") or "",
+                "attach_to": getattr(f, "attach_to", "") or "",
+                "product_family": getattr(f, "product_family", "") or "",
+            }
             for f in placed_furnitures
         ],
         "obstacles": collision_polygons,
@@ -2677,11 +2936,19 @@ def load_layout(filepath, *, keep_undo=False):
     store_height_mm = int(store.get("height_mm", store_height_mm))
     placed_furnitures = []
     for f in data.get("furnitures", []):
-        furniture = Furniture(f["name"], f["roi"], f["points"])
+        furniture = Furniture(
+            f["name"],
+            f["roi"],
+            f["points"],
+            product_family=f.get("product_family", "") or "",
+        )
         furniture.x = f.get("x", 0)
         furniture.y = f.get("y", 0)
         furniture.rotation = f.get("rotation", 0)
+        furniture.instance_id = f.get("instance_id", "") or ""
+        furniture.attach_to = f.get("attach_to", "") or ""
         placed_furnitures.append(furniture)
+    sync_furniture_instance_ids()
     collision_polygons = data.get("obstacles", [])
     layout_markers = normalize_layout_markers(data.get("markers", []))
     clear_furniture_display_cache()
@@ -4018,6 +4285,7 @@ def add_furniture_to_canvas():
     global selected_furniture, selected_feature, selected_collision, selected_marker_index
     tpl = furniture_templates[selected_template_index]
     new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points], product_family=tpl.product_family)
+    new_furn.instance_id = _alloc_furniture_instance_id()
     wx, wy = viewport_world_center()
     find_clear_furniture_position(new_furn, wx, wy)
     push_undo()
@@ -4037,7 +4305,12 @@ def delete_selected():
     if selected_furniture is not None:
         push_undo()
         name = selected_furniture.name
+        removed_id = getattr(selected_furniture, "instance_id", "")
         placed_furnitures.remove(selected_furniture)
+        if removed_id:
+            for furn in placed_furnitures:
+                if furn.attach_to == removed_id:
+                    furn.attach_to = ""
         selected_furniture = selected_feature = None
         show_toast(f"已删除家具: {name}")
     elif selected_marker_index is not None:
@@ -4622,6 +4895,16 @@ def draw_banner(surface):
         pygame.draw.rect(surface, C_ACCENT, rect, 1, border_radius=8)
         text = FONT_SMALL.render("刨除障碍 — 碰边停 | 拐点后可向内转 | Shift 水平/垂直 | Enter 完成", True, C_ACCENT)
         surface.blit(text, text.get_rect(center=rect.center))
+    elif pending_bind_child is not None:
+        rect = pygame.Rect(SIDEBAR_WIDTH + 16, 12, CANVAS_RECT.width - 32, 36)
+        pygame.draw.rect(surface, C_SUCCESS_LIGHT, rect, border_radius=8)
+        pygame.draw.rect(surface, C_SUCCESS, rect, 1, border_radius=8)
+        text = FONT_SMALL.render(
+            f"绑定父件：子件 {pending_bind_child.name} — 请点击父件（床架）  |  Esc 取消",
+            True,
+            C_SUCCESS,
+        )
+        surface.blit(text, text.get_rect(center=rect.center))
 
 
 def draw_toast(surface):
@@ -4708,6 +4991,14 @@ def build_sidebar_ui():
     y += 42
     buttons["rotate_mode"] = Button((pad, y, w, 30), "旋转: 微调 15°", "rotate_mode", toggle=True)
     y += 38
+    buttons["layer_front"] = Button((pad, y, bw, 34), "置顶", "layer_front")
+    buttons["layer_back"] = Button((pad + bw + 8, y, bw, 34), "置底", "layer_back")
+    y += 42
+    buttons["bind_parent"] = Button((pad, y, bw, 34), "绑定父件", "bind_parent")
+    buttons["unbind"] = Button((pad + bw + 8, y, bw, 34), "解绑", "unbind")
+    y += 42
+    buttons["roi_overlap"] = Button((pad, y, w, 30), "重叠 ROI 条纹", "roi_overlap", toggle=True)
+    y += 38
     buttons["resize"] = Button((pad, y, w, 34), "修改尺寸", "resize")
     y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
@@ -4735,12 +5026,15 @@ def draw_sidebar(buttons, input_box, template_list_top):
         "save", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall",
         "add_entrance", "add_stairs", "add_cashier", "add_fire_exit", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
-        "rotate_mode", "resize", "rename", "delete", "family_filter",
+        "rotate_mode", "layer_front", "layer_back", "bind_parent", "unbind", "roi_overlap",
+        "resize", "rename", "delete", "family_filter",
     ):
         buttons[key].draw(surface)
     buttons["obstacle"].active = drawing_polygon
     buttons["rotate_mode"].active = rotation_mode == "90"
     buttons["rotate_mode"].label = f"旋转: {rotation_mode_label()}"
+    if "roi_overlap" in buttons:
+        buttons["roi_overlap"].active = show_roi_overlap_hatch
     fam = template_family_filter or "全部"
     if "family_filter" in buttons:
         buttons["family_filter"].label = f"系列: {fam}"
@@ -4804,7 +5098,17 @@ def draw_sidebar(buttons, input_box, template_list_top):
     elif selected_feature:
         surface.blit(FONT_SMALL.render(f"选中: {selected_feature.name}", True, C_ACCENT), (16, y))
         y += 20
-        surface.blit(FONT_SMALL.render(f"旋转 {selected_feature.rotation:.0f}°  |  ROI {selected_feature.roi:.1f}", True, C_MUTED), (16, y))
+        layer_idx = placed_furnitures.index(selected_feature) + 1 if selected_feature in placed_furnitures else 0
+        parent = furniture_by_instance_id(getattr(selected_feature, "attach_to", ""))
+        parent_txt = f"  |  绑定→{parent.name}" if parent else ""
+        surface.blit(
+            FONT_SMALL.render(
+                f"旋转 {selected_feature.rotation:.0f}°  |  ROI {selected_feature.roi:.1f}  |  层 {layer_idx}/{len(placed_furnitures)}{parent_txt}",
+                True,
+                C_MUTED,
+            ),
+            (16, y),
+        )
     elif selected_collisions:
         if len(selected_collisions) == 1:
             name = collision_polygons[selected_collision]["name"]
@@ -4899,6 +5203,22 @@ def handle_toolbar_click(action, buttons):
         rotate_selected(1)
     elif action == "rotate_mode":
         toggle_rotation_mode()
+    elif action == "layer_front":
+        if selected_furniture is not None:
+            bring_furniture_to_front(selected_furniture)
+        else:
+            show_toast("请先选中家具")
+    elif action == "layer_back":
+        if selected_furniture is not None:
+            send_furniture_to_back(selected_furniture)
+        else:
+            show_toast("请先选中家具")
+    elif action == "bind_parent":
+        start_bind_to_parent()
+    elif action == "unbind":
+        unbind_furniture()
+    elif action == "roi_overlap":
+        toggle_roi_overlap_hatch(buttons)
     elif action == "resize":
         if selected_marker_index is not None:
             start_edit_marker_dialog(focus_size=True)
@@ -4971,7 +5291,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
     global selected_furniture, selected_feature, selected_marker_index
     global dragging_furniture, dragging_collision, collision_drag_offset, collision_drag_snapshot, multi_drag_snapshots
     global current_polygon, preview_point, dragging_marker, marker_drag_offset
-    global dragging_wall_endpoint, wall_endpoint_snapshot
+    global dragging_wall_endpoint, wall_endpoint_snapshot, furniture_drag_snapshot, pending_bind_child
 
     wx, wy = screen_to_world(mx, my)
 
@@ -5061,12 +5381,19 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
 
     for f in reversed(placed_furnitures):
         if f.is_label_clicked(mx, my) or f.is_clicked(mx, my):
+            if pending_bind_child is not None:
+                complete_bind_to_parent(f)
+                return
             dragging_furniture = f
             f.dragging = True
             selected_furniture = f
             selected_feature = f
             selected_marker_index = None
             clear_obstacle_selection()
+            furniture_drag_snapshot = {
+                item.instance_id: (item.x, item.y)
+                for item in furniture_drag_pack(f)
+            }
             return
 
     for i, col in enumerate(collision_polygons):
@@ -5331,6 +5658,7 @@ def main():
                     if dragging_furniture:
                         dragging_furniture.dragging = False
                         dragging_furniture = None
+                    furniture_drag_snapshot = {}
                     if dragging_marker and selected_marker_index is not None:
                         marker = layout_markers[selected_marker_index]
                         marker["x_mm"], marker["y_mm"] = snap_world_point(
@@ -5390,8 +5718,15 @@ def main():
                 elif dragging_furniture and dragging_furniture.dragging:
                     old_x, old_y = dragging_furniture.x, dragging_furniture.y
                     dragging_furniture.x, dragging_furniture.y = wx, wy
+                    dx, dy = dragging_furniture.x - old_x, dragging_furniture.y - old_y
+                    for child in furniture_attached_descendants(dragging_furniture):
+                        child.x += dx
+                        child.y += dy
                     if check_collision(dragging_furniture, collision_polygons):
-                        dragging_furniture.x, dragging_furniture.y = old_x, old_y
+                        for iid, (ox, oy) in furniture_drag_snapshot.items():
+                            item = furniture_by_instance_id(iid)
+                            if item is not None:
+                                item.x, item.y = ox, oy
                 elif dragging_marker and selected_marker_index is not None:
                     marker = layout_markers[selected_marker_index]
                     marker["x_mm"] = int(round(wx + marker_drag_offset[0]))
@@ -5431,6 +5766,10 @@ def main():
                         toggle_draw_obstacle(False)
                         editor_buttons["obstacle"].active = False
                 else:
+                    if event.key == pygame.K_ESCAPE and pending_bind_child is not None:
+                        cancel_bind_to_parent()
+                        show_toast("已取消绑定")
+                        continue
                     mods = pygame.key.get_mods()
                     if not search_box_active and not renaming_store and not editing_obstacle_dialog and not editing_marker_dialog:
                         if event.key == pygame.K_z and mods & pygame.KMOD_CTRL:
@@ -5486,6 +5825,7 @@ def main():
                     f.draw(screen, selected=False)
             if selected_furniture is not None:
                 selected_furniture.draw(screen, selected=True)
+            draw_furniture_roi_overlaps(screen)
             prefetch_furniture_images()
             draw_selection_overlay(screen)
             draw_marquee(screen)
