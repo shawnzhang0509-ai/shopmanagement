@@ -921,7 +921,12 @@ def _database_url(cfg: dict) -> str | None:
     return build_database_url(cfg)
 
 
-def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
+def _fetch_raw_rows(
+    cfg: dict,
+    query: str | None = None,
+    *,
+    canonicalize: bool = True,
+) -> list[dict]:
     global _last_sql_file
     url = _database_url(cfg)
     if not url:
@@ -931,6 +936,11 @@ def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
 
     from sqlalchemy import create_engine, text
 
+    def _row_from_raw(raw: dict) -> dict:
+        if canonicalize:
+            return _canonicalize_row(raw)
+        return dict(raw)
+
     def _execute(sql_text: str) -> list[dict]:
         engine = create_engine(url, connect_args={"timeout": 30})
         rows: list[dict] = []
@@ -939,7 +949,7 @@ def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
             keys = list(result.keys())
             for row in result:
                 raw = {keys[i]: row[i] for i in range(len(keys))}
-                rows.append(_canonicalize_row(raw))
+                rows.append(_row_from_raw(raw))
         return rows
 
     if (query or cfg.get("query") or "").strip():
@@ -968,6 +978,56 @@ def _fetch_raw_rows(cfg: dict, query: str | None = None) -> list[dict]:
     if last_exc is not None:
         raise RuntimeError(f"{format_db_error(last_exc)}\n{hint}") from last_exc
     raise RuntimeError(hint)
+
+
+def write_rows_to_excel(rows: list[dict], path: str) -> None:
+    """通用 SQL 结果导出：保留原始列名（用于周销量等非 Display 数据）。"""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if not rows:
+        try:
+            import pandas as pd
+
+            pd.DataFrame().to_excel(path, index=False)
+            return
+        except ImportError:
+            from openpyxl import Workbook
+
+            Workbook().save(path)
+            return
+
+    columns: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row:
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
+
+    try:
+        import pandas as pd
+
+        pd.DataFrame(rows, columns=columns).to_excel(path, index=False)
+        return
+    except ImportError:
+        pass
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(columns)
+    for row in rows:
+        ws.append([row.get(col) for col in columns])
+    wb.save(path)
+
+
+def grab_sql_to_excel(cfg: dict | None = None) -> tuple[list[dict], str]:
+    """通用抓取：cfg 指定 sql_file + output_excel，写入 Excel 并返回原始行。"""
+    runtime = build_runtime_config(cfg)
+    rows = _fetch_raw_rows(runtime, canonicalize=False)
+    excel_path = runtime["output_excel"]
+    write_rows_to_excel(rows, excel_path)
+    return rows, excel_path
 
 
 def export_rows_to_excel(rows: list[dict], path: str) -> None:
