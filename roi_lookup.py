@@ -1,4 +1,4 @@
-"""从 roi.xlsx 按 product_family 查询 ROI。"""
+"""从 roi.xlsx 或周销量 Excel 按 product_family 查询 ROI。"""
 from __future__ import annotations
 
 import os
@@ -87,10 +87,23 @@ def load_roi_map() -> dict[str, float]:
     return _roi_cache
 
 
-def lookup_roi(product_family: str) -> float:
+def lookup_roi(product_family: str, shop_id: str | None = None) -> float:
     if not product_family:
         return 0.0
-    return load_roi_map().get(_normalize_key(product_family), 0.0)
+
+    static = load_roi_map().get(_normalize_key(product_family), 0.0)
+    if static > 0:
+        return static
+
+    try:
+        from sales_lookup import lookup_sales_roi, sales_data_available
+
+        if sales_data_available():
+            return lookup_sales_roi(product_family, shop_id)
+    except Exception:
+        pass
+
+    return 0.0
 
 
 def reload_roi_map() -> dict[str, float]:

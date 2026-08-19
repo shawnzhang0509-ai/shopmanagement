@@ -6,6 +6,8 @@
   "sql_file": "sql/display.sql",
   "output_excel": "data/display.xlsx",
   "output_json": "data/display_cache.json",
+  "sales_sql_file": "sql/weekly_sales.sql",
+  "sales_output_excel": "data/weekly_sales.xlsx",
   "blacklist_file": "data/display_blacklist.csv",
   "image_base_url": "https://ierpapi.ifurniture.co.nz/",
   "schedule_interval": 30,
