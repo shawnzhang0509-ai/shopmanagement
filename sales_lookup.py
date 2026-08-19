@@ -18,6 +18,7 @@ SALES_SQL = os.path.join(SCRIPT_DIR, "sql", "weekly_sales.sql")
 
 _sales_cache: list["WeeklySalesRow"] | None = None
 _family_totals_cache: dict[tuple[str | None, str], dict[str, float]] = {}
+_sku_totals_cache: dict[tuple[str | None, str], dict[str, float]] = {}
 
 
 def _normalize_key(value: Any) -> str:
@@ -228,10 +229,11 @@ def resolve_product_family(key: str, *, shop_id: str | None = None) -> str:
 
 
 def reload_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
-    global _sales_cache, _family_totals_cache, _sku_family_map
+    global _sales_cache, _family_totals_cache, _sku_family_map, _sku_totals_cache
     _sales_cache = None
     _family_totals_cache = {}
     _sku_family_map = None
+    _sku_totals_cache = {}
     return load_weekly_sales(path)
 
 
@@ -260,6 +262,53 @@ def aggregate_by_family(
 
     _family_totals_cache[cache_key] = totals
     return totals
+
+
+def aggregate_by_sku(
+    shop_id: str | None = None,
+    *,
+    path: str | None = None,
+) -> dict[str, dict[str, float]]:
+    """按 Sku 汇总销量/金额（可选按门店 shop_id 过滤）。"""
+    cache_key = (shop_id, path or DEFAULT_EXCEL)
+    if cache_key in _sku_totals_cache:
+        return _sku_totals_cache[cache_key]
+
+    totals: dict[str, dict[str, float]] = {}
+    for row in load_weekly_sales(path):
+        if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
+            continue
+        sku = _normalize_key(row.sku)
+        if not sku:
+            continue
+        bucket = totals.setdefault(
+            sku,
+            {"total_qty": 0.0, "total_amount": 0.0, "order_count": 0.0, "product_family": row.product_family},
+        )
+        bucket["total_qty"] += row.total_qty
+        bucket["total_amount"] += row.total_amount
+        bucket["order_count"] += row.order_count
+        if row.product_family and not bucket.get("product_family"):
+            bucket["product_family"] = row.product_family
+
+    _sku_totals_cache[cache_key] = totals
+    return totals
+
+
+def lookup_sales_roi_by_sku(sku: str, shop_id: str | None = None) -> float:
+    if not sku:
+        return 0.0
+    totals = aggregate_by_sku(shop_id)
+    if not totals:
+        return 0.0
+    key = _normalize_key(sku)
+    mine = totals.get(key)
+    if not mine or mine["total_amount"] <= 0:
+        return 0.0
+    max_amount = max(v["total_amount"] for v in totals.values() if v["total_amount"] > 0)
+    if max_amount <= 0:
+        return 0.0
+    return min(10.0, mine["total_amount"] / max_amount * 10.0)
 
 
 def lookup_sales_roi(product_family: str, shop_id: str | None = None) -> float:

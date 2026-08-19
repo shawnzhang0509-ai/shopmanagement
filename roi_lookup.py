@@ -106,7 +106,7 @@ def lookup_roi(product_family: str, shop_id: str | None = None) -> float:
         return static
 
     try:
-        from sales_lookup import lookup_sales_roi, sales_data_available
+        from sales_lookup import lookup_sales_roi, lookup_sales_roi_by_sku, sales_data_available
 
         if not sales_data_available():
             return 0.0
@@ -114,11 +114,37 @@ def lookup_roi(product_family: str, shop_id: str | None = None) -> float:
         if roi > 0:
             return roi
         if family != product_family:
-            return lookup_sales_roi(product_family, shop_id)
+            roi = lookup_sales_roi(product_family, shop_id)
+            if roi > 0:
+                return roi
+        roi = lookup_sales_roi_by_sku(product_family, shop_id)
+        if roi > 0:
+            return roi
+        if family != product_family:
+            return lookup_sales_roi_by_sku(family, shop_id)
     except Exception:
         pass
 
     return 0.0
+
+
+def resolve_furniture_roi(
+    name: str,
+    product_family: str = "",
+    shop_id: str | None = None,
+) -> tuple[str, float]:
+    """解析 SKU/系列并返回 (product_family, roi)。"""
+    raw = (product_family or name or "").strip()
+    try:
+        from sales_lookup import resolve_product_family
+
+        family = resolve_product_family(raw, shop_id=shop_id) or raw
+    except Exception:
+        family = raw
+    roi = lookup_roi(family, shop_id)
+    if roi <= 0 and raw and _normalize_key(raw) != _normalize_key(family):
+        roi = lookup_roi(raw, shop_id)
+    return family, roi
 
 
 def reload_roi_map() -> dict[str, float]:

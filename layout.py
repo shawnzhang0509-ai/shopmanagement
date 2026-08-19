@@ -29,7 +29,7 @@ except ModuleNotFoundError:
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from roi_lookup import lookup_roi
+from roi_lookup import lookup_roi, resolve_furniture_roi
 
 pygame.init()
 
@@ -2944,13 +2944,22 @@ def load_layout(filepath, *, keep_undo=False):
     store = data.get("store", {})
     store_width_mm = int(store.get("width_mm", store_width_mm))
     store_height_mm = int(store.get("height_mm", store_height_mm))
+    store_slug = data.get("store_slug") or catalog_slug_for_path(filepath)
     placed_furnitures = []
     for f in data.get("furnitures", []):
+        name = f.get("name", "")
+        family, roi = resolve_furniture_roi(
+            name,
+            f.get("product_family", "") or "",
+            store_slug,
+        )
+        if roi <= 0:
+            roi = float(f.get("roi") or 0)
         furniture = Furniture(
-            f["name"],
-            f["roi"],
+            name,
+            roi,
             f["points"],
-            product_family=f.get("product_family", "") or "",
+            product_family=family,
         )
         furniture.x = f.get("x", 0)
         furniture.y = f.get("y", 0)
