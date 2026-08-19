@@ -1,6 +1,7 @@
 """坪效热力图：按近 N 周销量计算 元/㎡（每平方米销售额）。"""
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -13,6 +14,19 @@ from sales_lookup import (
 
 _week_keys_cache: dict[tuple[str | None, int], set[str]] = {}
 _amount_cache: dict[tuple[str, str, str | None, int], float] = {}
+
+# 9 档渐变色：蓝 → 青 → 绿 → 黄 → 橙 → 红（差几百块也能分清）
+HEATMAP_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (235, 245, 255),
+    (147, 197, 253),
+    (56, 189, 248),
+    (52, 211, 153),
+    (250, 204, 21),
+    (251, 146, 60),
+    (248, 113, 113),
+    (220, 38, 38),
+    (88, 28, 28),
+)
 
 
 def _week_key(period: str) -> str:
@@ -114,22 +128,45 @@ def format_revenue_per_sqm(value: float) -> str:
     return f"${value:.1f}/㎡"
 
 
-def revenue_per_sqm_to_color(value: float, vmin: float, vmax: float) -> tuple[int, int, int]:
-    """浅 → 深热力色（元/㎡）。"""
+def adaptive_color_step(vmin: float, vmax: float) -> float:
+    """按坪效跨度自动选择分档步长（每档一种主色）。"""
+    span = max(0.0, float(vmax) - float(vmin))
+    if span <= 0:
+        return 200.0
+    if span <= 350:
+        return 80.0
+    if span <= 700:
+        return 150.0
+    if span <= 1400:
+        return 200.0
+    if span <= 3000:
+        return 300.0
+    return 500.0
+
+
+def heatmap_normalize_t(
+    value: float,
+    vmin: float,
+    vmax: float,
+    *,
+    step: float | None = None,
+) -> float:
+    """把元/㎡ 映射到 0–1；按金额分档 + 轻微 gamma，拉开几百块差距。"""
     if value <= 0:
-        return (245, 245, 245)
+        return 0.0
     if vmax <= vmin:
-        t = 0.65
-    else:
-        t = (value - vmin) / (vmax - vmin)
-    t = max(0.0, min(1.0, t))
-    stops = (
-        (255, 247, 235),
-        (254, 215, 164),
-        (251, 146, 60),
-        (220, 38, 38),
-        (127, 29, 29),
-    )
+        return 0.65
+    step = max(50.0, float(step or adaptive_color_step(vmin, vmax)))
+    offset = max(0.0, float(value) - float(vmin))
+    band_index = int(offset // step)
+    max_band = max(1, math.ceil((float(vmax) - float(vmin)) / step))
+    frac = (offset % step) / step
+    t = min(band_index + frac, float(max_band)) / float(max_band)
+    return max(0.0, min(1.0, t ** 0.72))
+
+
+def _lerp_palette(t: float) -> tuple[int, int, int]:
+    stops = HEATMAP_PALETTE
     seg = t * (len(stops) - 1)
     idx = int(seg)
     if idx >= len(stops) - 1:
@@ -137,6 +174,36 @@ def revenue_per_sqm_to_color(value: float, vmin: float, vmax: float) -> tuple[in
     frac = seg - idx
     a, b = stops[idx], stops[idx + 1]
     return tuple(int(a[i] + (b[i] - a[i]) * frac) for i in range(3))
+
+
+def revenue_per_sqm_to_color(
+    value: float,
+    vmin: float,
+    vmax: float,
+    *,
+    step: float | None = None,
+) -> tuple[int, int, int]:
+    """多档热力色（元/㎡）；坪效差几百块也会有不同色相。"""
+    if value <= 0:
+        return (235, 238, 242)
+    step = step or adaptive_color_step(vmin, vmax)
+    t = heatmap_normalize_t(value, vmin, vmax, step=step)
+    return _lerp_palette(t)
+
+
+def legend_tick_values(vmin: float, vmax: float, *, step: float | None = None) -> list[float]:
+    """图例刻度：低、中、高 + 分档线。"""
+    if vmax <= vmin:
+        return [vmin]
+    step = step or adaptive_color_step(vmin, vmax)
+    ticks = [vmin]
+    cursor = math.ceil(vmin / step) * step if vmin > 0 else step
+    while cursor < vmax:
+        ticks.append(cursor)
+        cursor += step
+    if ticks[-1] != vmax:
+        ticks.append(vmax)
+    return ticks[:6]
 
 
 def sales_data_ready() -> bool:

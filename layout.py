@@ -31,7 +31,9 @@ from tkinter import filedialog, messagebox
 
 from roi_lookup import lookup_roi, resolve_furniture_roi
 from heatmap_metrics import (
+    adaptive_color_step,
     format_revenue_per_sqm,
+    legend_tick_values,
     lookup_sales_amount,
     revenue_per_sqm,
     revenue_per_sqm_to_color,
@@ -105,7 +107,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -318,6 +320,7 @@ show_roi_overlap_hatch = False
 heatmap_week_count = 4
 heatmap_vmin = 0.0
 heatmap_vmax = 1.0
+heatmap_color_step = 200.0
 furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
 
 
@@ -1650,7 +1653,7 @@ def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> flo
 
 
 def recompute_heatmap_metrics() -> None:
-    global heatmap_vmin, heatmap_vmax
+    global heatmap_vmin, heatmap_vmax, heatmap_color_step
     slug = current_store_slug()
     values: list[float] = []
     for furn in placed_furnitures:
@@ -1659,6 +1662,7 @@ def recompute_heatmap_metrics() -> None:
             values.append(furn.revenue_per_sqm)
     heatmap_vmin = min(values) if values else 0.0
     heatmap_vmax = max(values) if values else 1.0
+    heatmap_color_step = adaptive_color_step(heatmap_vmin, heatmap_vmax)
 
 
 def change_heatmap_weeks(delta: int, buttons=None) -> None:
@@ -1672,7 +1676,9 @@ def change_heatmap_weeks(delta: int, buttons=None) -> None:
 
 
 def heatmap_color_for_value(value: float) -> tuple[int, int, int]:
-    return revenue_per_sqm_to_color(value, heatmap_vmin, heatmap_vmax)
+    return revenue_per_sqm_to_color(
+        value, heatmap_vmin, heatmap_vmax, step=heatmap_color_step
+    )
 
 
 def _shade_color(color, factor=0.55):
@@ -1756,11 +1762,11 @@ class Furniture:
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
         fill = heatmap_color_for_value(self.revenue_per_sqm)
         pygame.draw.polygon(surface, fill, pts)
-        border_w = 3 if selected else 2
+        border_w = 4 if selected else 3
         if selected:
             border_c = C_SELECTION
         else:
-            border_c = _shade_color(fill, 0.45)
+            border_c = _shade_color(fill, 0.35)
         pygame.draw.polygon(surface, border_c, pts, border_w)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
@@ -1778,10 +1784,10 @@ class Furniture:
             if img is not None:
                 img_rect = img.get_rect(center=(int(cx), int(cy)))
                 if display_w >= 20:
-                    shadow_rect = img_rect.inflate(6, 6)
-                    backdrop = _blend_colors(fill, (255, 255, 255), 0.25)
+                    shadow_rect = img_rect.inflate(8, 8)
+                    backdrop = _blend_colors(fill, (255, 255, 255), 0.42)
                     pygame.draw.rect(surface, backdrop, shadow_rect, border_radius=4)
-                    pygame.draw.rect(surface, _shade_color(fill, 0.5), shadow_rect, 2, border_radius=4)
+                    pygame.draw.rect(surface, _shade_color(fill, 0.35), shadow_rect, 3, border_radius=4)
                 surface.blit(img, img_rect)
             else:
                 inner = [
@@ -4998,32 +5004,36 @@ def draw_scale_bar(surface):
 def draw_heatmap_legend(surface):
     if not placed_furnitures or not sales_data_ready():
         return
-    bar_w, bar_h = 18, 128
+    bar_w, bar_h = 20, 150
     pad = 12
-    box_w = 150
-    box_h = bar_h + 54
+    box_w = 168
+    box_h = bar_h + 72
     x0 = SCREEN_WIDTH - box_w - 16
     y0 = SCREEN_HEIGHT - box_h - 16
     box = pygame.Rect(x0, y0, box_w, box_h)
     pygame.draw.rect(surface, (255, 255, 255), box, border_radius=8)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=8)
-    title = FONT_SMALL.render(f"元/㎡ · 近{heatmap_week_count}周", True, C_TEXT)
+    step = heatmap_color_step
+    title = FONT_SMALL.render(f"元/㎡ · 近{heatmap_week_count}周 · 每档≈${step:.0f}", True, C_TEXT)
     surface.blit(title, (box.x + pad, box.y + 8))
     bx = box.right - pad - bar_w
-    by = box.y + 34
+    by = box.y + 36
     for i in range(bar_h):
         t = 1.0 - (i / max(1, bar_h - 1))
         probe = heatmap_vmin + (heatmap_vmax - heatmap_vmin) * t
-        color = revenue_per_sqm_to_color(probe, heatmap_vmin, heatmap_vmax)
+        color = revenue_per_sqm_to_color(probe, heatmap_vmin, heatmap_vmax, step=step)
         pygame.draw.line(surface, color, (bx, by + i), (bx + bar_w, by + i))
     pygame.draw.rect(surface, C_BORDER, pygame.Rect(bx, by, bar_w, bar_h), 1)
-    high_txt = format_revenue_per_sqm(heatmap_vmax)
-    low_txt = format_revenue_per_sqm(heatmap_vmin if heatmap_vmax > heatmap_vmin else 0)
-    surface.blit(FONT_MARK.render(high_txt, True, C_MUTED), (box.x + pad, by))
-    surface.blit(
-        FONT_MARK.render(low_txt, True, C_MUTED),
-        (box.x + pad, by + bar_h - FONT_MARK.get_height()),
-    )
+    ticks = legend_tick_values(heatmap_vmin, heatmap_vmax, step=step)
+    for tick in ticks:
+        if heatmap_vmax <= heatmap_vmin:
+            ratio = 0.0
+        else:
+            ratio = (tick - heatmap_vmin) / (heatmap_vmax - heatmap_vmin)
+        ty = by + int((1.0 - ratio) * (bar_h - 1))
+        pygame.draw.line(surface, C_BORDER, (bx - 4, ty), (bx, ty), 1)
+        label = FONT_MARK.render(format_revenue_per_sqm(tick), True, C_MUTED)
+        surface.blit(label, (box.x + pad, ty - label.get_height() // 2))
     weeks = list_recent_week_keys(current_store_slug(), heatmap_week_count)
     if weeks:
         week_hint = FONT_MARK.render(f"{weeks[0]} … {weeks[-1]}", True, C_MUTED)
