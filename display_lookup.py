@@ -719,8 +719,16 @@ def load_grabber_config() -> dict:
 
 def save_grabber_config(cfg: dict) -> None:
     path = GRABBER_CONFIG
+    existing: dict = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    merged = {**existing, **cfg}
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        json.dump(merged, f, ensure_ascii=False, indent=2)
 
 
 def _resolve_path(path: str) -> str:
@@ -1068,6 +1076,78 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
     wb.save(path)
 
 
+def sales_runtime_config(cfg: dict | None = None) -> dict:
+    """周销量抓取路径（与 Display 共用 database_url）。"""
+    base = build_runtime_config(cfg)
+    sql_file = base.get("sales_sql_file") or os.path.join(
+        base.get("sql_folder") or "sql", "weekly_sales.sql"
+    )
+    if not os.path.isabs(sql_file):
+        sql_file = os.path.join(SCRIPT_DIR, sql_file)
+    output_excel = base.get("sales_output_excel") or os.path.join(
+        base.get("output_folder") or "data", "weekly_sales.xlsx"
+    )
+    if not os.path.isabs(output_excel):
+        output_excel = os.path.join(SCRIPT_DIR, output_excel)
+    return {**base, "sql_file": sql_file, "output_excel": output_excel}
+
+
+def grab_weekly_sales(cfg: dict | None = None) -> tuple[list[dict], str]:
+    """周销量抓取：SQL → data/weekly_sales.xlsx。"""
+    runtime = sales_runtime_config(cfg)
+    rows, excel_path = grab_sql_to_excel(runtime)
+    try:
+        from sales_lookup import reload_weekly_sales
+
+        reload_weekly_sales(excel_path)
+    except Exception:
+        pass
+    return rows, excel_path
+
+
+def run_grab_pipeline(
+    cfg: dict | None = None,
+    *,
+    display: bool = True,
+    sales: bool = False,
+    sync_roi: bool = False,
+    log=print,
+) -> dict:
+    """统一抓取：Display + 周销量，可选同步 ROI 到模板。"""
+    results: dict = {}
+    if display:
+        log("抓取 Display 数据...")
+        items, excel_path = grab_and_save(cfg)
+        results["display"] = {"items": items, "excel": excel_path, "count": len(items)}
+        log(f"Display 完成: {len(items)} 款 → {excel_path}")
+    if sales:
+        log("抓取周销量...")
+        rows, excel_path = grab_weekly_sales(cfg)
+        results["sales"] = {"rows": rows, "excel": excel_path, "count": len(rows)}
+        log(f"周销量完成: {len(rows)} 行 → {excel_path}")
+    if sync_roi:
+        log("同步 ROI 到模板与布局...")
+        try:
+            import importlib.util
+
+            roi_script = os.path.join(SCRIPT_DIR, "scripts", "update_roi.py")
+            spec = importlib.util.spec_from_file_location("update_roi", roi_script)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"无法加载 {roi_script}")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            code = int(mod.main())
+            results["roi_sync"] = {"ok": code == 0}
+            if code == 0:
+                log("ROI 同步完成")
+            else:
+                log("ROI 同步未完全成功，请查看日志")
+        except Exception as exc:
+            results["roi_sync"] = {"ok": False, "error": str(exc)}
+            log(f"ROI 同步失败: {exc}")
+    return results
+
+
 def grab_and_save(cfg: dict | None = None) -> tuple[list["DisplayItem"], str]:
     """Main 抓取：SQL → data/display.xlsx + JSON 缓存。"""
     global _display_cache, _last_load_error, _last_load_source
@@ -1142,8 +1222,17 @@ def refresh_from_database() -> list[DisplayItem]:
     return items
 
 
+def _display_cache_is_fresh(cache_path: str, excel_path: str | None) -> bool:
+    if not excel_path or not os.path.isfile(excel_path) or not os.path.isfile(cache_path):
+        return False
+    try:
+        return os.path.getmtime(cache_path) >= os.path.getmtime(excel_path)
+    except OSError:
+        return False
+
+
 def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
-    """可视化程序读取：优先 data/display.xlsx，可选尝试数据库抓取。"""
+    """可视化程序读取：JSON 缓存（若较新）→ Excel → 数据库抓取。"""
     global _display_cache, _last_load_error, _last_load_source
     if _display_cache is not None and not prefer_db:
         return _display_cache
@@ -1156,12 +1245,22 @@ def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
             _last_load_error = str(exc)
             print(f"Display 抓取失败，尝试读本地 Excel: {exc}")
 
+    cache_path = resolve_cache_path()
+    excel_path = next((p for p in resolve_display_excel_paths() if os.path.isfile(p)), None)
+    if _display_cache_is_fresh(cache_path, excel_path):
+        items = _load_cache_file(cache_path)
+        if items:
+            _display_cache = items
+            _last_load_error = None
+            _last_load_source = os.path.basename(cache_path)
+            return items
+
     items = load_from_excel()
     if items:
         _display_cache = items
         return items
 
-    items = _load_cache_file(resolve_cache_path())
+    items = _load_cache_file(cache_path)
     _display_cache = items
     if items:
         _last_load_source = os.path.basename(resolve_cache_path())

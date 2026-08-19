@@ -29,7 +29,7 @@ except ModuleNotFoundError:
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from roi_lookup import lookup_roi, resolve_furniture_roi
+from roi_lookup import lookup_roi
 from heatmap_metrics import (
     adaptive_color_step,
     format_revenue_per_sqm,
@@ -327,6 +327,9 @@ heatmap_vmin = 0.0
 heatmap_vmax = 1.0
 heatmap_color_step = 200.0
 heatmap_week_bar_rects: dict[str, pygame.Rect] = {}
+_pending_heatmap_week: str | None = None
+_heatmap_metrics_dirty = True
+_sidebar_metric_cache: dict[tuple, tuple[float, float]] = {}
 furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
 
 
@@ -1647,6 +1650,60 @@ def furniture_area_mm2(furn) -> float:
     return polygon_area(furn.get_rotated_points())
 
 
+def mark_heatmap_dirty() -> None:
+    global _heatmap_metrics_dirty
+    _heatmap_metrics_dirty = True
+    _sidebar_metric_cache.clear()
+
+
+def mark_heatmap_clean() -> None:
+    global _heatmap_metrics_dirty
+    _heatmap_metrics_dirty = False
+
+
+def _resolve_pending_heatmap_week() -> None:
+    global heatmap_week_index, _pending_heatmap_week
+    if _pending_heatmap_week is None and heatmap_week_index >= 0:
+        return
+    weeks = heatmap_store_weeks()
+    if _pending_heatmap_week and _pending_heatmap_week in weeks:
+        heatmap_week_index = weeks.index(_pending_heatmap_week)
+    elif weeks:
+        heatmap_week_index = len(weeks) - 1
+    else:
+        heatmap_week_index = -1
+    _pending_heatmap_week = None
+
+
+def ensure_heatmap_metrics() -> None:
+    global _heatmap_metrics_dirty
+    if not placed_furnitures or not sales_data_ready():
+        return
+    if not _heatmap_metrics_dirty:
+        return
+    _resolve_pending_heatmap_week()
+    recompute_heatmap_metrics()
+    mark_heatmap_clean()
+
+
+def template_sidebar_metrics(name: str, family: str, area: float) -> tuple[float, float]:
+    key = (
+        name,
+        family,
+        current_store_slug(),
+        heatmap_week_mode,
+        heatmap_week_count,
+        tuple(active_heatmap_week_keys()),
+    )
+    cached = _sidebar_metric_cache.get(key)
+    if cached is not None:
+        return cached
+    amt = lookup_sales_amount(name, family, **heatmap_lookup_kwargs())
+    rps = revenue_per_sqm(amt, area)
+    _sidebar_metric_cache[key] = (amt, rps)
+    return amt, rps
+
+
 def heatmap_store_weeks() -> list[str]:
     return list_all_week_keys(current_store_slug())
 
@@ -1718,8 +1775,10 @@ def navigate_heatmap_week(delta: int, buttons=None) -> None:
     if heatmap_week_index < 0:
         heatmap_week_index = len(weeks) - 1
     heatmap_week_index = max(0, min(len(weeks) - 1, heatmap_week_index + int(delta)))
+    mark_heatmap_dirty()
     clear_heatmap_cache()
     recompute_heatmap_metrics()
+    mark_heatmap_clean()
     sync_heatmap_week_ui(buttons)
     show_toast(heatmap_period_title())
 
@@ -1727,8 +1786,10 @@ def navigate_heatmap_week(delta: int, buttons=None) -> None:
 def toggle_heatmap_week_mode(buttons=None) -> None:
     global heatmap_week_mode
     heatmap_week_mode = "range" if heatmap_week_mode == "single" else "single"
+    mark_heatmap_dirty()
     clear_heatmap_cache()
     recompute_heatmap_metrics()
+    mark_heatmap_clean()
     sync_heatmap_week_ui(buttons)
     show_toast(heatmap_period_title())
 
@@ -1737,8 +1798,10 @@ def change_heatmap_range_weeks(delta: int, buttons=None) -> None:
     global heatmap_week_mode, heatmap_week_count
     heatmap_week_mode = "range"
     heatmap_week_count = max(1, min(52, heatmap_week_count + int(delta)))
+    mark_heatmap_dirty()
     clear_heatmap_cache()
     recompute_heatmap_metrics()
+    mark_heatmap_clean()
     sync_heatmap_week_ui(buttons)
     show_toast(heatmap_period_title())
 
@@ -2788,7 +2851,7 @@ def load_furniture_templates(json_path):
         points = shape_to_points(item)
         if points:
             family = item.get("product_family") or item.get("id", "")
-            if family and (not item.get("product_family") or item.get("product_family") == item.get("id")):
+            if not item.get("product_family"):
                 try:
                     from sales_lookup import resolve_product_family
 
@@ -3137,7 +3200,7 @@ def refresh_catalog_cache_async():
 def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
-    global heatmap_week_count, heatmap_week_mode, heatmap_week_index
+    global heatmap_week_count, heatmap_week_mode, heatmap_week_index, _pending_heatmap_week
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -3151,23 +3214,14 @@ def load_layout(filepath, *, keep_undo=False):
     if heatmap_week_mode not in ("single", "range"):
         heatmap_week_mode = "single"
     clear_heatmap_cache()
-    store_slug = data.get("store_slug") or catalog_slug_for_path(filepath)
-    weeks = list_all_week_keys(store_slug)
-    saved_week = str(heatmap.get("selected_week") or "").strip()
-    if saved_week and saved_week in weeks:
-        heatmap_week_index = weeks.index(saved_week)
-    else:
-        heatmap_week_index = len(weeks) - 1 if weeks else -1
+    mark_heatmap_dirty()
+    _pending_heatmap_week = str(heatmap.get("selected_week") or "").strip() or None
+    heatmap_week_index = -1
     placed_furnitures = []
     for f in data.get("furnitures", []):
         name = f.get("name", "")
-        family, roi = resolve_furniture_roi(
-            name,
-            f.get("product_family", "") or "",
-            store_slug,
-        )
-        if roi <= 0:
-            roi = float(f.get("roi") or 0)
+        family = str(f.get("product_family", "") or "").strip() or name
+        roi = float(f.get("roi") or 0)
         furniture = Furniture(
             name,
             roi,
@@ -3187,7 +3241,6 @@ def load_layout(filepath, *, keep_undo=False):
     clear_obstacle_selection()
     selected_marker_index = None
     sync_group_id_counter()
-    recompute_heatmap_metrics()
     remember_store_summary(
         current_layout_path,
         width_m=store_width_mm / 1000,
@@ -4532,6 +4585,7 @@ def add_furniture_to_canvas():
     else:
         show_toast(f"已添加: {tpl.name}（已放在当前视图中心，可拖动调整）")
     recompute_heatmap_metrics()
+    mark_heatmap_clean()
 
 
 def delete_selected():
@@ -5161,6 +5215,7 @@ def draw_scale_bar(surface):
 def draw_heatmap_legend(surface):
     if not placed_furnitures or not sales_data_ready():
         return
+    ensure_heatmap_metrics()
     bar_w, bar_h = 16, 118
     pad = 10
     box_w = 132
@@ -5334,6 +5389,7 @@ def build_sidebar_ui():
 
 
 def draw_sidebar(buttons, input_box, template_list_top):
+    ensure_heatmap_metrics()
     global template_scroll_offset
     surface = screen
     pygame.draw.rect(surface, C_SIDEBAR, (0, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT))
@@ -5404,15 +5460,13 @@ def draw_sidebar(buttons, input_box, template_list_top):
             surface.blit(scaled, scaled.get_rect(center=thumb.center))
         else:
             area = polygon_area(tpl.points)
-            amt = lookup_sales_amount(tpl.name, tpl.product_family, **heatmap_lookup_kwargs())
-            rps = revenue_per_sqm(amt, area)
+            _, rps = template_sidebar_metrics(tpl.name, tpl.product_family, area)
             color_dot = revenue_per_sqm_to_color(rps, heatmap_vmin, heatmap_vmax)
             pygame.draw.circle(surface, color_dot, thumb.center, 10)
         tx = row.x + TEMPLATE_THUMB + 10
         family = getattr(tpl, "product_family", "") or "未分类"
         area = polygon_area(tpl.points)
-        amt = lookup_sales_amount(tpl.name, tpl.product_family, **heatmap_lookup_kwargs())
-        rps = revenue_per_sqm(amt, area)
+        _, rps = template_sidebar_metrics(tpl.name, tpl.product_family, area)
         surface.blit(FONT_BODY.render(tpl.name, True, C_TEXT), (tx, row.y + 6))
         surface.blit(
             FONT_SMALL.render(f"{family}  ·  {format_revenue_per_sqm(rps)}", True, C_MUTED),
@@ -6175,6 +6229,8 @@ def main():
             draw_obstacles(screen)
             draw_layout_markers(screen)
             draw_alignment_guides(screen)
+            if sales_data_ready() and placed_furnitures:
+                ensure_heatmap_metrics()
             for f in placed_furnitures:
                 if f is not selected_furniture:
                     f.draw(screen, selected=False)

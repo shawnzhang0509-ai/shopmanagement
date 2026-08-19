@@ -807,7 +807,8 @@ def open_gallery(reset_scroll: bool = True):
     gallery_view.invalidate_layout()
     return_to_gallery_after_edit = False
     _gallery_snapshot = None
-    display_items = reload_display_items(prefer_db=False)
+    if not display_items:
+        display_items = reload_display_items(prefer_db=False)
     removed = prune_templates_against_display()
     bl_n, bl_src, _ = blacklist_status()
     if removed:
@@ -1691,13 +1692,15 @@ def load_templates_file(path=TEMPLATES_FILE):
     global furniture_templates, selected_index
     if not os.path.isfile(path):
         return
-    reload_roi_map()
     with open(path, "r", encoding="utf-8") as f:
         furniture_templates = json.load(f)
     for tpl in furniture_templates:
         family = tpl.get("product_family") or tpl.get("id", "")
         tpl["product_family"] = family
-        tpl["roi"] = lookup_roi(family)
+        if "roi" in tpl:
+            tpl["roi"] = float(tpl.get("roi") or 0)
+        else:
+            tpl["roi"] = lookup_roi(family)
     selected_index = -1
     removed = prune_templates_against_display(persist=path == TEMPLATES_FILE)
     if removed:

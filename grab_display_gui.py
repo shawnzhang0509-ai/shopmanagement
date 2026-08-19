@@ -19,10 +19,10 @@ sys.path.insert(0, SCRIPT_DIR)
 from display_lookup import (
     GRABBER_CONFIG,
     build_runtime_config,
-    grab_and_save,
     last_sql_file,
     load_grabber_config,
     resolve_database_url,
+    run_grab_pipeline,
     save_grabber_config,
     shop_stats,
     test_database_connection,
@@ -87,6 +87,21 @@ class DisplayGrabberApp:
         )
         ttk.Button(cfg_frame, text="浏览...", command=self._browse_output).grid(row=2, column=2, padx=4)
         cfg_frame.columnconfigure(1, weight=1)
+
+        grab_opts = ttk.LabelFrame(self.root, text="抓取选项", padding=10)
+        grab_opts.pack(fill="x", padx=12, pady=(0, 6))
+        self.grab_sales_var = tk.BooleanVar(value=True)
+        self.sync_roi_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            grab_opts,
+            text="同时抓取周销量 → data/weekly_sales.xlsx",
+            variable=self.grab_sales_var,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            grab_opts,
+            text="抓取后同步 ROI 到家具模板与门店布局（较慢，建议按需勾选）",
+            variable=self.sync_roi_var,
+        ).pack(anchor="w", pady=(4, 0))
 
         # ── 自动调度 ──
         sched_frame = ttk.LabelFrame(self.root, text="自动调度设置", padding=10)
@@ -172,6 +187,8 @@ class DisplayGrabberApp:
         self.interval_var.set(int(cfg.get("schedule_interval", 30)))
         self.unit_var.set(cfg.get("schedule_unit", "分钟"))
         self.tray_var.set(bool(cfg.get("minimize_to_tray", False)))
+        self.grab_sales_var.set(bool(cfg.get("grab_sales_with_display", True)))
+        self.sync_roi_var.set(bool(cfg.get("sync_roi_after_grab", False)))
 
     def _collect_config(self) -> dict:
         return {
@@ -181,6 +198,8 @@ class DisplayGrabberApp:
             "schedule_interval": int(self.interval_var.get()),
             "schedule_unit": self.unit_var.get(),
             "minimize_to_tray": bool(self.tray_var.get()),
+            "grab_sales_with_display": bool(self.grab_sales_var.get()),
+            "sync_roi_after_grab": bool(self.sync_roi_var.get()),
         }
 
     def test_connection(self) -> None:
@@ -245,17 +264,31 @@ class DisplayGrabberApp:
         self.root.after(0, lambda: self.stop_btn.configure(state="normal"))
         self.root.after(0, lambda: self._set_status("● 执行中", "#e67e22"))
         self.root.after(0, lambda: self.progress.configure(value=10))
-        self.log("开始抓取 Display 数据...")
+        self.log("开始抓取数据...")
 
         try:
             cfg = self._collect_config()
             runtime = build_runtime_config(cfg)
-            self.log(f"SQL: {runtime['sql_file']}")
+            self.log(f"Display SQL: {runtime['sql_file']}")
+            if cfg.get("grab_sales_with_display"):
+                from display_lookup import sales_runtime_config
+
+                sales_rt = sales_runtime_config(cfg)
+                self.log(f"周销量 SQL: {sales_rt['sql_file']}")
             self.root.after(0, lambda: self.progress.configure(value=35))
             if self._stop_flag:
                 raise InterruptedError("用户停止")
 
-            items, excel_path = grab_and_save(cfg)
+            results = run_grab_pipeline(
+                cfg,
+                display=True,
+                sales=bool(cfg.get("grab_sales_with_display")),
+                sync_roi=bool(cfg.get("sync_roi_after_grab")),
+                log=self.log,
+            )
+            display_result = results.get("display", {})
+            items = display_result.get("items") or []
+            excel_path = display_result.get("excel", runtime["output_excel"])
             used_sql = last_sql_file() or runtime["sql_file"]
             if used_sql != runtime["sql_file"]:
                 self.log(f"已自动改用: {used_sql}")
@@ -264,13 +297,21 @@ class DisplayGrabberApp:
             with_img = sum(1 for it in items if getattr(it, "image_url", ""))
             if with_img:
                 self.log(f"其中 {with_img}/{len(items)} 款有 ImageUrl")
-            else:
+            elif items:
                 self.log("警告: Excel 里没有 ImageUrl，画廊无法显示图片。请在 SSMS 运行 sql/discover_schema.sql 查列名。")
             self.root.after(0, lambda: self.progress.configure(value=90))
             stats = shop_stats(items, [])
             total = stats.get("all", {}).get("total", len(items))
-            self.log(f"完成: {total} 款 → {excel_path}")
-            self.root.after(0, lambda: self.sku_var.set(f"Display: {total} 款"))
+            self.log(f"Display 完成: {total} 款 → {excel_path}")
+            sales_result = results.get("sales")
+            if sales_result:
+                self.log(f"周销量完成: {sales_result.get('count', 0)} 行 → {sales_result.get('excel')}")
+            if results.get("roi_sync"):
+                self.log("ROI 已同步到模板与布局")
+            status_parts = [f"Display: {total} 款"]
+            if sales_result:
+                status_parts.append(f"销量: {sales_result.get('count', 0)} 行")
+            self.root.after(0, lambda: self.sku_var.set(" · ".join(status_parts)))
             self.root.after(0, lambda: self.progress.configure(value=100))
             self.root.after(0, lambda: self._set_status("● 就绪"))
         except InterruptedError as exc:
