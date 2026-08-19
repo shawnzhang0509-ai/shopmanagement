@@ -181,10 +181,57 @@ def load_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
     return rows
 
 
+_sku_family_map: dict[str, str] | None = None
+
+
+def sku_family_map(*, path: str | None = None) -> dict[str, str]:
+    """Sku → ProductFamily，来自 weekly_sales.xlsx，辅以 display.xlsx。"""
+    global _sku_family_map
+    if _sku_family_map is not None and path is None:
+        return _sku_family_map
+
+    mapping: dict[str, str] = {}
+    for row in load_weekly_sales(path):
+        sku = _normalize_key(row.sku)
+        fam = str(row.product_family or "").strip()
+        if sku and fam:
+            mapping[sku] = fam
+
+    try:
+        from display_lookup import load_display_items
+
+        for item in load_display_items():
+            sku = _normalize_key(item.product_code)
+            fam = str(item.product_family or "").strip()
+            if sku and fam:
+                mapping.setdefault(sku, fam)
+    except Exception:
+        pass
+
+    if path is None:
+        _sku_family_map = mapping
+    return mapping
+
+
+def resolve_product_family(key: str, *, shop_id: str | None = None) -> str:
+    """把 SKU / 系列名统一解析为 ProductFamily。"""
+    text = str(key or "").strip()
+    if not text:
+        return ""
+    norm = _normalize_key(text)
+    if norm in aggregate_by_family(shop_id):
+        return text
+    mapped = sku_family_map().get(norm)
+    if mapped:
+        return mapped
+    return text
+
+
 def reload_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
-    global _sales_cache, _family_totals_cache
+    global _sales_cache, _family_totals_cache, _sku_family_map
     _sales_cache = None
     _family_totals_cache = {}
+    _sku_family_map = None
     return load_weekly_sales(path)
 
 

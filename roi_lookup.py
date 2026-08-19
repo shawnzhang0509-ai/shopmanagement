@@ -91,7 +91,17 @@ def lookup_roi(product_family: str, shop_id: str | None = None) -> float:
     if not product_family:
         return 0.0
 
-    static = load_roi_map().get(_normalize_key(product_family), 0.0)
+    try:
+        from sales_lookup import resolve_product_family
+
+        family = resolve_product_family(product_family, shop_id=shop_id)
+    except Exception:
+        family = product_family
+
+    roi_map = load_roi_map()
+    static = roi_map.get(_normalize_key(family), 0.0)
+    if static <= 0:
+        static = roi_map.get(_normalize_key(product_family), 0.0)
     if static > 0:
         return static
 
@@ -100,7 +110,11 @@ def lookup_roi(product_family: str, shop_id: str | None = None) -> float:
 
         if not sales_data_available():
             return 0.0
-        return lookup_sales_roi(product_family, shop_id)
+        roi = lookup_sales_roi(family, shop_id)
+        if roi > 0:
+            return roi
+        if family != product_family:
+            return lookup_sales_roi(product_family, shop_id)
     except Exception:
         pass
 
