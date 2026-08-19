@@ -220,11 +220,11 @@ def resolve_product_family(key: str, *, shop_id: str | None = None) -> str:
     if not text:
         return ""
     norm = _normalize_key(text)
-    if norm in aggregate_by_family(shop_id):
-        return text
     mapped = sku_family_map().get(norm)
     if mapped:
         return mapped
+    if norm in aggregate_by_family(shop_id):
+        return text
     return text
 
 

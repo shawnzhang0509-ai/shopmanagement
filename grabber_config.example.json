@@ -12,5 +12,7 @@
   "image_base_url": "https://ierpapi.ifurniture.co.nz/",
   "schedule_interval": 30,
   "schedule_unit": "分钟",
-  "minimize_to_tray": false
+  "minimize_to_tray": false,
+  "grab_sales_with_display": true,
+  "sync_roi_after_grab": false
 }

@@ -112,7 +112,7 @@ class LauncherApp:
         )
         tk.Label(
             data_frame,
-            text="首次使用请先「一键安装依赖」，并配置 grabber_config.json（数据库连接）",
+            text="Display 抓取默认同时导出周销量；ROI 同步可在抓取工具里勾选，或点「同步 ROI 到模板」",
             font=("Microsoft YaHei UI", 9),
             fg=MUTED,
         ).pack(anchor="w", pady=(8, 0))
