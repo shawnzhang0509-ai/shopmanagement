@@ -237,4 +237,4 @@ def lookup_sales_roi(product_family: str, shop_id: str | None = None) -> float:
 
 def sales_data_available(path: str | None = None) -> bool:
     path = path or DEFAULT_EXCEL
-    return os.path.isfile(path) and bool(load_weekly_sales(path))
+    return os.path.isfile(path) and os.path.getsize(path) > 0

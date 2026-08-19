@@ -98,8 +98,9 @@ def lookup_roi(product_family: str, shop_id: str | None = None) -> float:
     try:
         from sales_lookup import lookup_sales_roi, sales_data_available
 
-        if sales_data_available():
-            return lookup_sales_roi(product_family, shop_id)
+        if not sales_data_available():
+            return 0.0
+        return lookup_sales_roi(product_family, shop_id)
     except Exception:
         pass
 

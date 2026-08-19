@@ -2593,7 +2593,10 @@ def load_furniture_templates(json_path):
         points = shape_to_points(item)
         if points:
             family = item.get("product_family") or item.get("id", "")
-            roi = item.get("roi", 0) or lookup_roi(family)
+            if "roi" in item:
+                roi = float(item.get("roi") or 0)
+            else:
+                roi = lookup_roi(family)
             templates.append(Furniture(item.get("id", "unnamed"), roi, points, product_family=family))
     if not templates:
         raise ValueError(f"{json_path} 中没有有效的家具模板")
