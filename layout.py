@@ -109,7 +109,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -170,6 +170,7 @@ FONT_SMALL = load_font(13)
 FONT_TINY = load_font(11)
 FONT_LABEL = load_font(14, bold=True)
 FONT_MARK = load_font(12)
+FONT_METRIC = load_font(13, bold=True)
 
 screen = None
 clock = None
@@ -1677,12 +1678,25 @@ def heatmap_period_title() -> str:
     return week_period_display(slug, keys[0])
 
 
+def heatmap_week_caption() -> str:
+    keys = active_heatmap_week_keys()
+    if heatmap_week_mode == "range":
+        return f"汇总近 {heatmap_week_count} 周"
+    if not keys:
+        return "无周数据"
+    key = keys[0]
+    full = week_period_display(current_store_slug(), key)
+    if len(full) > 28:
+        return key + " " + full.split("(", 1)[-1].rstrip(")")
+    return full
+
+
 def sync_heatmap_week_ui(buttons=None) -> None:
     if not buttons:
         return
     is_range = heatmap_week_mode == "range"
     if "week_mode" in buttons:
-        buttons["week_mode"].label = "汇总多周" if is_range else "单周查看"
+        buttons["week_mode"].label = f"汇总 {heatmap_week_count}周" if is_range else "单周查看"
         buttons["week_mode"].active = is_range
     if "week_prev" in buttons:
         buttons["week_prev"].enabled = not is_range and bool(heatmap_store_weeks())
@@ -1860,37 +1874,44 @@ class Furniture:
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         span = max(max(xs) - min(xs), max(ys) - min(ys))
+        min_y, max_y = min(ys), max(ys)
+        img_cy = cy - span * 0.16
 
         if span >= 6:
-            display_w = max(FURNITURE_IMAGE_MIN_PX, min(180, int(span * 0.88)))
+            display_w = max(FURNITURE_IMAGE_MIN_PX, min(160, int(span * 0.78)))
             aspect = _furniture_aspect(self.name, self.product_family)
             display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
             img = furniture_display_image(
                 self.name, display_w, display_h, family=self.product_family
             )
             if img is not None:
-                img_rect = img.get_rect(center=(int(cx), int(cy)))
+                img_rect = img.get_rect(center=(int(cx), int(img_cy)))
                 if display_w >= 20:
-                    shadow_rect = img_rect.inflate(8, 8)
-                    backdrop = _blend_colors(fill, (255, 255, 255), 0.42)
+                    shadow_rect = img_rect.inflate(6, 6)
+                    backdrop = _blend_colors(fill, (255, 255, 255), 0.35)
                     pygame.draw.rect(surface, backdrop, shadow_rect, border_radius=4)
-                    pygame.draw.rect(surface, _shade_color(fill, 0.35), shadow_rect, 3, border_radius=4)
+                    pygame.draw.rect(surface, _shade_color(fill, 0.4), shadow_rect, 2, border_radius=4)
                 surface.blit(img, img_rect)
             else:
                 inner = [
-                    (int(cx + (p[0] - cx) * 0.72), int(cy + (p[1] - cy) * 0.72))
+                    (int(cx + (p[0] - cx) * 0.72), int(img_cy + (p[1] - cy) * 0.72))
                     for p in pts
                 ]
                 if len(inner) >= 3:
                     pygame.draw.polygon(surface, _shade_color(fill, 0.75), inner)
 
         if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
-            name_surf, roi_surf = self._label_surfaces(selected)
-            name_rect = name_surf.get_rect(midbottom=(cx, cy - 2))
-            roi_rect = roi_surf.get_rect(midtop=(cx, cy + 2))
-            surface.blit(name_surf, name_rect)
-            surface.blit(roi_surf, roi_rect)
-            self._label_rect = name_rect.union(roi_rect).inflate(LABEL_HIT_PAD * 2, LABEL_HIT_PAD * 2)
+            metric = format_revenue_per_sqm(self.revenue_per_sqm)
+            tag_rect = draw_furniture_metric_tag(
+                surface,
+                self.name,
+                metric,
+                cx,
+                max_y - 2,
+                fill,
+                selected=selected,
+            )
+            self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
             self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, 16, 16)
 
@@ -4929,6 +4950,42 @@ def should_show_obstacle_label(col, idx, selected) -> bool:
     return rect.width >= LABEL_MIN_W and rect.height >= LABEL_MIN_H
 
 
+def draw_furniture_metric_tag(
+    surface,
+    name: str,
+    metric: str,
+    cx: float,
+    bottom_y: float,
+    heat_color: tuple[int, int, int],
+    *,
+    selected: bool = False,
+) -> pygame.Rect:
+    """SKU + 坪效：底部色块标签，不压在产品图上。"""
+    pad_x, pad_y = 7, 5
+    name_font = FONT_LABEL if selected else FONT_SMALL
+    name_surf = name_font.render(name, True, (30, 41, 59))
+    metric_surf = FONT_METRIC.render(metric, True, _shade_color(heat_color, 0.22))
+    inner_w = max(name_surf.get_width(), metric_surf.get_width())
+    pill_w = inner_w + pad_x * 2 + 6
+    pill_h = name_surf.get_height() + metric_surf.get_height() + pad_y * 2 + 3
+    pill = pygame.Rect(0, 0, pill_w, pill_h)
+    pill.centerx = int(cx)
+    pill.bottom = int(bottom_y)
+    pill.clamp_ip(CANVAS_RECT.inflate(4, 4))
+
+    overlay = pygame.Surface((pill.width, pill.height), pygame.SRCALPHA)
+    overlay.fill((255, 255, 255, 244))
+    pygame.draw.rect(overlay, (*heat_color, 255), (0, 0, 5, pill.height), border_radius=6)
+    surface.blit(overlay, pill.topleft)
+    border_c = C_SELECTION if selected else _shade_color(heat_color, 0.38)
+    pygame.draw.rect(surface, border_c, pill, 2, border_radius=6)
+    tx = pill.x + pad_x + 5
+    ty = pill.y + pad_y
+    surface.blit(name_surf, (tx, ty))
+    surface.blit(metric_surf, (tx, ty + name_surf.get_height() + 2))
+    return pill
+
+
 def draw_label_pill(surface, text, center, *, font=None, fg=C_TEXT, bg=(255, 255, 255, 230)):
     font = font or FONT_SMALL
     lines = text.split("\n")
@@ -5104,89 +5161,47 @@ def draw_scale_bar(surface):
 def draw_heatmap_legend(surface):
     if not placed_furnitures or not sales_data_ready():
         return
-    bar_w, bar_h = 20, 150
-    pad = 12
-    box_w = 168
-    box_h = bar_h + 82
-    x0 = SCREEN_WIDTH - box_w - 16
-    y0 = SCREEN_HEIGHT - box_h - 16
+    bar_w, bar_h = 16, 118
+    pad = 10
+    box_w = 132
+    box_h = bar_h + 36
+    x0 = SCREEN_WIDTH - box_w - 12
+    y0 = SCREEN_HEIGHT - box_h - 12
     box = pygame.Rect(x0, y0, box_w, box_h)
-    pygame.draw.rect(surface, (255, 255, 255), box, border_radius=8)
-    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=8)
+    overlay = pygame.Surface((box.width, box.height), pygame.SRCALPHA)
+    overlay.fill((255, 255, 255, 220))
+    surface.blit(overlay, box.topleft)
+    pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=6)
     step = heatmap_color_step
-    title = FONT_SMALL.render(heatmap_period_title()[:42], True, C_TEXT)
-    surface.blit(title, (box.x + pad, box.y + 8))
-    sub = FONT_MARK.render(
-        ("汇总模式" if heatmap_week_mode == "range" else "单周模式") + f" · 每档≈${step:.0f}",
-        True,
-        C_MUTED,
+    surface.blit(FONT_MARK.render("元/㎡", True, C_TEXT), (box.x + pad, box.y + 6))
+    surface.blit(
+        FONT_MARK.render(f"每档≈${step:.0f}", True, C_MUTED),
+        (box.x + pad, box.y + 20),
     )
-    surface.blit(sub, (box.x + pad, box.y + 26))
     bx = box.right - pad - bar_w
-    by = box.y + 44
+    by = box.y + 32
     for i in range(bar_h):
         t = 1.0 - (i / max(1, bar_h - 1))
         probe = heatmap_vmin + (heatmap_vmax - heatmap_vmin) * t
         color = revenue_per_sqm_to_color(probe, heatmap_vmin, heatmap_vmax, step=step)
         pygame.draw.line(surface, color, (bx, by + i), (bx + bar_w, by + i))
     pygame.draw.rect(surface, C_BORDER, pygame.Rect(bx, by, bar_w, bar_h), 1)
-    ticks = legend_tick_values(heatmap_vmin, heatmap_vmax, step=step)
-    for tick in ticks:
-        if heatmap_vmax <= heatmap_vmin:
-            ratio = 0.0
-        else:
-            ratio = (tick - heatmap_vmin) / (heatmap_vmax - heatmap_vmin)
-        ty = by + int((1.0 - ratio) * (bar_h - 1))
-        pygame.draw.line(surface, C_BORDER, (bx - 4, ty), (bx, ty), 1)
-        label = FONT_MARK.render(format_revenue_per_sqm(tick), True, C_MUTED)
-        surface.blit(label, (box.x + pad, ty - label.get_height() // 2))
-    weeks = active_heatmap_week_keys()
-    if weeks:
-        week_hint = FONT_MARK.render(f"{weeks[0]}" + (f" … {weeks[-1]}" if len(weeks) > 1 else ""), True, C_MUTED)
-        surface.blit(week_hint, (box.x + pad, box.bottom - 18))
+    high_txt = format_revenue_per_sqm(heatmap_vmax)
+    low_txt = format_revenue_per_sqm(heatmap_vmin if heatmap_vmax > heatmap_vmin else 0)
+    surface.blit(FONT_MARK.render(high_txt, True, C_MUTED), (box.x + pad, by))
+    surface.blit(
+        FONT_MARK.render(low_txt, True, C_MUTED),
+        (box.x + pad, by + bar_h - FONT_MARK.get_height()),
+    )
 
 
 def draw_heatmap_week_bar(surface):
+    """周次操作仅在侧栏，画布不再遮挡。"""
     global heatmap_week_bar_rects
     heatmap_week_bar_rects = {}
-    if startup_active or not sales_data_ready():
-        return
-    bar = pygame.Rect(SIDEBAR_WIDTH + 16, 10, max(420, CANVAS_RECT.width - 32), 64)
-    pygame.draw.rect(surface, (255, 255, 255), bar, border_radius=12)
-    pygame.draw.rect(surface, C_ACCENT, bar, 2, border_radius=12)
-
-    title = heatmap_period_title()
-    if len(title) > 52:
-        title = title[:49] + "…"
-    title_surf = FONT_BODY.render(title, True, C_TEXT)
-    surface.blit(title_surf, title_surf.get_rect(midtop=(bar.centerx, bar.y + 8)))
-
-    prev_r = pygame.Rect(bar.x + 12, bar.bottom - 40, 100, 32)
-    next_r = pygame.Rect(bar.right - 112, bar.bottom - 40, 100, 32)
-    mode_r = pygame.Rect(bar.centerx - 58, bar.bottom - 40, 116, 32)
-    heatmap_week_bar_rects["week_prev"] = prev_r
-    heatmap_week_bar_rects["week_next"] = next_r
-    heatmap_week_bar_rects["week_mode"] = mode_r
-
-    for rect, label in (
-        (prev_r, "◀ 上一周"),
-        (next_r, "下一周 ▶"),
-        (mode_r, "汇总" if heatmap_week_mode == "single" else "单周"),
-    ):
-        hover = rect.collidepoint(ui_pos(mouse_pos))
-        bg = C_ACCENT_LIGHT if hover else (248, 250, 252)
-        pygame.draw.rect(surface, bg, rect, border_radius=8)
-        pygame.draw.rect(surface, C_BORDER, rect, 1, border_radius=8)
-        txt = FONT_SMALL.render(label, True, C_ACCENT if hover else C_TEXT)
-        surface.blit(txt, txt.get_rect(center=rect.center))
 
 
 def handle_heatmap_week_bar_click(mx, my, buttons=None) -> bool:
-    pos = ui_pos((mx, my))
-    for action, rect in heatmap_week_bar_rects.items():
-        if rect.collidepoint(pos):
-            handle_toolbar_click(action, buttons)
-            return True
     return False
 
 
@@ -5300,15 +5315,14 @@ def build_sidebar_ui():
     buttons["unbind"] = Button((pad + bw + 8, y, bw, 34), "解绑", "unbind")
     y += 42
     buttons["roi_overlap"] = Button((pad, y, w, 30), "重叠坪效条纹", "roi_overlap", toggle=True)
-    y += 38
-    buttons["week_prev"] = Button((pad, y, bw, 42), "◀ 上一周", "week_prev")
-    buttons["week_next"] = Button((pad + bw + 8, y, bw, 42), "下一周 ▶", "week_next")
-    y += 48
-    buttons["week_mode"] = Button((pad, y, w, 36), "单周查看", "week_mode", toggle=True)
-    y += 42
-    buttons["range_less"] = Button((pad, y, bw, 34), "汇总周数 −", "range_less")
-    buttons["range_more"] = Button((pad + bw + 8, y, bw, 34), "汇总周数 +", "range_more")
-    y += 42
+    y += 36
+    buttons["week_prev"] = Button((pad, y, bw, 34), "◀ 上周", "week_prev")
+    buttons["week_next"] = Button((pad + bw + 8, y, bw, 34), "下周 ▶", "week_next")
+    y += 40
+    buttons["week_mode"] = Button((pad, y, w - 84, 34), "单周查看", "week_mode", toggle=True)
+    buttons["range_less"] = Button((pad + w - 76, y, 36, 34), "−", "range_less")
+    buttons["range_more"] = Button((pad + w - 36, y, 36, 34), "+", "range_more")
+    y += 40
     buttons["resize"] = Button((pad, y, w, 34), "修改尺寸", "resize")
     y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
@@ -5348,16 +5362,16 @@ def draw_sidebar(buttons, input_box, template_list_top):
         buttons["roi_overlap"].active = show_roi_overlap_hatch
     sync_heatmap_week_ui(buttons)
     if "week_prev" in buttons:
-        panel_top = buttons["week_prev"].rect.y - 10
-        panel_bottom = buttons["range_more"].rect.bottom + 28
-        panel = pygame.Rect(10, panel_top, SIDEBAR_WIDTH - 20, panel_bottom - panel_top)
-        pygame.draw.rect(surface, (236, 242, 255), panel, border_radius=10)
-        pygame.draw.rect(surface, C_ACCENT, panel, 1, border_radius=10)
-        surface.blit(FONT_LABEL.render("坪效周次", True, C_TEXT), (panel.x + 12, panel.y + 8))
-        period = heatmap_period_title()
-        if len(period) > 34:
-            period = period[:31] + "…"
-        surface.blit(FONT_SMALL.render(period, True, C_ACCENT), (panel.x + 12, panel.bottom - 22))
+        pr = buttons["week_prev"].rect
+        nr = buttons["week_next"].rect
+        cap = heatmap_week_caption()
+        if len(cap) > 22:
+            cap = cap[:20] + "…"
+        cap_surf = FONT_MARK.render(cap, True, C_ACCENT)
+        gap = pygame.Rect(pr.right + 2, pr.y, nr.left - pr.right - 4, pr.height)
+        surface.blit(cap_surf, cap_surf.get_rect(center=gap.center))
+        pygame.draw.line(surface, C_BORDER, (12, pr.y - 8), (SIDEBAR_WIDTH - 12, pr.y - 8), 1)
+        surface.blit(FONT_MARK.render("坪效周次", True, C_MUTED), (16, pr.y - 22))
     fam = template_family_filter or "全部"
     if "family_filter" in buttons:
         buttons["family_filter"].label = f"系列: {fam}"
