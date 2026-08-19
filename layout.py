@@ -2593,6 +2593,13 @@ def load_furniture_templates(json_path):
         points = shape_to_points(item)
         if points:
             family = item.get("product_family") or item.get("id", "")
+            if family and (not item.get("product_family") or item.get("product_family") == item.get("id")):
+                try:
+                    from sales_lookup import resolve_product_family
+
+                    family = resolve_product_family(family) or family
+                except Exception:
+                    pass
             if "roi" in item:
                 roi = float(item.get("roi") or 0)
             else:
