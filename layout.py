@@ -38,6 +38,7 @@ from heatmap_metrics import (
     lookup_sales_amount,
     revenue_per_sqm,
     revenue_per_sqm_to_color,
+    revenue_per_sqm_to_rgba,
     clear_heatmap_cache,
     list_recent_week_keys,
     sales_data_ready,
@@ -1854,6 +1855,30 @@ def heatmap_color_for_value(value: float) -> tuple[int, int, int]:
     )
 
 
+def heatmap_rgba_for_value(value: float, *, dim: bool = False) -> tuple[int, int, int, int]:
+    r, g, b, a = revenue_per_sqm_to_rgba(
+        value, heatmap_vmin, heatmap_vmax, step=heatmap_color_step
+    )
+    if dim:
+        a = max(28, int(a * 0.22))
+    return r, g, b, a
+
+
+def _blit_polygon_tint(surface, screen_pts, rgba: tuple[int, int, int, int]) -> None:
+    if len(screen_pts) < 3:
+        return
+    xs = [p[0] for p in screen_pts]
+    ys = [p[1] for p in screen_pts]
+    min_x, max_x = int(min(xs)), int(max(xs))
+    min_y, max_y = int(min(ys)), int(max(ys))
+    w = max(2, max_x - min_x + 1)
+    h = max(2, max_y - min_y + 1)
+    local_pts = [(p[0] - min_x, p[1] - min_y) for p in screen_pts]
+    layer = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.polygon(layer, rgba, local_pts)
+    surface.blit(layer, (min_x, min_y))
+
+
 def _shade_color(color, factor=0.55):
     return tuple(max(0, min(255, int(c * factor))) for c in color[:3])
 
@@ -1933,16 +1958,20 @@ class Furniture:
             self._label_rect = None
             return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
-        fill = heatmap_color_for_value(self.revenue_per_sqm)
+        border_rgb = heatmap_color_for_value(self.revenue_per_sqm)
         blink_active = _overlap_blink_active(self)
-        if show_roi_overlap_mode and not blink_active and not selected:
-            fill = _blend_colors(fill, (255, 255, 255), 0.72)
-        pygame.draw.polygon(surface, fill, pts)
+        dim_tint = show_roi_overlap_mode and not blink_active and not selected
+        tint = heatmap_rgba_for_value(self.revenue_per_sqm, dim=dim_tint)
+
+        pygame.draw.polygon(surface, (252, 253, 255), pts)
+        _blit_polygon_tint(surface, pts, tint)
         border_w = 4 if selected else 3
         if selected:
             border_c = C_SELECTION
+        elif self.revenue_per_sqm > 0:
+            border_c = border_rgb
         else:
-            border_c = _shade_color(fill, 0.35)
+            border_c = C_BORDER
         pygame.draw.polygon(surface, border_c, pts, border_w)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
@@ -1963,9 +1992,8 @@ class Furniture:
                 img_rect = img.get_rect(center=(int(cx), int(img_cy)))
                 if display_w >= 20:
                     shadow_rect = img_rect.inflate(6, 6)
-                    backdrop = _blend_colors(fill, (255, 255, 255), 0.35)
-                    pygame.draw.rect(surface, backdrop, shadow_rect, border_radius=4)
-                    pygame.draw.rect(surface, _shade_color(fill, 0.4), shadow_rect, 2, border_radius=4)
+                    pygame.draw.rect(surface, (255, 255, 255), shadow_rect, border_radius=4)
+                    pygame.draw.rect(surface, (200, 210, 220), shadow_rect, 1, border_radius=4)
                 surface.blit(img, img_rect)
             else:
                 inner = [
@@ -1973,11 +2001,11 @@ class Furniture:
                     for p in pts
                 ]
                 if len(inner) >= 3:
-                    pygame.draw.polygon(surface, _shade_color(fill, 0.75), inner)
+                    pygame.draw.polygon(surface, _shade_color(border_rgb, 0.75), inner)
 
         if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
             metric = format_revenue_per_sqm(self.revenue_per_sqm)
-            if show_roi_overlap_mode and not blink_active and not selected:
+            if dim_tint:
                 metric = "…"
             tag_rect = draw_furniture_metric_tag(
                 surface,
@@ -1985,7 +2013,7 @@ class Furniture:
                 metric,
                 cx,
                 max_y - 2,
-                fill,
+                border_rgb,
                 selected=selected,
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
@@ -2193,9 +2221,11 @@ def furniture_draw_order() -> list:
 
 
 def draw_furniture_roi_overlaps(surface):
+    """重叠区只画闪烁描边与名称，不遮挡产品图。"""
     if not show_roi_overlap_mode or len(placed_furnitures) < 2:
         return
     tick = pygame.time.get_ticks()
+    pulse = 0.55 + 0.45 * abs(math.sin(tick / 280.0))
     for group in _overlap_groups():
         phase = (tick // ROI_OVERLAP_BLINK_MS) % len(group)
         active = group[phase]
@@ -2212,26 +2242,20 @@ def draw_furniture_roi_overlaps(surface):
                 if len(overlap) < 3:
                     continue
                 screen_pts = [world_to_screen(x, y) for x, y in overlap]
-                show_a = active is a
-                show_b = active is b
-                if show_a or show_b:
-                    color = heatmap_color_for_value(
-                        a.revenue_per_sqm if show_a else b.revenue_per_sqm
-                    )
-                    if len(screen_pts) >= 3:
-                        pygame.draw.polygon(surface, color, screen_pts)
-                        pygame.draw.polygon(surface, _shade_color(color, 0.35), screen_pts, 2)
+                color = heatmap_color_for_value(active.revenue_per_sqm)
+                width = max(2, int(2 + pulse * 3))
+                if len(screen_pts) >= 3:
+                    pygame.draw.polygon(surface, color, screen_pts, width)
                 cx = sum(p[0] for p in screen_pts) / len(screen_pts)
                 cy = sum(p[1] for p in screen_pts) / len(screen_pts)
                 if max(max(p[0] for p in screen_pts) - min(p[0] for p in screen_pts), 28) >= 28:
-                    label = active.name
                     draw_label_pill(
                         surface,
-                        label,
+                        active.name,
                         (cx, cy),
                         font=FONT_TINY,
                         fg=C_TEXT,
-                        bg=(255, 255, 255, 230),
+                        bg=(255, 255, 255, 235),
                     )
 
 
@@ -5302,37 +5326,47 @@ def draw_heatmap_legend(surface):
     if not placed_furnitures or not sales_data_ready():
         return
     ensure_heatmap_metrics()
-    bar_w, bar_h = 16, 118
+    bar_w, bar_h = 18, 128
     pad = 10
-    box_w = 132
-    box_h = bar_h + 36
+    box_w = 148
+    box_h = bar_h + 44
     x0 = SCREEN_WIDTH - box_w - 12
     y0 = SCREEN_HEIGHT - box_h - 12
     box = pygame.Rect(x0, y0, box_w, box_h)
     overlay = pygame.Surface((box.width, box.height), pygame.SRCALPHA)
-    overlay.fill((255, 255, 255, 220))
+    overlay.fill((255, 255, 255, 230))
     surface.blit(overlay, box.topleft)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=6)
     step = heatmap_color_step
     surface.blit(FONT_MARK.render("周均 元/㎡", True, C_TEXT), (box.x + pad, box.y + 6))
     surface.blit(
-        FONT_MARK.render(f"每档≈${step:.0f}", True, C_MUTED),
+        FONT_MARK.render("淡=低 · 浓=高", True, C_MUTED),
         (box.x + pad, box.y + 20),
     )
     bx = box.right - pad - bar_w
-    by = box.y + 32
+    by = box.y + 36
+    checker = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
+    for y in range(bar_h):
+        for x in range(bar_w):
+            c = 210 if (x // 4 + y // 4) % 2 == 0 else 235
+            checker.set_at((x, y), (c, c, c, 255))
+    surface.blit(checker, (bx, by))
+    grad = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
     for i in range(bar_h):
         t = 1.0 - (i / max(1, bar_h - 1))
         probe = heatmap_vmin + (heatmap_vmax - heatmap_vmin) * t
-        color = revenue_per_sqm_to_color(probe, heatmap_vmin, heatmap_vmax, step=step)
-        pygame.draw.line(surface, color, (bx, by + i), (bx + bar_w, by + i))
+        rgba = revenue_per_sqm_to_rgba(probe, heatmap_vmin, heatmap_vmax, step=step)
+        pygame.draw.line(grad, rgba, (0, i), (bar_w, i))
+    surface.blit(grad, (bx, by))
     pygame.draw.rect(surface, C_BORDER, pygame.Rect(bx, by, bar_w, bar_h), 1)
     high_txt = format_revenue_per_sqm(heatmap_vmax)
     low_txt = format_revenue_per_sqm(heatmap_vmin if heatmap_vmax > heatmap_vmin else 0)
-    surface.blit(FONT_MARK.render(high_txt, True, C_MUTED), (box.x + pad, by))
+    surface.blit(FONT_MARK.render("高", True, heatmap_color_for_value(heatmap_vmax)), (box.x + pad, by))
+    surface.blit(FONT_MARK.render(high_txt, True, C_MUTED), (box.x + pad + 18, by))
+    surface.blit(FONT_MARK.render("低", True, heatmap_color_for_value(heatmap_vmin)), (box.x + pad, by + bar_h - FONT_MARK.get_height()))
     surface.blit(
         FONT_MARK.render(low_txt, True, C_MUTED),
-        (box.x + pad, by + bar_h - FONT_MARK.get_height()),
+        (box.x + pad + 18, by + bar_h - FONT_MARK.get_height()),
     )
 
 
