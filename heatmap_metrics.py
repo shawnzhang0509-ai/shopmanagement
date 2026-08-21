@@ -15,20 +15,21 @@ from sales_lookup import (
 _week_keys_cache: dict[tuple[str | None, int], set[str]] = {}
 _amount_cache: dict[tuple[str, str, str | None, int], float] = {}
 
-# 高饱和热力色：冷色低坪效 → 暖色高坪效（配合透明度，一眼可分高低）
+# 9 档实色渐变：低坪效(红) → 中(黄) → 高坪效(绿)
+# 深红 → 中红 → 浅红 → 深黄 → 中黄 → 浅黄 → 浅绿 → 中绿 → 深绿
 HEATMAP_PALETTE: tuple[tuple[int, int, int], ...] = (
-    (186, 210, 255),
-    (96, 165, 250),
-    (34, 211, 238),
-    (52, 211, 153),
-    (250, 204, 21),
-    (251, 146, 60),
-    (239, 68, 68),
-    (185, 28, 28),
-    (127, 29, 29),
+    (153, 27, 27),
+    (220, 53, 53),
+    (252, 165, 165),
+    (202, 138, 4),
+    (234, 179, 8),
+    (254, 240, 138),
+    (134, 239, 172),
+    (34, 197, 94),
+    (21, 128, 61),
 )
-HEATMAP_ALPHA_MIN = 55
-HEATMAP_ALPHA_MAX = 215
+HEATMAP_NO_DATA = (220, 224, 230)
+HEATMAP_BLINK_IDLE = (210, 214, 218)
 
 
 def _week_key(period: str) -> str:
@@ -189,7 +190,7 @@ def heatmap_normalize_t(
     *,
     step: float | None = None,
 ) -> float:
-    """把元/㎡ 映射到 0–1；按金额分档 + 轻微 gamma，拉开几百块差距。"""
+    """把元/㎡ 映射到 0–1（0=低坪效/红，1=高坪效/绿）。"""
     if value <= 0:
         return 0.0
     if vmax <= vmin:
@@ -200,7 +201,7 @@ def heatmap_normalize_t(
     max_band = max(1, math.ceil((float(vmax) - float(vmin)) / step))
     frac = (offset % step) / step
     t = min(band_index + frac, float(max_band)) / float(max_band)
-    return max(0.0, min(1.0, t ** 0.72))
+    return max(0.0, min(1.0, t))
 
 
 def _lerp_palette(t: float) -> tuple[int, int, int]:
@@ -214,28 +215,6 @@ def _lerp_palette(t: float) -> tuple[int, int, int]:
     return tuple(int(a[i] + (b[i] - a[i]) * frac) for i in range(3))
 
 
-def heatmap_alpha_for_t(t: float) -> int:
-    """低坪效更淡、高坪效更实 — 与色相一起强化高低对比。"""
-    t = max(0.0, min(1.0, float(t)))
-    return int(HEATMAP_ALPHA_MIN + t * (HEATMAP_ALPHA_MAX - HEATMAP_ALPHA_MIN))
-
-
-def revenue_per_sqm_to_rgba(
-    value: float,
-    vmin: float,
-    vmax: float,
-    *,
-    step: float | None = None,
-) -> tuple[int, int, int, int]:
-    """带透明度的热力色：低=淡冷色，高=浓暖色。"""
-    if value <= 0:
-        return (210, 218, 228, 40)
-    step = step or adaptive_color_step(vmin, vmax)
-    t = heatmap_normalize_t(value, vmin, vmax, step=step)
-    rgb = _lerp_palette(t)
-    return (*rgb, heatmap_alpha_for_t(t))
-
-
 def revenue_per_sqm_to_color(
     value: float,
     vmin: float,
@@ -243,9 +222,12 @@ def revenue_per_sqm_to_color(
     *,
     step: float | None = None,
 ) -> tuple[int, int, int]:
-    """不透明 RGB（边框、图例文字旁色点）。"""
-    r, g, b, _a = revenue_per_sqm_to_rgba(value, vmin, vmax, step=step)
-    return r, g, b
+    """实色 RGB：绿=高坪效，黄=中，红=低。"""
+    if value <= 0:
+        return HEATMAP_NO_DATA
+    step = step or adaptive_color_step(vmin, vmax)
+    t = heatmap_normalize_t(value, vmin, vmax, step=step)
+    return _lerp_palette(t)
 
 
 def legend_tick_values(vmin: float, vmax: float, *, step: float | None = None) -> list[float]:

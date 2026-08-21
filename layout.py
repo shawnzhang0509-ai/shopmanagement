@@ -38,8 +38,8 @@ from heatmap_metrics import (
     lookup_sales_amount,
     revenue_per_sqm,
     revenue_per_sqm_to_color,
-    revenue_per_sqm_to_rgba,
     clear_heatmap_cache,
+    HEATMAP_BLINK_IDLE,
     list_recent_week_keys,
     sales_data_ready,
     week_period_display,
@@ -1855,30 +1855,6 @@ def heatmap_color_for_value(value: float) -> tuple[int, int, int]:
     )
 
 
-def heatmap_rgba_for_value(value: float, *, dim: bool = False) -> tuple[int, int, int, int]:
-    r, g, b, a = revenue_per_sqm_to_rgba(
-        value, heatmap_vmin, heatmap_vmax, step=heatmap_color_step
-    )
-    if dim:
-        a = max(28, int(a * 0.22))
-    return r, g, b, a
-
-
-def _blit_polygon_tint(surface, screen_pts, rgba: tuple[int, int, int, int]) -> None:
-    if len(screen_pts) < 3:
-        return
-    xs = [p[0] for p in screen_pts]
-    ys = [p[1] for p in screen_pts]
-    min_x, max_x = int(min(xs)), int(max(xs))
-    min_y, max_y = int(min(ys)), int(max(ys))
-    w = max(2, max_x - min_x + 1)
-    h = max(2, max_y - min_y + 1)
-    local_pts = [(p[0] - min_x, p[1] - min_y) for p in screen_pts]
-    layer = pygame.Surface((w, h), pygame.SRCALPHA)
-    pygame.draw.polygon(layer, rgba, local_pts)
-    surface.blit(layer, (min_x, min_y))
-
-
 def _shade_color(color, factor=0.55):
     return tuple(max(0, min(255, int(c * factor))) for c in color[:3])
 
@@ -1958,18 +1934,19 @@ class Furniture:
             self._label_rect = None
             return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
-        border_rgb = heatmap_color_for_value(self.revenue_per_sqm)
         blink_active = _overlap_blink_active(self)
-        dim_tint = show_roi_overlap_mode and not blink_active and not selected
-        tint = heatmap_rgba_for_value(self.revenue_per_sqm, dim=dim_tint)
+        blink_idle = show_roi_overlap_mode and not blink_active and not selected
+        fill = HEATMAP_BLINK_IDLE if blink_idle else heatmap_color_for_value(self.revenue_per_sqm)
+        border_rgb = heatmap_color_for_value(self.revenue_per_sqm)
 
-        pygame.draw.polygon(surface, (252, 253, 255), pts)
-        _blit_polygon_tint(surface, pts, tint)
+        pygame.draw.polygon(surface, fill, pts)
         border_w = 4 if selected else 3
         if selected:
             border_c = C_SELECTION
+        elif blink_idle:
+            border_c = C_BORDER
         elif self.revenue_per_sqm > 0:
-            border_c = border_rgb
+            border_c = _shade_color(border_rgb, 0.45)
         else:
             border_c = C_BORDER
         pygame.draw.polygon(surface, border_c, pts, border_w)
@@ -2004,9 +1981,10 @@ class Furniture:
                     pygame.draw.polygon(surface, _shade_color(border_rgb, 0.75), inner)
 
         if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
-            metric = format_revenue_per_sqm(self.revenue_per_sqm)
-            if dim_tint:
+            if blink_idle:
                 metric = "…"
+            else:
+                metric = format_revenue_per_sqm(self.revenue_per_sqm)
             tag_rect = draw_furniture_metric_tag(
                 surface,
                 self.name,
@@ -5328,36 +5306,28 @@ def draw_heatmap_legend(surface):
     ensure_heatmap_metrics()
     bar_w, bar_h = 18, 128
     pad = 10
-    box_w = 148
+    box_w = 140
     box_h = bar_h + 44
     x0 = SCREEN_WIDTH - box_w - 12
     y0 = SCREEN_HEIGHT - box_h - 12
     box = pygame.Rect(x0, y0, box_w, box_h)
     overlay = pygame.Surface((box.width, box.height), pygame.SRCALPHA)
-    overlay.fill((255, 255, 255, 230))
+    overlay.fill((255, 255, 255, 235))
     surface.blit(overlay, box.topleft)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=6)
     step = heatmap_color_step
     surface.blit(FONT_MARK.render("周均 元/㎡", True, C_TEXT), (box.x + pad, box.y + 6))
     surface.blit(
-        FONT_MARK.render("淡=低 · 浓=高", True, C_MUTED),
+        FONT_MARK.render("绿=高 · 黄=中 · 红=低", True, C_MUTED),
         (box.x + pad, box.y + 20),
     )
     bx = box.right - pad - bar_w
     by = box.y + 36
-    checker = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
-    for y in range(bar_h):
-        for x in range(bar_w):
-            c = 210 if (x // 4 + y // 4) % 2 == 0 else 235
-            checker.set_at((x, y), (c, c, c, 255))
-    surface.blit(checker, (bx, by))
-    grad = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
     for i in range(bar_h):
         t = 1.0 - (i / max(1, bar_h - 1))
         probe = heatmap_vmin + (heatmap_vmax - heatmap_vmin) * t
-        rgba = revenue_per_sqm_to_rgba(probe, heatmap_vmin, heatmap_vmax, step=step)
-        pygame.draw.line(grad, rgba, (0, i), (bar_w, i))
-    surface.blit(grad, (bx, by))
+        color = revenue_per_sqm_to_color(probe, heatmap_vmin, heatmap_vmax, step=step)
+        pygame.draw.line(surface, color, (bx, by + i), (bx + bar_w, by + i))
     pygame.draw.rect(surface, C_BORDER, pygame.Rect(bx, by, bar_w, bar_h), 1)
     high_txt = format_revenue_per_sqm(heatmap_vmax)
     low_txt = format_revenue_per_sqm(heatmap_vmin if heatmap_vmax > heatmap_vmin else 0)
