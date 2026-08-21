@@ -319,7 +319,8 @@ _furniture_aspect_cache: dict[tuple[str, str], float] = {}
 _last_furniture_prefetch_ms = 0
 _next_furniture_instance_id = 1
 pending_bind_child = None
-show_roi_overlap_hatch = False
+show_roi_overlap_mode = False
+ROI_OVERLAP_BLINK_MS = 750
 heatmap_week_count = 4
 heatmap_week_mode = "single"  # single | range
 heatmap_week_index = -1
@@ -629,7 +630,7 @@ def complete_bind_to_parent(parent):
     push_undo()
     child.attach_to = parent.instance_id
     pending_bind_child = None
-    show_toast(f"已绑定：{child.name} → {parent.name}（拖父件时联动）")
+    show_toast(f"已绑定：{child.name} → {parent.name}（拖父件时联动；可开「ROI重叠闪烁」查看坪效）")
     return True
 
 
@@ -648,12 +649,16 @@ def unbind_furniture(furn=None):
     show_toast(f"已解绑 {furn.name}")
 
 
-def toggle_roi_overlap_hatch(buttons=None):
-    global show_roi_overlap_hatch
-    show_roi_overlap_hatch = not show_roi_overlap_hatch
+def toggle_roi_overlap_mode(buttons=None):
+    global show_roi_overlap_mode
+    show_roi_overlap_mode = not show_roi_overlap_mode
     if buttons and "roi_overlap" in buttons:
-        buttons["roi_overlap"].active = show_roi_overlap_hatch
-    show_toast("已显示重叠坪效条纹" if show_roi_overlap_hatch else "已隐藏重叠坪效条纹")
+        buttons["roi_overlap"].active = show_roi_overlap_mode
+    show_toast(
+        "已开启 ROI 重叠闪烁（床+床垫等叠放时交替显示坪效）"
+        if show_roi_overlap_mode
+        else "已关闭 ROI 重叠模式"
+    )
 
 
 def capture_layout_state():
@@ -1699,7 +1704,7 @@ def template_sidebar_metrics(name: str, family: str, area: float) -> tuple[float
     if cached is not None:
         return cached
     amt = lookup_sales_amount(name, family, **heatmap_lookup_kwargs())
-    rps = revenue_per_sqm(amt, area)
+    rps = revenue_per_sqm(amt, area, num_weeks=heatmap_week_divisor())
     _sidebar_metric_cache[key] = (amt, rps)
     return amt, rps
 
@@ -1726,10 +1731,10 @@ def heatmap_period_title() -> str:
     slug = current_store_slug()
     if heatmap_week_mode == "range":
         if not keys:
-            return f"汇总近 {heatmap_week_count} 周（无数据）"
+            return f"周均 · 近 {heatmap_week_count} 周（无数据）"
         if len(keys) == 1:
-            return f"汇总 1 周 · {week_period_display(slug, keys[0])}"
-        return f"汇总 {len(keys)} 周 · {keys[0]} … {keys[-1]}"
+            return f"周均 · {week_period_display(slug, keys[0])}"
+        return f"周均 · 近 {len(keys)} 周 · {keys[0]} … {keys[-1]}"
     if not keys:
         return "暂无周销量 — 请先 grab_sales"
     return week_period_display(slug, keys[0])
@@ -1738,7 +1743,7 @@ def heatmap_period_title() -> str:
 def heatmap_week_caption() -> str:
     keys = active_heatmap_week_keys()
     if heatmap_week_mode == "range":
-        return f"汇总近 {heatmap_week_count} 周"
+        return f"周均 · 近 {heatmap_week_count} 周"
     if not keys:
         return "无周数据"
     key = keys[0]
@@ -1753,7 +1758,7 @@ def sync_heatmap_week_ui(buttons=None) -> None:
         return
     is_range = heatmap_week_mode == "range"
     if "week_mode" in buttons:
-        buttons["week_mode"].label = f"汇总 {heatmap_week_count}周" if is_range else "单周查看"
+        buttons["week_mode"].label = f"周均 {heatmap_week_count}周" if is_range else "单周查看"
         buttons["week_mode"].active = is_range
     if "week_prev" in buttons:
         buttons["week_prev"].enabled = not is_range and bool(heatmap_store_weeks())
@@ -1806,6 +1811,10 @@ def change_heatmap_range_weeks(delta: int, buttons=None) -> None:
     show_toast(heatmap_period_title())
 
 
+def heatmap_week_divisor() -> int:
+    return max(1, len(active_heatmap_week_keys()))
+
+
 def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> float:
     area = furniture_area_mm2(furn)
     amount = lookup_sales_amount(
@@ -1815,7 +1824,7 @@ def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> flo
         num_weeks=heatmap_week_count,
         week_keys=active_heatmap_week_keys(),
     )
-    return revenue_per_sqm(amount, area)
+    return revenue_per_sqm(amount, area, num_weeks=heatmap_week_divisor())
 
 
 def recompute_heatmap_metrics() -> None:
@@ -1925,6 +1934,9 @@ class Furniture:
             return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
         fill = heatmap_color_for_value(self.revenue_per_sqm)
+        blink_active = _overlap_blink_active(self)
+        if show_roi_overlap_mode and not blink_active and not selected:
+            fill = _blend_colors(fill, (255, 255, 255), 0.72)
         pygame.draw.polygon(surface, fill, pts)
         border_w = 4 if selected else 3
         if selected:
@@ -1965,6 +1977,8 @@ class Furniture:
 
         if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
             metric = format_revenue_per_sqm(self.revenue_per_sqm)
+            if show_roi_overlap_mode and not blink_active and not selected:
+                metric = "…"
             tag_rect = draw_furniture_metric_tag(
                 surface,
                 self.name,
@@ -2091,6 +2105,54 @@ def _darken_color(color, factor=0.55):
     return tuple(max(0, min(255, int(c * factor))) for c in color[:3])
 
 
+def _overlap_groups() -> list[list["Furniture"]]:
+    """空间重叠或父子绑定的家具分为一组（如床架+床垫）。"""
+    n = len(placed_furnitures)
+    if n < 2:
+        return []
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    id_to_idx = {
+        f.instance_id: i for i, f in enumerate(placed_furnitures) if getattr(f, "instance_id", "")
+    }
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = placed_furnitures[i], placed_furnitures[j]
+            if polygons_overlap(a.get_rotated_points(), b.get_rotated_points()):
+                union(i, j)
+    for i, furn in enumerate(placed_furnitures):
+        parent_id = getattr(furn, "attach_to", "") or ""
+        if parent_id and parent_id in id_to_idx:
+            union(i, id_to_idx[parent_id])
+    buckets: dict[int, list[Furniture]] = {}
+    for i in range(n):
+        buckets.setdefault(find(i), []).append(placed_furnitures[i])
+    return [g for g in buckets.values() if len(g) >= 2]
+
+
+def _overlap_blink_active(furn: "Furniture") -> bool:
+    if not show_roi_overlap_mode:
+        return True
+    tick = pygame.time.get_ticks()
+    for group in _overlap_groups():
+        if furn not in group:
+            continue
+        phase = (tick // ROI_OVERLAP_BLINK_MS) % len(group)
+        return group[phase] is furn
+    return True
+
+
 def draw_crosshatch_polygon(surface, screen_pts, color_a, color_b, spacing=7):
     if len(screen_pts) < 3:
         return
@@ -2114,39 +2176,63 @@ def draw_crosshatch_polygon(surface, screen_pts, color_a, color_b, spacing=7):
     surface.blit(mask, (min_x, min_y))
 
 
+def furniture_draw_order() -> list:
+    """重叠闪烁模式下，当前高亮件最后绘制以置于顶层。"""
+    if not show_roi_overlap_mode:
+        return placed_furnitures
+    active: set = set()
+    for group in _overlap_groups():
+        for furn in group:
+            if _overlap_blink_active(furn):
+                active.add(furn)
+    if not active:
+        return placed_furnitures
+    back = [f for f in placed_furnitures if f not in active]
+    front = [f for f in placed_furnitures if f in active]
+    return back + front
+
+
 def draw_furniture_roi_overlaps(surface):
-    if not show_roi_overlap_hatch or len(placed_furnitures) < 2:
+    if not show_roi_overlap_mode or len(placed_furnitures) < 2:
         return
-    n = len(placed_furnitures)
-    for i in range(n):
-        for j in range(i + 1, n):
-            a = placed_furnitures[i]
-            b = placed_furnitures[j]
-            if not furniture_on_screen(a) and not furniture_on_screen(b):
-                continue
-            pts_a = a.get_rotated_points()
-            pts_b = b.get_rotated_points()
-            if not polygons_overlap(pts_a, pts_b):
-                continue
-            overlap = convex_polygon_intersection(pts_a, pts_b)
-            if len(overlap) < 3:
-                continue
-            screen_pts = [world_to_screen(x, y) for x, y in overlap]
-            color_a = heatmap_color_for_value(a.revenue_per_sqm)
-            color_b = heatmap_color_for_value(b.revenue_per_sqm)
-            draw_crosshatch_polygon(surface, screen_pts, color_a, color_b)
-            cx = sum(p[0] for p in screen_pts) / len(screen_pts)
-            cy = sum(p[1] for p in screen_pts) / len(screen_pts)
-            if max(max(p[0] for p in screen_pts) - min(p[0] for p in screen_pts), 28) >= 28:
-                label = f"{a.name}∩{b.name}"
-                draw_label_pill(
-                    surface,
-                    label,
-                    (cx, cy),
-                    font=FONT_TINY,
-                    fg=C_TEXT,
-                    bg=(255, 255, 255, 220),
-                )
+    tick = pygame.time.get_ticks()
+    for group in _overlap_groups():
+        phase = (tick // ROI_OVERLAP_BLINK_MS) % len(group)
+        active = group[phase]
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                if not furniture_on_screen(a) and not furniture_on_screen(b):
+                    continue
+                pts_a = a.get_rotated_points()
+                pts_b = b.get_rotated_points()
+                if not polygons_overlap(pts_a, pts_b):
+                    continue
+                overlap = convex_polygon_intersection(pts_a, pts_b)
+                if len(overlap) < 3:
+                    continue
+                screen_pts = [world_to_screen(x, y) for x, y in overlap]
+                show_a = active is a
+                show_b = active is b
+                if show_a or show_b:
+                    color = heatmap_color_for_value(
+                        a.revenue_per_sqm if show_a else b.revenue_per_sqm
+                    )
+                    if len(screen_pts) >= 3:
+                        pygame.draw.polygon(surface, color, screen_pts)
+                        pygame.draw.polygon(surface, _shade_color(color, 0.35), screen_pts, 2)
+                cx = sum(p[0] for p in screen_pts) / len(screen_pts)
+                cy = sum(p[1] for p in screen_pts) / len(screen_pts)
+                if max(max(p[0] for p in screen_pts) - min(p[0] for p in screen_pts), 28) >= 28:
+                    label = active.name
+                    draw_label_pill(
+                        surface,
+                        label,
+                        (cx, cy),
+                        font=FONT_TINY,
+                        fg=C_TEXT,
+                        bg=(255, 255, 255, 230),
+                    )
 
 
 def obstacle_is_wall(col) -> bool:
@@ -5228,7 +5314,7 @@ def draw_heatmap_legend(surface):
     surface.blit(overlay, box.topleft)
     pygame.draw.rect(surface, C_BORDER, box, 1, border_radius=6)
     step = heatmap_color_step
-    surface.blit(FONT_MARK.render("元/㎡", True, C_TEXT), (box.x + pad, box.y + 6))
+    surface.blit(FONT_MARK.render("周均 元/㎡", True, C_TEXT), (box.x + pad, box.y + 6))
     surface.blit(
         FONT_MARK.render(f"每档≈${step:.0f}", True, C_MUTED),
         (box.x + pad, box.y + 20),
@@ -5369,7 +5455,7 @@ def build_sidebar_ui():
     buttons["bind_parent"] = Button((pad, y, bw, 34), "绑定父件", "bind_parent")
     buttons["unbind"] = Button((pad + bw + 8, y, bw, 34), "解绑", "unbind")
     y += 42
-    buttons["roi_overlap"] = Button((pad, y, w, 30), "重叠坪效条纹", "roi_overlap", toggle=True)
+    buttons["roi_overlap"] = Button((pad, y, w, 30), "ROI重叠闪烁", "roi_overlap", toggle=True)
     y += 36
     buttons["week_prev"] = Button((pad, y, bw, 34), "◀ 上周", "week_prev")
     buttons["week_next"] = Button((pad + bw + 8, y, bw, 34), "下周 ▶", "week_next")
@@ -5415,7 +5501,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     buttons["rotate_mode"].active = rotation_mode == "90"
     buttons["rotate_mode"].label = f"旋转: {rotation_mode_label()}"
     if "roi_overlap" in buttons:
-        buttons["roi_overlap"].active = show_roi_overlap_hatch
+        buttons["roi_overlap"].active = show_roi_overlap_mode
     sync_heatmap_week_ui(buttons)
     if "week_prev" in buttons:
         pr = buttons["week_prev"].rect
@@ -5615,7 +5701,7 @@ def handle_toolbar_click(action, buttons):
     elif action == "unbind":
         unbind_furniture()
     elif action == "roi_overlap":
-        toggle_roi_overlap_hatch(buttons)
+        toggle_roi_overlap_mode(buttons)
     elif action == "week_prev":
         navigate_heatmap_week(-1, buttons)
     elif action == "week_next":
@@ -6231,7 +6317,7 @@ def main():
             draw_alignment_guides(screen)
             if sales_data_ready() and placed_furnitures:
                 ensure_heatmap_metrics()
-            for f in placed_furnitures:
+            for f in furniture_draw_order():
                 if f is not selected_furniture:
                     f.draw(screen, selected=False)
             if selected_furniture is not None:
