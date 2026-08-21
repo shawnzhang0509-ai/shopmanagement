@@ -15,18 +15,20 @@ from sales_lookup import (
 _week_keys_cache: dict[tuple[str | None, int], set[str]] = {}
 _amount_cache: dict[tuple[str, str, str | None, int], float] = {}
 
-# 9 档渐变色：蓝 → 青 → 绿 → 黄 → 橙 → 红（差几百块也能分清）
+# 高饱和热力色：冷色低坪效 → 暖色高坪效（配合透明度，一眼可分高低）
 HEATMAP_PALETTE: tuple[tuple[int, int, int], ...] = (
-    (235, 245, 255),
-    (147, 197, 253),
-    (56, 189, 248),
+    (186, 210, 255),
+    (96, 165, 250),
+    (34, 211, 238),
     (52, 211, 153),
     (250, 204, 21),
     (251, 146, 60),
-    (248, 113, 113),
-    (220, 38, 38),
-    (88, 28, 28),
+    (239, 68, 68),
+    (185, 28, 28),
+    (127, 29, 29),
 )
+HEATMAP_ALPHA_MIN = 55
+HEATMAP_ALPHA_MAX = 215
 
 
 def _week_key(period: str) -> str:
@@ -212,6 +214,28 @@ def _lerp_palette(t: float) -> tuple[int, int, int]:
     return tuple(int(a[i] + (b[i] - a[i]) * frac) for i in range(3))
 
 
+def heatmap_alpha_for_t(t: float) -> int:
+    """低坪效更淡、高坪效更实 — 与色相一起强化高低对比。"""
+    t = max(0.0, min(1.0, float(t)))
+    return int(HEATMAP_ALPHA_MIN + t * (HEATMAP_ALPHA_MAX - HEATMAP_ALPHA_MIN))
+
+
+def revenue_per_sqm_to_rgba(
+    value: float,
+    vmin: float,
+    vmax: float,
+    *,
+    step: float | None = None,
+) -> tuple[int, int, int, int]:
+    """带透明度的热力色：低=淡冷色，高=浓暖色。"""
+    if value <= 0:
+        return (210, 218, 228, 40)
+    step = step or adaptive_color_step(vmin, vmax)
+    t = heatmap_normalize_t(value, vmin, vmax, step=step)
+    rgb = _lerp_palette(t)
+    return (*rgb, heatmap_alpha_for_t(t))
+
+
 def revenue_per_sqm_to_color(
     value: float,
     vmin: float,
@@ -219,12 +243,9 @@ def revenue_per_sqm_to_color(
     *,
     step: float | None = None,
 ) -> tuple[int, int, int]:
-    """多档热力色（元/㎡）；坪效差几百块也会有不同色相。"""
-    if value <= 0:
-        return (235, 238, 242)
-    step = step or adaptive_color_step(vmin, vmax)
-    t = heatmap_normalize_t(value, vmin, vmax, step=step)
-    return _lerp_palette(t)
+    """不透明 RGB（边框、图例文字旁色点）。"""
+    r, g, b, _a = revenue_per_sqm_to_rgba(value, vmin, vmax, step=step)
+    return r, g, b
 
 
 def legend_tick_values(vmin: float, vmax: float, *, step: float | None = None) -> list[float]:
