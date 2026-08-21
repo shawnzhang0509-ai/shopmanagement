@@ -143,21 +143,25 @@ def furniture_area_sqm(area_mm2: float) -> float:
 def revenue_per_sqm(
     sales_amount: float,
     area_mm2: float,
+    *,
+    num_weeks: int = 1,
 ) -> float:
+    """元/㎡；多周汇总时 sales_amount 为各周合计，num_weeks 用于换算周均坪效。"""
     area_sqm = furniture_area_sqm(area_mm2)
     if area_sqm <= 0:
         return 0.0
-    return max(0.0, float(sales_amount)) / area_sqm
+    weeks = max(1, int(num_weeks or 1))
+    return max(0.0, float(sales_amount)) / weeks / area_sqm
 
 
 def format_revenue_per_sqm(value: float) -> str:
     if value <= 0:
         return "—"
     if value >= 1000:
-        return f"${value:,.0f}/㎡"
+        return f"${value:,.0f}/㎡·周"
     if value >= 100:
-        return f"${value:.0f}/㎡"
-    return f"${value:.1f}/㎡"
+        return f"${value:.0f}/㎡·周"
+    return f"${value:.1f}/㎡·周"
 
 
 def adaptive_color_step(vmin: float, vmax: float) -> float:
