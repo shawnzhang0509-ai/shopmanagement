@@ -334,6 +334,7 @@ _pending_heatmap_week: str | None = None
 _heatmap_metrics_dirty = True
 _sidebar_metric_cache: dict[tuple, tuple[float, float]] = {}
 furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
+_overlap_blink_cache: dict = {"phase_tick": -1, "active": set()}
 
 
 def clear_obstacle_selection():
@@ -657,7 +658,7 @@ def toggle_roi_overlap_mode(buttons=None):
     if buttons and "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_mode
     show_toast(
-        "已开启 ROI 重叠闪烁（床+床垫等叠放时交替显示坪效）"
+        "已开启 ROI 重叠闪烁：叠放家具将轮流置顶显示坪效"
         if show_roi_overlap_mode
         else "已关闭 ROI 重叠模式"
     )
@@ -1936,16 +1937,16 @@ class Furniture:
             return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
         blink_active = _overlap_blink_active(self)
-        blink_idle = show_roi_overlap_mode and not blink_active and not selected
+        blink_idle = show_roi_overlap_mode and not blink_active
         fill = HEATMAP_BLINK_IDLE if blink_idle else heatmap_color_for_value(self.revenue_per_sqm)
         border_rgb = heatmap_color_for_value(self.revenue_per_sqm)
 
         pygame.draw.polygon(surface, fill, pts)
         border_w = 4 if selected else 3
-        if selected:
+        if selected and not show_roi_overlap_mode:
             border_c = C_SELECTION
         elif blink_idle:
-            border_c = C_BORDER
+            border_c = (180, 186, 194)
         else:
             border_c = _shade_color(border_rgb, 0.45)
         pygame.draw.polygon(surface, border_c, pts, border_w)
@@ -1957,7 +1958,7 @@ class Furniture:
         min_y, max_y = min(ys), max(ys)
         img_cy = cy - span * 0.16
 
-        if span >= 6:
+        if span >= 6 and not blink_idle:
             display_w = max(FURNITURE_IMAGE_MIN_PX, min(160, int(span * 0.78)))
             aspect = _furniture_aspect(self.name, self.product_family)
             display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
@@ -1979,7 +1980,7 @@ class Furniture:
                 if len(inner) >= 3:
                     pygame.draw.polygon(surface, _shade_color(border_rgb, 0.75), inner)
 
-        if span >= FURNITURE_LABEL_MIN_SPAN_PX or selected:
+        if (span >= FURNITURE_LABEL_MIN_SPAN_PX or selected) and not blink_idle:
             if blink_idle:
                 metric = "…"
             else:
@@ -2147,16 +2148,27 @@ def _overlap_groups() -> list[list["Furniture"]]:
     return [g for g in buckets.values() if len(g) >= 2]
 
 
+def _refresh_overlap_blink_cache() -> None:
+    global _overlap_blink_cache
+    if not show_roi_overlap_mode:
+        _overlap_blink_cache = {"phase_tick": -1, "active": set()}
+        return
+    phase_tick = pygame.time.get_ticks() // ROI_OVERLAP_BLINK_MS
+    if _overlap_blink_cache.get("phase_tick") == phase_tick:
+        return
+    active: set[Furniture] = set()
+    for group in _overlap_groups():
+        if not group:
+            continue
+        active.add(group[phase_tick % len(group)])
+    _overlap_blink_cache = {"phase_tick": phase_tick, "active": active}
+
+
 def _overlap_blink_active(furn: "Furniture") -> bool:
     if not show_roi_overlap_mode:
         return True
-    tick = pygame.time.get_ticks()
-    for group in _overlap_groups():
-        if furn not in group:
-            continue
-        phase = (tick // ROI_OVERLAP_BLINK_MS) % len(group)
-        return group[phase] is furn
-    return True
+    _refresh_overlap_blink_cache()
+    return furn in _overlap_blink_cache.get("active", set())
 
 
 def draw_crosshatch_polygon(surface, screen_pts, color_a, color_b, spacing=7):
@@ -2183,14 +2195,11 @@ def draw_crosshatch_polygon(surface, screen_pts, color_a, color_b, spacing=7):
 
 
 def furniture_draw_order() -> list:
-    """重叠闪烁模式下，当前高亮件最后绘制以置于顶层。"""
+    """重叠闪烁：非当前件先画（底层），当前轮到的件最后画（置顶）。"""
     if not show_roi_overlap_mode:
         return placed_furnitures
-    active: set = set()
-    for group in _overlap_groups():
-        for furn in group:
-            if _overlap_blink_active(furn):
-                active.add(furn)
+    _refresh_overlap_blink_cache()
+    active = _overlap_blink_cache.get("active", set())
     if not active:
         return placed_furnitures
     back = [f for f in placed_furnitures if f not in active]
@@ -2198,15 +2207,26 @@ def furniture_draw_order() -> list:
     return back + front
 
 
+def draw_furniture_selection_ring(surface, furn) -> None:
+    if furn is None or not furniture_on_screen(furn):
+        return
+    pts = [world_to_screen(x, y) for x, y in furn.get_rotated_points()]
+    if len(pts) >= 3:
+        pygame.draw.polygon(surface, C_SELECTION, pts, 4)
+
+
 def draw_furniture_roi_overlaps(surface):
-    """重叠区只画闪烁描边与名称，不遮挡产品图。"""
+    """重叠区：脉冲描边 + 当前件名称。"""
     if not show_roi_overlap_mode or len(placed_furnitures) < 2:
         return
+    _refresh_overlap_blink_cache()
     tick = pygame.time.get_ticks()
     pulse = 0.55 + 0.45 * abs(math.sin(tick / 280.0))
+    active_set = _overlap_blink_cache.get("active", set())
     for group in _overlap_groups():
-        phase = (tick // ROI_OVERLAP_BLINK_MS) % len(group)
-        active = group[phase]
+        active = next((f for f in group if f in active_set), group[0] if group else None)
+        if active is None:
+            continue
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
                 a, b = group[i], group[j]
@@ -2221,7 +2241,7 @@ def draw_furniture_roi_overlaps(surface):
                     continue
                 screen_pts = [world_to_screen(x, y) for x, y in overlap]
                 color = heatmap_color_for_value(active.revenue_per_sqm)
-                width = max(2, int(2 + pulse * 3))
+                width = max(3, int(3 + pulse * 4))
                 if len(screen_pts) >= 3:
                     pygame.draw.polygon(surface, color, screen_pts, width)
                 cx = sum(p[0] for p in screen_pts) / len(screen_pts)
@@ -2229,11 +2249,11 @@ def draw_furniture_roi_overlaps(surface):
                 if max(max(p[0] for p in screen_pts) - min(p[0] for p in screen_pts), 28) >= 28:
                     draw_label_pill(
                         surface,
-                        active.name,
+                        f"▶ {active.name}",
                         (cx, cy),
                         font=FONT_TINY,
                         fg=C_TEXT,
-                        bg=(255, 255, 255, 235),
+                        bg=(255, 255, 255, 240),
                     )
 
 
@@ -6360,11 +6380,18 @@ def main():
             draw_alignment_guides(screen)
             if sales_data_ready() and placed_furnitures:
                 ensure_heatmap_metrics()
-            for f in furniture_draw_order():
-                if f is not selected_furniture:
+            draw_order = furniture_draw_order()
+            if show_roi_overlap_mode:
+                for f in draw_order:
                     f.draw(screen, selected=False)
-            if selected_furniture is not None:
-                selected_furniture.draw(screen, selected=True)
+                if selected_furniture is not None:
+                    draw_furniture_selection_ring(screen, selected_furniture)
+            else:
+                for f in draw_order:
+                    if f is not selected_furniture:
+                        f.draw(screen, selected=False)
+                if selected_furniture is not None:
+                    selected_furniture.draw(screen, selected=True)
             draw_furniture_roi_overlaps(screen)
             prefetch_furniture_images()
             draw_selection_overlay(screen)
