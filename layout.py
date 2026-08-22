@@ -705,6 +705,7 @@ def undo_layout():
     clear_obstacle_selection()
     selected_furniture = selected_feature = None
     selected_marker_index = None
+    mark_heatmap_dirty()
     show_toast("已撤销")
 
 
@@ -1937,7 +1938,8 @@ class Furniture:
             return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
         blink_active = _overlap_blink_active(self)
-        blink_idle = show_roi_overlap_mode and not blink_active
+        in_overlap = _furniture_overlap_group(self) is not None
+        blink_idle = show_roi_overlap_mode and in_overlap and not blink_active
         fill = HEATMAP_BLINK_IDLE if blink_idle else heatmap_color_for_value(self.revenue_per_sqm)
         border_rgb = heatmap_color_for_value(self.revenue_per_sqm)
 
@@ -1981,10 +1983,7 @@ class Furniture:
                     pygame.draw.polygon(surface, _shade_color(border_rgb, 0.75), inner)
 
         if (span >= FURNITURE_LABEL_MIN_SPAN_PX or selected) and not blink_idle:
-            if blink_idle:
-                metric = "…"
-            else:
-                metric = format_revenue_per_sqm(self.revenue_per_sqm)
+            metric = format_revenue_per_sqm(self.revenue_per_sqm)
             tag_rect = draw_furniture_metric_tag(
                 surface,
                 self.name,
@@ -2148,6 +2147,13 @@ def _overlap_groups() -> list[list["Furniture"]]:
     return [g for g in buckets.values() if len(g) >= 2]
 
 
+def _furniture_overlap_group(furn: "Furniture") -> list["Furniture"] | None:
+    for group in _overlap_groups():
+        if furn in group:
+            return group
+    return None
+
+
 def _refresh_overlap_blink_cache() -> None:
     global _overlap_blink_cache
     if not show_roi_overlap_mode:
@@ -2166,6 +2172,8 @@ def _refresh_overlap_blink_cache() -> None:
 
 def _overlap_blink_active(furn: "Furniture") -> bool:
     if not show_roi_overlap_mode:
+        return True
+    if _furniture_overlap_group(furn) is None:
         return True
     _refresh_overlap_blink_cache()
     return furn in _overlap_blink_cache.get("active", set())
@@ -5480,7 +5488,9 @@ def build_sidebar_ui():
     # toolbar row 1
     bw = (w - 8) // 2
     buttons["save"] = Button((pad, y, bw, 34), "保存", "save")
-    buttons["home"] = Button((pad + bw + 8, y, bw, 34), "返回门店选择", "home")
+    buttons["undo"] = Button((pad + bw + 8, y, bw, 34), "撤销", "undo")
+    y += 42
+    buttons["home"] = Button((pad, y, w, 34), "返回门店选择", "home")
     y += 42
     buttons["rename_store"] = Button((pad, y, w, 34), "重命名门店", "rename_store")
     y += 42
@@ -5709,6 +5719,8 @@ def draw_sidebar(buttons, input_box, template_list_top):
 def handle_toolbar_click(action, buttons):
     if action == "save":
         save_current_layout()
+    elif action == "undo":
+        undo_layout()
     elif action == "home":
         go_to_store_home()
     elif action == "rename_store":
@@ -5946,6 +5958,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             selected_feature = f
             selected_marker_index = None
             clear_obstacle_selection()
+            push_undo()
             furniture_drag_snapshot = {
                 item.instance_id: (item.x, item.y)
                 for item in furniture_drag_pack(f)
