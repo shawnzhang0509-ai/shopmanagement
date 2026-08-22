@@ -28,7 +28,7 @@ HEATMAP_PALETTE: tuple[tuple[int, int, int], ...] = (
     (34, 197, 94),
     (21, 128, 61),
 )
-HEATMAP_NO_DATA = (220, 224, 230)
+HEATMAP_ZERO = HEATMAP_PALETTE[0]  # 0 坪效 = 最差，深红报警
 HEATMAP_BLINK_IDLE = (210, 214, 218)
 
 
@@ -159,7 +159,7 @@ def revenue_per_sqm(
 
 def format_revenue_per_sqm(value: float) -> str:
     if value <= 0:
-        return "—"
+        return "$0/㎡·周"
     if value >= 1000:
         return f"${value:,.0f}/㎡·周"
     if value >= 100:
@@ -222,9 +222,9 @@ def revenue_per_sqm_to_color(
     *,
     step: float | None = None,
 ) -> tuple[int, int, int]:
-    """实色 RGB：绿=高坪效，黄=中，红=低。"""
+    """实色 RGB：绿=高坪效，黄=中，红=低；0 坪效固定深红报警。"""
     if value <= 0:
-        return HEATMAP_NO_DATA
+        return HEATMAP_ZERO
     step = step or adaptive_color_step(vmin, vmax)
     t = heatmap_normalize_t(value, vmin, vmax, step=step)
     return _lerp_palette(t)
