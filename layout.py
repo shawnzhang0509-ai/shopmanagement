@@ -86,6 +86,7 @@ C_SELECTION = (37, 99, 235)
 C_FLOOR = (255, 253, 245)
 C_OUTSIDE = (148, 163, 184)
 C_WALL = (51, 65, 85)
+C_FAMILY = (59, 82, 118)
 
 DEFAULT_STORE_WIDTH_M = 20.0
 DEFAULT_STORE_HEIGHT_M = 15.0
@@ -1945,10 +1946,8 @@ class Furniture:
             border_c = C_SELECTION
         elif blink_idle:
             border_c = C_BORDER
-        elif self.revenue_per_sqm > 0:
-            border_c = _shade_color(border_rgb, 0.45)
         else:
-            border_c = C_BORDER
+            border_c = _shade_color(border_rgb, 0.45)
         pygame.draw.polygon(surface, border_c, pts, border_w)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
@@ -1992,6 +1991,7 @@ class Furniture:
                 cx,
                 max_y - 2,
                 border_rgb,
+                product_family=self.product_family,
                 selected=selected,
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
@@ -5092,39 +5092,78 @@ def should_show_obstacle_label(col, idx, selected) -> bool:
     return rect.width >= LABEL_MIN_W and rect.height >= LABEL_MIN_H
 
 
+def _truncate_label(text: str, font, max_px: int) -> str:
+    text = str(text or "").strip()
+    if not text or font.size(text)[0] <= max_px:
+        return text
+    ell = "…"
+    while len(text) > 1 and font.size(text + ell)[0] > max_px:
+        text = text[:-1]
+    return text + ell
+
+
+def display_family_label(family: str, sku: str) -> str:
+    fam = str(family or "").strip()
+    if not fam or fam == sku:
+        return ""
+    return fam
+
+
 def draw_furniture_metric_tag(
     surface,
-    name: str,
+    sku: str,
     metric: str,
     cx: float,
     bottom_y: float,
     heat_color: tuple[int, int, int],
     *,
+    product_family: str = "",
     selected: bool = False,
 ) -> pygame.Rect:
-    """SKU + 坪效：底部色块标签，不压在产品图上。"""
+    """底部标签：SKU + Product Family + 周均坪效（三行）。"""
     pad_x, pad_y = 7, 5
-    name_font = FONT_LABEL if selected else FONT_SMALL
-    name_surf = name_font.render(name, True, (30, 41, 59))
-    metric_surf = FONT_METRIC.render(metric, True, _shade_color(heat_color, 0.22))
-    inner_w = max(name_surf.get_width(), metric_surf.get_width())
-    pill_w = inner_w + pad_x * 2 + 6
-    pill_h = name_surf.get_height() + metric_surf.get_height() + pad_y * 2 + 3
+    stripe_w = 5
+    max_inner = 168
+
+    sku_font = FONT_LABEL if selected else FONT_SMALL
+    sku_text = _truncate_label(sku, sku_font, max_inner)
+    sku_surf = sku_font.render(sku_text, True, C_TEXT)
+
+    family_text = display_family_label(product_family, sku)
+    family_surf = None
+    if family_text:
+        family_text = _truncate_label(family_text, FONT_MARK, max_inner)
+        family_surf = FONT_MARK.render(family_text, True, C_FAMILY)
+
+    metric_rgb = heat_color if metric.startswith("$0") else _shade_color(heat_color, 0.22)
+    metric_surf = FONT_METRIC.render(metric, True, metric_rgb)
+
+    line_surfs = [sku_surf]
+    if family_surf is not None:
+        line_surfs.append(family_surf)
+    line_surfs.append(metric_surf)
+    line_gap = 2 if family_surf is not None else 3
+    inner_w = max(s.get_width() for s in line_surfs)
+    inner_h = sum(s.get_height() for s in line_surfs) + line_gap * (len(line_surfs) - 1)
+    pill_w = inner_w + pad_x * 2 + stripe_w + 4
+    pill_h = inner_h + pad_y * 2
     pill = pygame.Rect(0, 0, pill_w, pill_h)
     pill.centerx = int(cx)
     pill.bottom = int(bottom_y)
     pill.clamp_ip(CANVAS_RECT.inflate(4, 4))
 
     overlay = pygame.Surface((pill.width, pill.height), pygame.SRCALPHA)
-    overlay.fill((255, 255, 255, 244))
-    pygame.draw.rect(overlay, (*heat_color, 255), (0, 0, 5, pill.height), border_radius=6)
+    overlay.fill((255, 255, 255, 248))
+    pygame.draw.rect(overlay, (*heat_color, 255), (0, 0, stripe_w, pill.height), border_radius=6)
     surface.blit(overlay, pill.topleft)
     border_c = C_SELECTION if selected else _shade_color(heat_color, 0.38)
     pygame.draw.rect(surface, border_c, pill, 2, border_radius=6)
-    tx = pill.x + pad_x + 5
+
+    tx = pill.x + pad_x + stripe_w + 2
     ty = pill.y + pad_y
-    surface.blit(name_surf, (tx, ty))
-    surface.blit(metric_surf, (tx, ty + name_surf.get_height() + 2))
+    for i, surf in enumerate(line_surfs):
+        surface.blit(surf, (tx, ty))
+        ty += surf.get_height() + (line_gap if i < len(line_surfs) - 1 else 0)
     return pill
 
 
