@@ -124,7 +124,8 @@ ROTATE_FINE_DEG = 15
 ROTATE_COARSE_DEG = 90
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
 FURNITURE_IMAGE_MIN_PX = 10  # zoom out 时仍显示的最小缩略图边长（像素）
-FURNITURE_LABEL_MIN_SPAN_PX = 44  # 家具在屏幕上太小时隐藏名称，避免叠字
+FURNITURE_LABEL_MIN_SPAN_PX = 32  # 标签随缩放变小；低于此像素仅保留点击热区
+FURNITURE_LABEL_REF_SPAN_PX = 96  # 家具在屏幕上约此宽度时使用标准字号
 FURNITURE_IMG_SOURCE_PX = 96  # 统一从该尺寸解码，缩放走缓存
 FURNITURE_DISPLAY_BUCKET_PX = 8  # 显示尺寸分桶，zoom 时减少重复 smoothscale
 FURNITURE_DISPLAY_CACHE_MAX = 512
@@ -173,6 +174,24 @@ FONT_TINY = load_font(11)
 FONT_LABEL = load_font(14, bold=True)
 FONT_MARK = load_font(12)
 FONT_METRIC = load_font(13, bold=True)
+
+_label_font_cache: dict[tuple[int, bool], object] = {}
+
+
+def cached_label_font(size: int, *, bold: bool = False):
+    """按整数字号缓存字体，缩放标签时重新 rasterize 避免拉伸失真。"""
+    px = int(max(8, min(18, round(size))))
+    key = (px, bold)
+    if key not in _label_font_cache:
+        _label_font_cache[key] = load_font(px, bold=bold)
+    return _label_font_cache[key]
+
+
+def furniture_label_scale(span_px: float) -> float:
+    """标签相对家具屏幕尺寸的比例系数。"""
+    if span_px <= 0:
+        return 1.0
+    return max(0.5, min(1.3, span_px / FURNITURE_LABEL_REF_SPAN_PX))
 
 screen = None
 clock = None
@@ -1993,6 +2012,7 @@ class Furniture:
                 border_rgb,
                 product_family=self.product_family,
                 selected=selected,
+                span_px=span,
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
@@ -5147,33 +5167,43 @@ def draw_furniture_metric_tag(
     *,
     product_family: str = "",
     selected: bool = False,
+    span_px: float = FURNITURE_LABEL_REF_SPAN_PX,
 ) -> pygame.Rect:
-    """底部标签：SKU + Product Family + 周均坪效（三行）。"""
-    pad_x, pad_y = 7, 5
-    stripe_w = 5
-    max_inner = 168
+    """底部标签：SKU + Product Family + 周均坪效；字号随家具屏幕尺寸缩放。"""
+    scale = furniture_label_scale(span_px)
+    pad_x = max(4, int(7 * scale))
+    pad_y = max(3, int(5 * scale))
+    stripe_w = max(3, int(5 * scale))
+    line_gap = max(1, int(2 * scale))
+    max_inner = max(40, min(int(span_px * 0.94), int(168 * scale)))
+    border_r = max(3, int(6 * scale))
 
-    sku_font = FONT_LABEL if selected else FONT_SMALL
+    sku_px = (14 if selected else 13) * scale + (1 if selected else 0)
+    family_px = 11 * scale
+    metric_px = 12 * scale
+
+    sku_font = cached_label_font(sku_px, bold=selected or scale >= 0.95)
     sku_text = _truncate_label(sku, sku_font, max_inner)
     sku_surf = sku_font.render(sku_text, True, C_TEXT)
 
     family_text = display_family_label(product_family, sku)
     family_surf = None
     if family_text:
-        family_text = _truncate_label(family_text, FONT_MARK, max_inner)
-        family_surf = FONT_MARK.render(family_text, True, C_FAMILY)
+        family_font = cached_label_font(family_px, bold=False)
+        family_text = _truncate_label(family_text, family_font, max_inner)
+        family_surf = family_font.render(family_text, True, C_FAMILY)
 
     metric_rgb = heat_color if metric.startswith("$0") else _shade_color(heat_color, 0.22)
-    metric_surf = FONT_METRIC.render(metric, True, metric_rgb)
+    metric_font = cached_label_font(metric_px, bold=True)
+    metric_surf = metric_font.render(metric, True, metric_rgb)
 
     line_surfs = [sku_surf]
     if family_surf is not None:
         line_surfs.append(family_surf)
     line_surfs.append(metric_surf)
-    line_gap = 2 if family_surf is not None else 3
     inner_w = max(s.get_width() for s in line_surfs)
     inner_h = sum(s.get_height() for s in line_surfs) + line_gap * (len(line_surfs) - 1)
-    pill_w = inner_w + pad_x * 2 + stripe_w + 4
+    pill_w = inner_w + pad_x * 2 + stripe_w + max(2, int(4 * scale))
     pill_h = inner_h + pad_y * 2
     pill = pygame.Rect(0, 0, pill_w, pill_h)
     pill.centerx = int(cx)
@@ -5182,12 +5212,12 @@ def draw_furniture_metric_tag(
 
     overlay = pygame.Surface((pill.width, pill.height), pygame.SRCALPHA)
     overlay.fill((255, 255, 255, 248))
-    pygame.draw.rect(overlay, (*heat_color, 255), (0, 0, stripe_w, pill.height), border_radius=6)
+    pygame.draw.rect(overlay, (*heat_color, 255), (0, 0, stripe_w, pill.height), border_radius=border_r)
     surface.blit(overlay, pill.topleft)
     border_c = C_SELECTION if selected else _shade_color(heat_color, 0.38)
-    pygame.draw.rect(surface, border_c, pill, 2, border_radius=6)
+    pygame.draw.rect(surface, border_c, pill, max(1, int(2 * scale)), border_radius=border_r)
 
-    tx = pill.x + pad_x + stripe_w + 2
+    tx = pill.x + pad_x + stripe_w + max(1, int(2 * scale))
     ty = pill.y + pad_y
     for i, surf in enumerate(line_surfs):
         surface.blit(surf, (tx, ty))
