@@ -5562,7 +5562,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
     input_box.draw(surface)
 
     for key in (
-        "save", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall",
+        "save", "undo", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall",
         "add_entrance", "add_stairs", "add_cashier", "add_fire_exit", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
         "rotate_mode", "layer_front", "layer_back", "bind_parent", "unbind", "roi_overlap",
