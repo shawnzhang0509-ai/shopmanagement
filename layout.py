@@ -49,7 +49,7 @@ from heatmap_metrics import (
     sales_data_ready,
     week_period_display,
 )
-from ui_common import Dropdown, draw_fitted_text
+from ui_common import Dropdown, draw_fitted_text, sanitize_display_text
 
 pygame.init()
 
@@ -312,6 +312,8 @@ SIDEBAR_HEADER_H = 68
 SIDEBAR_BTN_H = 32
 SIDEBAR_BTN_GAP = 6
 SIDEBAR_SECTION_GAP = 8
+WEEK_CAPTION_H = 18
+sidebar_week_caption_y = 0
 TEMPLATE_ROW_H = 56
 TEMPLATE_THUMB = 40
 rename_composition = ""
@@ -1967,16 +1969,11 @@ def heatmap_period_title() -> str:
 
 def heatmap_week_caption() -> str:
     keys = active_heatmap_week_keys()
-    shop = sales_shop_display_label()
     if heatmap_week_mode == "range":
-        return f"{shop} · 周均 {heatmap_week_count}周"
+        return f"周均近 {heatmap_week_count} 周"
     if not keys:
-        return f"{shop} · 无周数据"
-    key = keys[0]
-    full = week_period_display(current_sales_shop_id(), key)
-    if len(full) > 22:
-        return f"{shop} · {key}"
-    return f"{shop} · {full}"
+        return "暂无周数据"
+    return week_period_display(current_sales_shop_id(), keys[0])
 
 
 def toggle_heatmap_sales_level(buttons=None, dropdowns=None) -> None:
@@ -2274,7 +2271,7 @@ class Furniture:
         self.roi = roi
         self.revenue_per_sqm = 0.0
         self.points = points
-        self.product_family = product_family or ""
+        self.product_family = sanitize_display_text(product_family, "")
         self.is_discontinued = bool(is_discontinued)
         self.x = x
         self.y = y
@@ -2347,7 +2344,7 @@ class Furniture:
                 pygame.draw.polygon(surface, C_DISCONTINUED, inset, 2)
         img_cy = cy - span * 0.16
 
-        if span >= 6 and not blink_idle:
+        if span >= 50 and not blink_idle:
             display_w = max(FURNITURE_IMAGE_MIN_PX, min(160, int(span * 0.78)))
             aspect = _furniture_aspect(self.name, self.product_family)
             display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
@@ -3364,8 +3361,10 @@ def load_furniture_templates(json_path):
     for item in data:
         points = shape_to_points(item)
         if points:
-            family = item.get("product_family") or item.get("id", "")
-            if not item.get("product_family"):
+            family = sanitize_display_text(item.get("product_family"), "")
+            if not family:
+                family = sanitize_display_text(item.get("id", ""), "unnamed")
+            if not sanitize_display_text(item.get("product_family"), ""):
                 try:
                     from sales_lookup import resolve_product_family
 
@@ -3755,7 +3754,7 @@ def load_layout(filepath, *, keep_undo=False):
     placed_furnitures = []
     for f in data.get("furnitures", []):
         name = f.get("name", "")
-        family = str(f.get("product_family", "") or "").strip() or name
+        family = sanitize_display_text(f.get("product_family", ""), "") or name
         roi = float(f.get("roi") or 0)
         furniture = Furniture(
             name,
@@ -5431,7 +5430,9 @@ def handle_store_picker_action(action):
 
 
 def template_families():
-    families = sorted({(getattr(t, "product_family", "") or "未分类") for t in furniture_templates})
+    families = sorted(
+        {sanitize_display_text(getattr(t, "product_family", ""), "未分类") or "未分类" for t in furniture_templates}
+    )
     return families
 
 
@@ -5456,7 +5457,7 @@ def filtered_templates():
         items = [
             (i, t)
             for i, t in items
-            if (getattr(t, "product_family", "") or "未分类") == template_family_filter
+            if sanitize_display_text(getattr(t, "product_family", ""), "未分类") or "未分类" == template_family_filter
         ]
     q = search_text.strip().lower()
     if q:
@@ -5466,7 +5467,7 @@ def filtered_templates():
             (i, t)
             for i, t in items
             if q in t.name.lower()
-            or q in (getattr(t, "product_family", "") or "").lower()
+            or q in sanitize_display_text(getattr(t, "product_family", ""), "").lower()
             or q in sku_prefix(t.name).lower()
             or (getattr(t, "is_discontinued", False) and q in ("停产", "discontinued", "dc"))
         ]
@@ -5542,14 +5543,22 @@ def wall_label_text(col, *, show_name=True) -> str:
     length_str = format_length_m(obstacle_length_mm(col))
     if not show_name or wall_screen_length_px(col) < WALL_LABEL_NAME_MIN_PX:
         return length_str
-    name = str(col.get("name", "")).strip()
+    name = obstacle_display_name(col.get("name", ""))
     if name.startswith("墙体"):
         name = name[2:].lstrip("-· ")
-    return f"{name}\n{length_str}" if name else length_str
+    if not name:
+        return length_str
+    span_px = wall_screen_length_px(col)
+    font = FONT_TINY if span_px < WALL_LABEL_NAME_MIN_PX else FONT_SMALL
+    max_w = max(36, int(span_px * 0.88))
+    name = _truncate_label(name, font, max_w)
+    if span_px < WALL_LABEL_NAME_MIN_PX + 24:
+        return name
+    return f"{name}\n{length_str}"
 
 
 def obstacle_label_display_name(col) -> str:
-    return str(col.get("name", "")).strip()
+    return obstacle_display_name(col.get("name", ""))
 
 
 def should_show_obstacle_label(col, idx, selected) -> bool:
@@ -5578,10 +5587,16 @@ def _truncate_label(text: str, font, max_px: int) -> str:
 
 
 def display_family_label(family: str, sku: str) -> str:
-    fam = str(family or "").strip()
+    fam = sanitize_display_text(family, "")
+    sku = sanitize_display_text(sku, "")
     if not fam or fam == sku:
         return ""
     return fam
+
+
+def obstacle_display_name(raw: str) -> str:
+    name = sanitize_display_text(raw, "")
+    return re.sub(r"_copy\d*$", "", name, flags=re.I)
 
 
 def draw_furniture_metric_tag(
@@ -5666,9 +5681,11 @@ def draw_furniture_metric_tag(
     return pill
 
 
-def draw_label_pill(surface, text, center, *, font=None, fg=C_TEXT, bg=(255, 255, 255, 230)):
+def draw_label_pill(surface, text, center, *, font=None, fg=C_TEXT, bg=(255, 255, 255, 230), max_width: int | None = None):
     font = font or FONT_SMALL
     lines = text.split("\n")
+    if max_width is not None and max_width > 0:
+        lines = [_truncate_label(line, font, max_width) for line in lines]
     if len(lines) == 1:
         rendered = [font.render(lines[0], True, fg)]
     else:
@@ -5728,7 +5745,15 @@ def draw_obstacles(surface):
                 span_px = wall_screen_length_px(col)
                 font = FONT_TINY if span_px < WALL_LABEL_NAME_MIN_PX else FONT_SMALL
                 pill_bg = (255, 255, 255, 210) if not selected else (232, 240, 255, 235)
-                draw_label_pill(surface, label_text, (cx, cy), font=font, fg=label_color, bg=pill_bg)
+                draw_label_pill(
+                    surface,
+                    label_text,
+                    (cx, cy),
+                    font=font,
+                    fg=label_color,
+                    bg=pill_bg,
+                    max_width=max(36, int(span_px * 0.88)),
+                )
             else:
                 draw_label_pill(surface, obstacle_label_display_name(col), (cx, cy), font=FONT_BODY, fg=label_color)
 
@@ -5964,6 +5989,7 @@ def draw_rename_dialog(surface):
 
 
 def build_sidebar_ui():
+    global sidebar_week_caption_y
     pad = 12
     w = SIDEBAR_WIDTH - pad * 2
     bw2 = (w - SIDEBAR_BTN_GAP) // 2
@@ -6028,7 +6054,9 @@ def build_sidebar_ui():
     y = _sidebar_section_y(y)
     buttons["week_prev"] = Button((pad, y, bw2, SIDEBAR_BTN_H), "上周", "week_prev")
     buttons["week_next"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H), "下周", "week_next")
-    y += SIDEBAR_BTN_H + 18
+    y += SIDEBAR_BTN_H + 6
+    sidebar_week_caption_y = y
+    y += WEEK_CAPTION_H + 6
     dropdowns["week"] = Dropdown(
         (pad, y, w, SIDEBAR_BTN_H),
         list(WEEK_DROPDOWN_OPTIONS),
@@ -6140,12 +6168,12 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         buttons["walls_lock"].active = walls_locked
 
     sync_heatmap_week_ui(buttons, dropdowns)
-    if "week_prev" in buttons:
-        pr = buttons["week_prev"].rect
-        surface.blit(FONT_MARK.render("坪效周次", True, C_MUTED), (12, pr.y - 16))
-        cap = heatmap_week_caption()
-        cap_rect = pygame.Rect(12, pr.bottom + 2, SIDEBAR_WIDTH - 24, 16)
-        draw_fitted_text(surface, cap, FONT_MARK, C_ACCENT, cap_rect, align="left", pad=0)
+    if sidebar_week_caption_y > 0:
+        if "week_prev" in buttons:
+            pr = buttons["week_prev"].rect
+            surface.blit(FONT_MARK.render("坪效周次", True, C_MUTED), (12, pr.y - 16))
+        cap_rect = pygame.Rect(12, sidebar_week_caption_y, SIDEBAR_WIDTH - 24, WEEK_CAPTION_H)
+        draw_fitted_text(surface, heatmap_week_caption(), FONT_MARK, C_ACCENT, cap_rect, align="left", pad=0)
 
     if dropdowns:
         sync_dropdowns(dropdowns)
@@ -6196,7 +6224,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
             color_dot = revenue_per_sqm_to_color(rps, heatmap_vmin, heatmap_vmax)
             pygame.draw.circle(surface, color_dot, thumb.center, 10)
         tx = row.x + TEMPLATE_THUMB + 10
-        family = getattr(tpl, "product_family", "") or "未分类"
+        family = sanitize_display_text(getattr(tpl, "product_family", ""), "未分类") or "未分类"
         area = polygon_area(tpl.points)
         _, rps = template_sidebar_metrics(tpl.name, tpl.product_family, area)
         name_text = _truncate_label(tpl.name, FONT_BODY, row.width - TEMPLATE_THUMB - 16)

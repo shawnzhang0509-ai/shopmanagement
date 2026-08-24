@@ -219,6 +219,21 @@ def draw_fitted_text(
     surface.set_clip(None)
 
 
+def sanitize_display_text(val, default: str = "") -> str:
+    """Normalize Excel/JSON cell values; NaN and 'nan' become default."""
+    import math
+
+    if val is None:
+        return default
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return default
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", "null", "#n/a", "n/a", "<na>"):
+        return default
+    return s
+
+
 class Button:
     def __init__(self, rect, label, action, primary=False, danger=False, toggle=False):
         self.rect = pygame.Rect(rect)
