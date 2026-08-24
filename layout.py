@@ -80,6 +80,9 @@ C_SUCCESS_LIGHT = (220, 252, 231)
 C_DANGER = (220, 38, 38)
 C_DANGER_LIGHT = (254, 226, 226)
 C_WARN = (234, 179, 8)
+C_DISCONTINUED = (192, 57, 43)
+C_DISCONTINUED_BG = (255, 241, 235)
+C_DISCONTINUED_BORDER = (211, 84, 0)
 C_OBSTACLE = (248, 113, 113)
 C_OBSTACLE_SEL = (252, 165, 165)
 C_SELECTION = (37, 99, 235)
@@ -529,6 +532,7 @@ def _furniture_snapshot(furnitures):
             "instance_id": getattr(f, "instance_id", "") or "",
             "attach_to": getattr(f, "attach_to", "") or "",
             "product_family": getattr(f, "product_family", "") or "",
+            "is_discontinued": bool(getattr(f, "is_discontinued", False)),
         }
         for f in furnitures
     ]
@@ -548,6 +552,10 @@ def _furnitures_from_snapshot(snap):
         )
         furn.instance_id = d.get("instance_id", "") or ""
         furn.attach_to = d.get("attach_to", "") or ""
+        furn.is_discontinued = _resolve_furniture_discontinued(
+            d.get("name", ""),
+            d.get("is_discontinued"),
+        )
         out.append(furn)
     return out
 
@@ -1912,12 +1920,13 @@ def shape_to_points(item):
 
 # ── 家具 ────────────────────────────────────────────────────
 class Furniture:
-    def __init__(self, name, roi, points, x=0, y=0, rotation=0, product_family=""):
+    def __init__(self, name, roi, points, x=0, y=0, rotation=0, product_family="", is_discontinued=False):
         self.name = name
         self.roi = roi
         self.revenue_per_sqm = 0.0
         self.points = points
         self.product_family = product_family or ""
+        self.is_discontinued = bool(is_discontinued)
         self.x = x
         self.y = y
         self.rotation = rotation
@@ -1961,22 +1970,32 @@ class Furniture:
         blink_idle = show_roi_overlap_mode and in_overlap and not blink_active
         fill = HEATMAP_BLINK_IDLE if blink_idle else heatmap_color_for_value(self.revenue_per_sqm)
         border_rgb = heatmap_color_for_value(self.revenue_per_sqm)
-
-        pygame.draw.polygon(surface, fill, pts)
-        border_w = 4 if selected else 3
-        if selected and not show_roi_overlap_mode:
-            border_c = C_SELECTION
-        elif blink_idle:
-            border_c = (180, 186, 194)
-        else:
-            border_c = _shade_color(border_rgb, 0.45)
-        pygame.draw.polygon(surface, border_c, pts, border_w)
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         span = max(max(xs) - min(xs), max(ys) - min(ys))
         min_y, max_y = min(ys), max(ys)
+
+        pygame.draw.polygon(surface, fill, pts)
+        border_w = 4 if selected else 3
+        if self.is_discontinued and not blink_idle:
+            border_c = C_DISCONTINUED_BORDER
+            border_w = max(border_w, 4)
+        elif selected and not show_roi_overlap_mode:
+            border_c = C_SELECTION
+        elif blink_idle:
+            border_c = (180, 186, 194)
+        else:
+            border_c = _shade_color(border_rgb, 0.45)
+        pygame.draw.polygon(surface, border_c, pts, border_w)
+        if self.is_discontinued and not blink_idle:
+            inset = [
+                (int(px + (cx - px) * 0.04), int(py + (cy - py) * 0.04))
+                for px, py in pts
+            ]
+            if len(inset) >= 3:
+                pygame.draw.polygon(surface, C_DISCONTINUED, inset, 2)
         img_cy = cy - span * 0.16
 
         if span >= 6 and not blink_idle:
@@ -2013,10 +2032,15 @@ class Furniture:
                 product_family=self.product_family,
                 selected=selected,
                 span_px=span,
+                is_discontinued=self.is_discontinued,
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
             self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, 16, 16)
+        if self.is_discontinued and not blink_idle and span >= 24:
+            from ui_common import draw_discontinued_canvas_mark
+
+            draw_discontinued_canvas_mark(surface, cx, min_y, span_px=span)
 
     def is_label_clicked(self, mx, my):
         rect = getattr(self, "_label_rect", None)
@@ -2828,6 +2852,15 @@ def _load_display_items_cache():
     return _display_items_cache
 
 
+def _resolve_furniture_discontinued(name: str, stored=None) -> bool:
+    try:
+        from display_lookup import resolve_is_discontinued
+
+        return resolve_is_discontinued(name, stored)
+    except Exception:
+        return bool(stored)
+
+
 def image_url_for_product(name: str) -> str:
     from display_lookup import _normalize_key
 
@@ -2998,7 +3031,18 @@ def load_furniture_templates(json_path):
                 roi = float(item.get("roi") or 0)
             else:
                 roi = lookup_roi(family)
-            templates.append(Furniture(item.get("id", "unnamed"), roi, points, product_family=family))
+            templates.append(
+                Furniture(
+                    item.get("id", "unnamed"),
+                    roi,
+                    points,
+                    product_family=family,
+                    is_discontinued=_resolve_furniture_discontinued(
+                        item.get("id", "unnamed"),
+                        item.get("is_discontinued"),
+                    ),
+                )
+            )
     if not templates:
         raise ValueError(f"{json_path} 中没有有效的家具模板")
     return templates
@@ -3228,6 +3272,7 @@ def build_layout_data(filepath):
                 "instance_id": getattr(f, "instance_id", "") or "",
                 "attach_to": getattr(f, "attach_to", "") or "",
                 "product_family": getattr(f, "product_family", "") or "",
+                "is_discontinued": bool(getattr(f, "is_discontinued", False)),
             }
             for f in placed_furnitures
         ],
@@ -3363,6 +3408,7 @@ def load_layout(filepath, *, keep_undo=False):
             roi,
             f["points"],
             product_family=family,
+            is_discontinued=_resolve_furniture_discontinued(name, f.get("is_discontinued")),
         )
         furniture.x = f.get("x", 0)
         furniture.y = f.get("y", 0)
@@ -4706,7 +4752,13 @@ def handle_startup_action(action):
 def add_furniture_to_canvas():
     global selected_furniture, selected_feature, selected_collision, selected_marker_index
     tpl = furniture_templates[selected_template_index]
-    new_furn = Furniture(tpl.name, tpl.roi, [tuple(p) for p in tpl.points], product_family=tpl.product_family)
+    new_furn = Furniture(
+        tpl.name,
+        tpl.roi,
+        [tuple(p) for p in tpl.points],
+        product_family=tpl.product_family,
+        is_discontinued=getattr(tpl, "is_discontinued", False),
+    )
     new_furn.instance_id = _alloc_furniture_instance_id()
     wx, wy = viewport_world_center()
     find_clear_furniture_position(new_furn, wx, wy)
@@ -5168,8 +5220,9 @@ def draw_furniture_metric_tag(
     product_family: str = "",
     selected: bool = False,
     span_px: float = FURNITURE_LABEL_REF_SPAN_PX,
+    is_discontinued: bool = False,
 ) -> pygame.Rect:
-    """底部标签：SKU + Product Family + 周均坪效；字号随家具屏幕尺寸缩放。"""
+    """底部标签：SKU + Product Family + 周均坪效；停产产品加红色标识。"""
     scale = furniture_label_scale(span_px)
     pad_x = max(4, int(7 * scale))
     pad_y = max(3, int(5 * scale))
@@ -5198,6 +5251,9 @@ def draw_furniture_metric_tag(
     metric_surf = metric_font.render(metric, True, metric_rgb)
 
     line_surfs = [sku_surf]
+    if is_discontinued:
+        dc_font = cached_label_font(max(10, int(11 * scale)), bold=True)
+        line_surfs.append(dc_font.render("停产", True, C_DISCONTINUED))
     if family_surf is not None:
         line_surfs.append(family_surf)
     line_surfs.append(metric_surf)
@@ -5212,9 +5268,10 @@ def draw_furniture_metric_tag(
 
     overlay = pygame.Surface((pill.width, pill.height), pygame.SRCALPHA)
     overlay.fill((255, 255, 255, 248))
-    pygame.draw.rect(overlay, (*heat_color, 255), (0, 0, stripe_w, pill.height), border_radius=border_r)
+    stripe_color = C_DISCONTINUED if is_discontinued else heat_color
+    pygame.draw.rect(overlay, (*stripe_color, 255), (0, 0, stripe_w, pill.height), border_radius=border_r)
     surface.blit(overlay, pill.topleft)
-    border_c = C_SELECTION if selected else _shade_color(heat_color, 0.38)
+    border_c = C_DISCONTINUED if is_discontinued else (C_SELECTION if selected else _shade_color(heat_color, 0.38))
     pygame.draw.rect(surface, border_c, pill, max(1, int(2 * scale)), border_radius=border_r)
 
     tx = pill.x + pad_x + stripe_w + max(1, int(2 * scale))
@@ -5636,10 +5693,13 @@ def draw_sidebar(buttons, input_box, template_list_top):
     for i, (idx, tpl) in enumerate(visible):
         row = pygame.Rect(12, y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
         selected = idx == selected_template_index
-        bg = C_ACCENT_LIGHT if selected else (248, 250, 252)
+        discontinued = bool(getattr(tpl, "is_discontinued", False))
+        bg = C_ACCENT_LIGHT if selected else ((255, 241, 235) if discontinued else (248, 250, 252))
         pygame.draw.rect(surface, bg, row, border_radius=8)
         if selected:
             pygame.draw.rect(surface, C_ACCENT, row, 2, border_radius=8)
+        elif discontinued:
+            pygame.draw.rect(surface, C_DISCONTINUED_BORDER, row, 2, border_radius=8)
         thumb = pygame.Rect(row.x + 6, row.centery - TEMPLATE_THUMB // 2, TEMPLATE_THUMB, TEMPLATE_THUMB)
         pygame.draw.rect(surface, (255, 255, 255), thumb, border_radius=6)
         pygame.draw.rect(surface, C_BORDER, thumb, 1, border_radius=6)
@@ -5657,10 +5717,18 @@ def draw_sidebar(buttons, input_box, template_list_top):
         area = polygon_area(tpl.points)
         _, rps = template_sidebar_metrics(tpl.name, tpl.product_family, area)
         surface.blit(FONT_BODY.render(tpl.name, True, C_TEXT), (tx, row.y + 6))
+        meta = f"{family}  ·  {format_revenue_per_sqm(rps)}"
+        if discontinued:
+            meta = f"停产  ·  {meta}"
         surface.blit(
-            FONT_SMALL.render(f"{family}  ·  {format_revenue_per_sqm(rps)}", True, C_MUTED),
+            FONT_SMALL.render(meta, True, C_DISCONTINUED if discontinued else C_MUTED),
             (tx, row.y + 26),
         )
+        if discontinued:
+            from ui_common import draw_discontinued_badge
+
+            badge_rect = pygame.Rect(row.right - 44, row.y + 4, 40, 16)
+            draw_discontinued_badge(surface, badge_rect, align="topright")
 
     y = SCREEN_HEIGHT - 110
     pygame.draw.line(surface, C_BORDER, (16, y), (SIDEBAR_WIDTH - 16, y))

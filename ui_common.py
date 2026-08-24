@@ -34,7 +34,10 @@ C_SUCCESS = (46, 204, 113)
 C_SUCCESS_LIGHT = (212, 239, 223)
 C_DANGER = (231, 76, 60)
 C_DANGER_LIGHT = (250, 219, 216)
-C_PREVIEW = (52, 152, 219)
+C_DISCONTINUED = (192, 57, 43)
+C_DISCONTINUED_BG = (255, 241, 235)
+C_DISCONTINUED_BORDER = (211, 84, 0)
+DISCONTINUED_LABEL = "停产"
 C_PREVIEW_FILL = (214, 234, 248)
 
 FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
@@ -491,3 +494,64 @@ def draw_sidebar_header(surface, title, subtitle=None):
     surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (16, 12))
     if subtitle:
         surface.blit(FONT_SMALL.render(subtitle, True, C_SIDEBAR_MUTED), (16, 36))
+
+
+def draw_discontinued_badge(
+    surface,
+    anchor: pygame.Rect,
+    *,
+    align: str = "topright",
+    label: str = DISCONTINUED_LABEL,
+) -> pygame.Rect:
+    """醒目「停产」角标，用于卡片/画布/侧栏。"""
+    init_fonts()
+    text_surf = FONT_MARK.render(label, True, (255, 255, 255))
+    pad_x, pad_y = 5, 2
+    badge = pygame.Rect(0, 0, text_surf.get_width() + pad_x * 2, text_surf.get_height() + pad_y * 2)
+    if align == "topright":
+        badge.topright = anchor.topright
+    elif align == "topleft":
+        badge.topleft = anchor.topleft
+    elif align == "center":
+        badge.center = anchor.center
+    else:
+        badge.topright = anchor.topright
+    badge.inflate_ip(0, 0)
+    pygame.draw.rect(surface, C_DISCONTINUED, badge, border_radius=4)
+    surface.blit(text_surf, text_surf.get_rect(center=badge.center))
+    return badge
+
+
+def draw_discontinued_card_stripe(surface, rect: pygame.Rect, *, radius: int = 8) -> None:
+    """卡片左侧停产色条 + 浅底，与正常产品一眼可辨。"""
+    tint = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    tint.fill((*C_DISCONTINUED_BG, 120))
+    surface.blit(tint, rect.topleft)
+    stripe = pygame.Rect(rect.x, rect.y, 5, rect.height)
+    pygame.draw.rect(surface, C_DISCONTINUED, stripe, border_radius=max(2, radius // 2))
+    pygame.draw.rect(surface, C_DISCONTINUED_BORDER, rect, 2, border_radius=radius)
+
+
+def draw_discontinued_canvas_mark(
+    surface,
+    cx: float,
+    top_y: float,
+    *,
+    span_px: float = 80,
+) -> None:
+    """布局画布上家具顶部的停产标记。"""
+    init_fonts()
+    label = DISCONTINUED_LABEL
+    scale = max(0.65, min(1.15, span_px / 100.0))
+    font_size = max(10, int(12 * scale))
+    try:
+        font = pygame.font.SysFont(FONT_CANDIDATES[0], font_size, bold=True)
+    except Exception:
+        font = FONT_MARK
+    text = font.render(label, True, (255, 255, 255))
+    pad_x, pad_y = max(4, int(6 * scale)), max(2, int(3 * scale))
+    badge = pygame.Rect(0, 0, text.get_width() + pad_x * 2, text.get_height() + pad_y * 2)
+    badge.midbottom = (int(cx), int(top_y) - 2)
+    pygame.draw.rect(surface, C_DISCONTINUED, badge, border_radius=5)
+    pygame.draw.rect(surface, C_DISCONTINUED_BORDER, badge, 2, border_radius=5)
+    surface.blit(text, text.get_rect(center=badge.center))
