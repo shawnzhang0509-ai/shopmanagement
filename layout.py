@@ -251,6 +251,8 @@ selected_collision = None
 selected_collisions: list[int] = []
 collision_polygons = []
 selected_furniture = None
+selected_furnitures: list = []
+walls_locked = False
 dragging_furniture = None
 selected_feature = None
 placed_furnitures = []
@@ -410,10 +412,10 @@ def clear_obstacle_selection():
 
 
 def set_obstacle_selection(indices, *, toast_msg: str | None = None):
-    global selected_collision, selected_collisions, selected_furniture, selected_feature, selected_marker_index
+    global selected_collision, selected_collisions, selected_marker_index
     selected_collisions = sorted({i for i in indices if 0 <= i < len(collision_polygons)})
     selected_collision = selected_collisions[0] if selected_collisions else None
-    selected_furniture = selected_feature = None
+    clear_furniture_selection(silent=True)
     selected_marker_index = None
     if toast_msg is not None:
         show_toast(toast_msg)
@@ -455,6 +457,83 @@ def obstacles_in_screen_rect(x1, y1, x2, y2) -> list[int]:
         if cr >= bl and cl <= br and cb >= bt and ct <= bb:
             hits.append(i)
     return hits
+
+
+def furniture_world_bbox(furn) -> tuple[float, float, float, float]:
+    pts = furn.get_rotated_points()
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def furniture_in_screen_rect(x1, y1, x2, y2) -> list:
+    left, right = sorted([x1, x2])
+    top, bottom = sorted([y1, y2])
+    wx1, wy1 = screen_to_world(left, top)
+    wx2, wy2 = screen_to_world(right, bottom)
+    bl, bt = min(wx1, wx2), min(wy1, wy2)
+    br, bb = max(wx1, wx2), max(wy1, wy2)
+    hits = []
+    for furn in placed_furnitures:
+        fl, ft, fr, fb = furniture_world_bbox(furn)
+        if fr >= bl and fl <= br and fb >= bt and ft <= bb:
+            hits.append(furn)
+    return hits
+
+
+def clear_furniture_selection(*, silent: bool = False) -> None:
+    global selected_furniture, selected_feature, selected_furnitures
+    selected_furniture = selected_feature = None
+    selected_furnitures = []
+
+
+def set_furniture_selection(items, *, toast_msg: str | None = None) -> None:
+    global selected_furniture, selected_feature, selected_furnitures, selected_marker_index
+    uniq = []
+    seen = set()
+    for furn in items:
+        iid = getattr(furn, "instance_id", id(furn))
+        if iid in seen:
+            continue
+        seen.add(iid)
+        uniq.append(furn)
+    selected_furnitures = uniq
+    selected_furniture = selected_furnitures[0] if selected_furnitures else None
+    selected_feature = selected_furniture
+    selected_marker_index = None
+    clear_obstacle_selection()
+    if toast_msg:
+        show_toast(toast_msg)
+    elif len(selected_furnitures) == 1:
+        show_toast(f"选中家具: {selected_furnitures[0].name}")
+    elif len(selected_furnitures) > 1:
+        show_toast(f"已选 {len(selected_furnitures)} 件家具（可批量拖动）")
+
+
+def toggle_furniture_selection(furn) -> None:
+    cur = list(selected_furnitures)
+    if furn in cur:
+        cur = [f for f in cur if f is not furn]
+    else:
+        cur.append(furn)
+    set_furniture_selection(cur)
+
+
+def collect_furniture_drag_pack(primary) -> list:
+    if primary is None:
+        return []
+    if primary in selected_furnitures and len(selected_furnitures) > 1:
+        pack = []
+        seen = set()
+        for root in selected_furnitures:
+            for item in furniture_drag_pack(root):
+                iid = getattr(item, "instance_id", id(item))
+                if iid in seen:
+                    continue
+                seen.add(iid)
+                pack.append(item)
+        return pack
+    return furniture_drag_pack(primary)
 
 
 def select_all_obstacles():
@@ -1038,12 +1117,12 @@ def clear_marker_selection():
 
 
 def set_marker_selection(index, *, toast_msg: str | None = None):
-    global selected_marker_index, selected_furniture, selected_feature
+    global selected_marker_index
     if index is None or index < 0 or index >= len(layout_markers):
         selected_marker_index = None
         return
     selected_marker_index = index
-    selected_furniture = selected_feature = None
+    clear_furniture_selection(silent=True)
     clear_obstacle_selection()
     marker = layout_markers[index]
     kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
@@ -1687,8 +1766,6 @@ def obstacle_rect_metrics(points, tol=OBSTACLE_SNAP_MM):
     min_y, max_y = min(ys), max(ys)
     span_x = max_x - min_x
     span_y = max_y - min_y
-    if span_x < tol or span_y < tol:
-        return None
     for x, y in points:
         on_corner = (
             (abs(x - min_x) <= tol or abs(x - max_x) <= tol)
@@ -1700,6 +1777,10 @@ def obstacle_rect_metrics(points, tol=OBSTACLE_SNAP_MM):
     cy = (min_y + max_y) / 2
     length_mm = max(span_x, span_y)
     width_mm = min(span_x, span_y)
+    if length_mm < 1.0:
+        return None
+    if width_mm < tol:
+        width_mm = max(width_mm, 1.0)
     return cx, cy, length_mm, width_mm
 
 
@@ -1829,7 +1910,6 @@ def template_sidebar_metrics(name: str, family: str, area: float) -> tuple[float
         heatmap_week_count,
         tuple(active_heatmap_week_keys()),
         heatmap_sales_level,
-        len(placed_furnitures),
     )
     cached = _sidebar_metric_cache.get(key)
     if cached is not None:
@@ -1837,22 +1917,8 @@ def template_sidebar_metrics(name: str, family: str, area: float) -> tuple[float
     kwargs = heatmap_lookup_kwargs()
     level = heatmap_sales_level
     week_div = heatmap_week_divisor()
-    if normalize_sales_level(level) == "product":
-        amt = lookup_sales_amount(name, family, level="product", **kwargs)
-        rps = revenue_per_sqm(amt, area, num_weeks=week_div)
-    else:
-        group_key = sales_group_key(name, family, level=level)
-        members = [
-            f
-            for f in placed_furnitures
-            if sales_group_key(f.name, f.product_family, level=level) == group_key
-        ]
-        amt = lookup_sales_amount(name, family, level=level, **kwargs)
-        if members:
-            total_area = sum(furniture_area_mm2(f) for f in members)
-            rps = revenue_per_sqm(amt, total_area, num_weeks=week_div)
-        else:
-            rps = revenue_per_sqm(amt, area, num_weeks=week_div)
+    amt = lookup_sales_amount(name, family, level=level, **kwargs)
+    rps = revenue_per_sqm(amt, area, num_weeks=week_div)
     _sidebar_metric_cache[key] = (amt, rps)
     return amt, rps
 
@@ -3556,6 +3622,9 @@ def build_layout_data(filepath):
             "sales_level": heatmap_sales_level,
             "selected_week": (active_heatmap_week_keys()[0] if heatmap_week_mode == "single" and active_heatmap_week_keys() else ""),
         },
+        "editor": {
+            "walls_locked": bool(walls_locked),
+        },
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -3655,7 +3724,7 @@ def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
     global heatmap_week_count, heatmap_week_mode, heatmap_week_index, heatmap_sales_level, _pending_heatmap_week
-    global _sales_shop_warned
+    global _sales_shop_warned, walls_locked
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -3669,6 +3738,8 @@ def load_layout(filepath, *, keep_undo=False):
     if heatmap_week_mode not in ("single", "range"):
         heatmap_week_mode = "single"
     heatmap_sales_level = normalize_sales_level(heatmap.get("sales_level") or heatmap_sales_level)
+    editor = data.get("editor") or {}
+    walls_locked = bool(editor.get("walls_locked", False))
     _sales_shop_warned = False
     clear_heatmap_cache()
     mark_heatmap_dirty()
@@ -3697,6 +3768,7 @@ def load_layout(filepath, *, keep_undo=False):
     layout_markers = normalize_layout_markers(data.get("markers", []))
     clear_furniture_display_cache()
     clear_obstacle_selection()
+    clear_furniture_selection(silent=True)
     selected_marker_index = None
     sync_group_id_counter()
     remember_store_summary(
@@ -5053,8 +5125,23 @@ def add_furniture_to_canvas():
 
 
 def delete_selected():
-    global selected_furniture, selected_feature, selected_marker_index
-    if selected_furniture is not None:
+    global selected_furniture, selected_feature, selected_marker_index, selected_furnitures
+    if selected_furnitures:
+        push_undo()
+        names = [f.name for f in selected_furnitures]
+        removed_ids = {getattr(f, "instance_id", "") for f in selected_furnitures}
+        for furn in list(selected_furnitures):
+            if furn in placed_furnitures:
+                placed_furnitures.remove(furn)
+        for furn in placed_furnitures:
+            if furn.attach_to in removed_ids:
+                furn.attach_to = ""
+        clear_furniture_selection()
+        if len(names) == 1:
+            show_toast(f"已删除家具: {names[0]}")
+        else:
+            show_toast(f"已删除 {len(names)} 件家具")
+    elif selected_furniture is not None:
         push_undo()
         name = selected_furniture.name
         removed_id = getattr(selected_furniture, "instance_id", "")
@@ -5464,8 +5551,6 @@ def should_show_obstacle_label(col, idx, selected) -> bool:
         return False
     is_wall = obstacle_is_wall(col)
     if selected:
-        if is_wall:
-            return wall_screen_length_px(col) >= WALL_LABEL_MIN_PX
         return True
     if not col.get("user_named"):
         return False
@@ -5609,8 +5694,8 @@ def draw_obstacles(surface):
         selected = idx in selected_collisions
         is_wall = obstacle_is_wall(col)
         if is_wall:
-            fill = (210, 218, 228) if not selected else (180, 195, 215)
-            border = C_WALL
+            fill = (225, 230, 236) if walls_locked else ((210, 218, 228) if not selected else (180, 195, 215))
+            border = (148, 163, 184) if walls_locked else C_WALL
             label_color = C_WALL
         else:
             fill = C_OBSTACLE_SEL if selected else (254, 202, 202)
@@ -5625,11 +5710,26 @@ def draw_obstacles(surface):
                 show_name = selected or col.get("user_named")
                 label_text = wall_label_text(col, show_name=show_name)
                 span_px = wall_screen_length_px(col)
-                font = FONT_SMALL if span_px >= WALL_LABEL_NAME_MIN_PX else FONT_TINY
+                font = FONT_TINY if span_px < WALL_LABEL_NAME_MIN_PX else FONT_SMALL
                 pill_bg = (255, 255, 255, 210) if not selected else (232, 240, 255, 235)
                 draw_label_pill(surface, label_text, (cx, cy), font=font, fg=label_color, bg=pill_bg)
             else:
                 draw_label_pill(surface, obstacle_label_display_name(col), (cx, cy), font=FONT_BODY, fg=label_color)
+
+
+def draw_furniture_multi_selection_overlay(surface):
+    if len(selected_furnitures) < 2:
+        return
+    all_pts = []
+    for furn in selected_furnitures:
+        all_pts.extend(world_to_screen(x, y) for x, y in furn.get_rotated_points())
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    rect = pygame.Rect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+    overlay = pygame.Surface((max(1, rect.width), max(1, rect.height)), pygame.SRCALPHA)
+    overlay.fill((37, 99, 235, 24))
+    surface.blit(overlay, rect.topleft)
+    pygame.draw.rect(surface, C_ACCENT, rect, 2)
 
 
 def draw_selection_overlay(surface):
@@ -5932,6 +6032,14 @@ def build_sidebar_ui():
         "on" if show_roi_overlap_mode else "off",
         dropdown_id="roi",
     )
+    y += SIDEBAR_BTN_H + 4
+    buttons["walls_lock"] = Button(
+        (pad, y, w, SIDEBAR_BTN_H - 2),
+        "🔒 墙体已锁定" if walls_locked else "🔓 锁定墙体",
+        "walls_lock",
+        toggle=True,
+    )
+    buttons["walls_lock"].active = walls_locked
     y += SIDEBAR_BTN_H + SIDEBAR_SECTION_GAP
 
     # ── 核心：家具模板（占满剩余高度）──
@@ -5973,7 +6081,6 @@ def build_sidebar_ui():
 
 
 def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows_bottom):
-    ensure_heatmap_metrics()
     global template_scroll_offset
     surface = screen
     pygame.draw.rect(surface, C_SIDEBAR, (0, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT))
@@ -5987,7 +6094,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
 
     core_keys = (
         "save", "undo", "home", "tools_toggle",
-        "week_prev", "week_next",
+        "week_prev", "week_next", "walls_lock",
         "add", "resize", "rename", "delete",
     )
     tool_keys = (
@@ -6012,6 +6119,9 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     if "tools_toggle" in buttons:
         buttons["tools_toggle"].label = "▾ 布局工具" if sidebar_tools_expanded else "▸ 布局工具"
         buttons["tools_toggle"].active = sidebar_tools_expanded
+    if "walls_lock" in buttons:
+        buttons["walls_lock"].label = "🔒 墙体已锁定" if walls_locked else "🔓 锁定墙体"
+        buttons["walls_lock"].active = walls_locked
 
     sync_heatmap_week_ui(buttons, dropdowns)
     if "week_prev" in buttons:
@@ -6102,7 +6212,10 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         label = marker.get("label") or kind_label
         status_extra = f"图标:{label} · "
     elif selected_feature:
-        status_extra = f"{selected_feature.name} · "
+        if len(selected_furnitures) > 1:
+            status_extra = f"家具×{len(selected_furnitures)} · "
+        else:
+            status_extra = f"{selected_feature.name} · "
     elif selected_collisions:
         if len(selected_collisions) == 1:
             name = collision_polygons[selected_collision]["name"]
@@ -6113,7 +6226,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     surface.blit(
         FONT_SMALL.render(
             status_extra
-            + f"{store_width_mm / 1000:g}×{store_height_mm / 1000:g}m · 家具{len(placed_furnitures)} · Ctrl+F 搜索",
+            + f"{store_width_mm / 1000:g}×{store_height_mm / 1000:g}m · 家具{len(placed_furnitures)} · 框选移动 · Ctrl+F",
             True,
             C_ACCENT if status_extra else C_MUTED,
         ),
@@ -6218,6 +6331,13 @@ def handle_toolbar_click(action, buttons, dropdowns=None):
         sidebar_tools_expanded = not sidebar_tools_expanded
         show_toast("布局工具已展开" if sidebar_tools_expanded else "布局工具已收起")
         return True
+    elif action == "walls_lock":
+        global walls_locked
+        walls_locked = not walls_locked
+        if walls_locked:
+            clear_obstacle_selection()
+        show_toast("墙体已锁定，仅可编辑家具" if walls_locked else "墙体已解锁")
+        return True
     return False
 
 
@@ -6273,12 +6393,20 @@ def finish_marquee_selection():
     x2, y2 = marquee_current
     if abs(x2 - x1) < 5 and abs(y2 - y1) < 5:
         clear_obstacle_selection()
+        clear_furniture_selection()
     else:
-        hits = obstacles_in_screen_rect(x1, y1, x2, y2)
-        if hits:
-            set_obstacle_selection(expand_group_members(hits))
+        furn_hits = furniture_in_screen_rect(x1, y1, x2, y2)
+        if furn_hits:
+            set_furniture_selection(furn_hits)
+        elif not walls_locked:
+            hits = obstacles_in_screen_rect(x1, y1, x2, y2)
+            if hits:
+                set_obstacle_selection(expand_group_members(hits))
+            else:
+                clear_obstacle_selection()
+                clear_furniture_selection()
         else:
-            clear_obstacle_selection()
+            clear_furniture_selection()
     marquee_active = False
     marquee_start = None
     marquee_current = None
@@ -6355,6 +6483,8 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             return
 
     for i in reversed(range(len(collision_polygons))):
+        if walls_locked:
+            break
         if not obstacle_is_wall(collision_polygons[i]):
             continue
         end_hit = wall_endpoint_hit_test(mx, my, i)
@@ -6366,6 +6496,8 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             return
 
     for i in reversed(range(len(collision_polygons))):
+        if walls_locked:
+            break
         col = collision_polygons[i]
         if obstacle_label_rect(col).collidepoint(mx, my):
             if try_open_obstacle_editor(i):
@@ -6383,6 +6515,11 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
                 return
             dragging_furniture = f
             f.dragging = True
+            if shift:
+                toggle_furniture_selection(f)
+            else:
+                if f not in selected_furnitures:
+                    set_furniture_selection([f])
             selected_furniture = f
             selected_feature = f
             selected_marker_index = None
@@ -6390,11 +6527,13 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             push_undo()
             furniture_drag_snapshot = {
                 item.instance_id: (item.x, item.y)
-                for item in furniture_drag_pack(f)
+                for item in collect_furniture_drag_pack(f)
             }
             return
 
     for i, col in enumerate(collision_polygons):
+        if walls_locked:
+            break
         if point_in_poly(wx, wy, col["points"]):
             if try_open_obstacle_editor(i):
                 return
@@ -6406,6 +6545,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
 
     selected_furniture = selected_feature = None
     selected_marker_index = None
+    clear_furniture_selection(silent=True)
     return "marquee"
 
 
@@ -6719,10 +6859,19 @@ def main():
                     old_x, old_y = dragging_furniture.x, dragging_furniture.y
                     dragging_furniture.x, dragging_furniture.y = wx, wy
                     dx, dy = dragging_furniture.x - old_x, dragging_furniture.y - old_y
-                    for child in furniture_attached_descendants(dragging_furniture):
-                        child.x += dx
-                        child.y += dy
-                    if check_collision(dragging_furniture, collision_polygons):
+                    for iid, (ox, oy) in furniture_drag_snapshot.items():
+                        item = furniture_by_instance_id(iid)
+                        if item is None or item is dragging_furniture:
+                            continue
+                        item.x = ox + (dragging_furniture.x - furniture_drag_snapshot[dragging_furniture.instance_id][0])
+                        item.y = oy + (dragging_furniture.y - furniture_drag_snapshot[dragging_furniture.instance_id][1])
+                    collided = False
+                    for iid in furniture_drag_snapshot:
+                        item = furniture_by_instance_id(iid)
+                        if item and check_collision(item, collision_polygons):
+                            collided = True
+                            break
+                    if collided:
                         for iid, (ox, oy) in furniture_drag_snapshot.items():
                             item = furniture_by_instance_id(iid)
                             if item is not None:
@@ -6831,18 +6980,19 @@ def main():
             if sales_data_ready() and placed_furnitures:
                 ensure_heatmap_metrics()
             draw_order = furniture_draw_order()
+            selected_set = set(selected_furnitures)
             if show_roi_overlap_mode:
                 for f in draw_order:
-                    f.draw(screen, selected=False)
-                if selected_furniture is not None:
-                    draw_furniture_selection_ring(screen, selected_furniture)
+                    f.draw(screen, selected=f in selected_set)
             else:
                 for f in draw_order:
-                    if f is not selected_furniture:
+                    if f not in selected_set:
                         f.draw(screen, selected=False)
-                if selected_furniture is not None:
-                    selected_furniture.draw(screen, selected=True)
+                for f in selected_furnitures:
+                    draw_furniture_selection_ring(screen, f)
+                    f.draw(screen, selected=True)
             draw_furniture_roi_overlaps(screen)
+            draw_furniture_multi_selection_overlay(screen)
             prefetch_furniture_images()
             draw_selection_overlay(screen)
             draw_marquee(screen)
