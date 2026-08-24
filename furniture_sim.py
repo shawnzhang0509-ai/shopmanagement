@@ -89,6 +89,7 @@ FONT_SMALL = ui.FONT_SMALL
 FONT_LABEL = ui.FONT_LABEL
 FONT_MARK = ui.FONT_MARK
 Button = ui.Button
+Dropdown = ui.Dropdown
 draw_sidebar_bg = ui.draw_sidebar_bg
 draw_sidebar_header = ui.draw_sidebar_header
 
@@ -190,7 +191,7 @@ _gallery_snapshot: dict | None = None
 class GalleryView:
     """全屏总览：Display 大库（按门店 / 已测绘筛选）。"""
 
-    TOP_H = 118
+    TOP_H = 102
     SHOP_H = 36
     FILTER_H = 28
     FAMILY_H = 40
@@ -213,9 +214,8 @@ class GalleryView:
         self.paste_btn = Button((0, 0, 0, 0), "粘贴", "gallery_paste")
         self._layout = []
         self._cards = []  # (rect, kind, data) kind: template|display
-        self._shop_tabs: list[tuple[pygame.Rect, str]] = []
-        self._survey_tabs: list[tuple[pygame.Rect, str]] = []
-        self._blacklist_tabs: list[tuple[pygame.Rect, str]] = []
+        self._gallery_dropdowns: dict[str, Dropdown] = {}
+        self._open_gallery_dd: str | None = None
         self._layout_key: tuple | None = None
         self._content_h = 0
         self._scroll_drag = False
@@ -389,6 +389,51 @@ class GalleryView:
     def content_y(self, my: int) -> int:
         return my - self.TOP_H + self.scroll_y
 
+    def _shop_dropdown_options(self, templates) -> list[tuple[str, str]]:
+        opts: list[tuple[str, str]] = []
+        for shop, st in shops_for_display_tabs(display_items, templates):
+            sid = shop["id"]
+            if sid == "all":
+                text = f"全部 {st['total']}"
+            else:
+                text = f"{shop['label']} {st.get('families', 0)}族"
+            opts.append((sid, text))
+        return opts or [("all", "全部")]
+
+    def _close_gallery_dropdowns(self) -> None:
+        for dd in self._gallery_dropdowns.values():
+            dd.open = False
+        self._open_gallery_dd = None
+
+    def _handle_gallery_dropdown_click(self, mx: int, my: int):
+        pos = (mx, my)
+        if self._open_gallery_dd and self._open_gallery_dd in self._gallery_dropdowns:
+            dd = self._gallery_dropdowns[self._open_gallery_dd]
+            hit = dd.hit_test(pos)
+            if isinstance(hit, tuple) and hit[0] == "pick":
+                dd.selected = hit[1]
+                dd.open = False
+                picked = self._open_gallery_dd
+                value = hit[1]
+                self._open_gallery_dd = None
+                if picked == "shop":
+                    return f"shop:{value}"
+                if picked == "survey":
+                    return f"survey:{value}"
+                if picked == "bl":
+                    return f"bl:{value}"
+            if hit in ("trigger", "outside"):
+                dd.open = False
+                self._open_gallery_dd = None
+                return "dd:closed"
+        for dd_id, dd in self._gallery_dropdowns.items():
+            if dd.hit_test(pos) == "trigger":
+                self._close_gallery_dropdowns()
+                dd.open = True
+                self._open_gallery_dd = dd_id
+                return "dd:opened"
+        return None
+
     def handle_click(self, mx: int, my: int):
         if self.back_btn.contains((mx, my)):
             return "back"
@@ -398,15 +443,11 @@ class GalleryView:
             return "gallery_copy"
         if self.paste_btn.contains((mx, my)):
             return "gallery_paste"
-        for rect, shop_id in self._shop_tabs:
-            if rect.collidepoint(mx, my):
-                return f"shop:{shop_id}"
-        for rect, sid in self._survey_tabs:
-            if rect.collidepoint(mx, my):
-                return f"survey:{sid}"
-        for rect, bid in self._blacklist_tabs:
-            if rect.collidepoint(mx, my):
-                return f"bl:{bid}"
+        dd_hit = self._handle_gallery_dropdown_click(mx, my)
+        if isinstance(dd_hit, str) and dd_hit.startswith(("shop:", "survey:", "bl:")):
+            return dd_hit
+        if dd_hit in ("dd:opened", "dd:closed"):
+            return True
         if input_search.contains((mx, my)):
             return None
         if my < self.TOP_H:
@@ -419,10 +460,6 @@ class GalleryView:
         return None
 
     def _draw_header_tabs(self, surface, sw: int, templates):
-        self._shop_tabs = []
-        self._survey_tabs = []
-        self._blacklist_tabs = []
-
         input_search.rect = pygame.Rect(20, 10, min(360, sw - 560), 28)
         input_search.draw(surface, None, on_dark=True)
 
@@ -443,49 +480,37 @@ class GalleryView:
         self.back_btn.rect = pygame.Rect(sw - 148, 10, 128, 28)
         self.back_btn.draw(surface, mouse_pos, on_dark=True)
 
-        x = 20
-        y = 52
-        for shop, st in shops_for_display_tabs(display_items, templates):
-            sid = shop["id"]
-            if sid == "all":
-                text = f"全部 {st['total']}"
-            else:
-                fam_n = st.get("families", 0)
-                text = f"{shop['label']} {fam_n}族 {st['modeled']}/{st['total']}"
-            w = max(88, FONT_SMALL.size(text)[0] + 20)
-            rect = pygame.Rect(x, y, w, self.SHOP_H - 4)
-            active = display_shop == sid
-            bg = C_ACCENT if active else C_SIDEBAR
-            pygame.draw.rect(surface, bg, rect, border_radius=6)
-            surface.blit(FONT_SMALL.render(text, True, (255, 255, 255)), (rect.x + 10, rect.y + 8))
-            self._shop_tabs.append((rect, sid))
-            x += w + 8
-            if x > sw - 40:
-                break
-
-        self._survey_tabs = []
-        self._blacklist_tabs = []
-        fy = 84
-        fx = 20
-        for sid, label in (("all", "全部"), ("modeled", "已测绘"), ("unmodeled", "未测绘")):
-            w = max(56, FONT_SMALL.size(label)[0] + 16)
-            rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
-            active = display_survey_filter == sid
-            bg = C_SUCCESS if active else C_SIDEBAR_HOVER
-            pygame.draw.rect(surface, bg, rect, border_radius=5)
-            surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
-            self._survey_tabs.append((rect, sid))
-            fx += w + 6
-        fx += 12
-        for bid, label in (("exclude", "剔除黑"), ("all", "含黑名单"), ("only", "仅黑")):
-            w = max(64, FONT_SMALL.size(label)[0] + 16)
-            rect = pygame.Rect(fx, fy, w, self.FILTER_H - 4)
-            active = display_blacklist_mode == bid
-            bg = (192, 57, 43) if bid == "only" and active else (127, 140, 141) if active else C_SIDEBAR_HOVER
-            pygame.draw.rect(surface, bg, rect, border_radius=5)
-            surface.blit(FONT_SMALL.render(label, True, (255, 255, 255)), (rect.x + 8, rect.y + 6))
-            self._blacklist_tabs.append((rect, bid))
-            fx += w + 6
+        fy = 42
+        gap = 8
+        shop_w = min(200, max(120, (sw - 40 - gap * 2) // 3))
+        filt_w = min(160, max(100, (sw - 40 - gap * 2 - shop_w) // 2))
+        self._gallery_dropdowns = {
+            "shop": Dropdown(
+                (20, fy, shop_w, 28),
+                self._shop_dropdown_options(templates),
+                display_shop,
+                label="门店",
+                dropdown_id="shop",
+            ),
+            "survey": Dropdown(
+                (20 + shop_w + gap, fy, filt_w, 28),
+                [("all", "全部"), ("modeled", "已测绘"), ("unmodeled", "未测绘")],
+                display_survey_filter,
+                label="测绘",
+                dropdown_id="survey",
+            ),
+            "bl": Dropdown(
+                (20 + shop_w + gap + filt_w + gap, fy, filt_w, 28),
+                [("exclude", "剔除黑名单"), ("all", "含黑名单"), ("only", "仅黑名单")],
+                display_blacklist_mode,
+                label="黑名单",
+                dropdown_id="bl",
+            ),
+        }
+        if self._open_gallery_dd and self._open_gallery_dd in self._gallery_dropdowns:
+            self._gallery_dropdowns[self._open_gallery_dd].open = True
+        for dd in self._gallery_dropdowns.values():
+            dd.draw(surface, mouse_pos, on_dark=True, draw_menu=False)
 
     def draw(self, surface, templates, selected_index: int):
         sw, sh = surface.get_width(), surface.get_height()
@@ -493,10 +518,14 @@ class GalleryView:
         pygame.draw.rect(surface, C_SIDEBAR_DARK, (0, 0, sw, self.TOP_H))
 
         title = "Display 大库"
-        surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 58))
-        surface.blit(FONT_MARK.render("单击选中 · 复制/粘贴按钮或 Ctrl+C/V", True, C_SIDEBAR_MUTED), (168, 62))
+        surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 74))
+        surface.blit(FONT_MARK.render("单击选中 · 复制/粘贴按钮或 Ctrl+C/V", True, C_SIDEBAR_MUTED), (168, 78))
 
         self._draw_header_tabs(surface, sw, templates)
+
+        for dd in self._gallery_dropdowns.values():
+            if dd.open:
+                dd.draw_menu(surface, mouse_pos)
 
         content_h = self._ensure_layout(templates, sw)
         self.clamp_scroll(content_h, sh)
@@ -1504,13 +1533,14 @@ def build_sidebar():
     pad = 16
     w = SIDEBAR_WIDTH - pad * 2
     y = 58 + SIDEBAR_PRODUCT_CARD_H + 16
-    tool_buttons = {}
-    bw = (w - 8) // 2
-    for i, (tool_id, label) in enumerate(TOOLS):
-        col, row = i % 2, i // 2
-        rect = (pad + col * (bw + 8), y + row * 38, bw, 32)
-        tool_buttons[tool_id] = Button(rect, label, f"tool:{tool_id}", toggle=True)
-    y += 38 * 2 + 10
+    tool_dropdown = Dropdown(
+        (pad, y, w, 32),
+        [(tool_id, label) for tool_id, label in TOOLS],
+        current_tool,
+        label="绘制工具",
+        dropdown_id="tool",
+    )
+    y += 38
 
     input_name.rect = pygame.Rect(pad, y + 18, w, 32)
     input_family.rect = pygame.Rect(pad, y + 66, w, 32)
@@ -1528,10 +1558,10 @@ def build_sidebar():
         "delete": Button((pad, y + 220, w, 34), "删除", "delete", danger=True),
         "clear": Button((pad, y + 260, w, 34), "清空画布", "clear"),
     }
-    return tool_buttons, buttons
+    return tool_dropdown, buttons
 
 
-def draw_sidebar(tool_buttons, buttons):
+def draw_sidebar(tool_dropdown, buttons):
     draw_sidebar_bg(screen)
     draw_sidebar_header(screen, "家具模板编辑器", "Furniture Template")
     draw_product_reference_card(screen)
@@ -1540,9 +1570,10 @@ def draw_sidebar(tool_buttons, buttons):
     tools_y = 58 + SIDEBAR_PRODUCT_CARD_H + 8
     screen.blit(FONT_SMALL.render("绘制工具", True, C_SIDEBAR_MUTED), (pad, tools_y))
 
-    for btn in tool_buttons.values():
-        btn.active = btn.action == f"tool:{current_tool}"
-        btn.draw(screen, mouse_pos, on_dark=True)
+    tool_dropdown.selected = current_tool
+    tool_dropdown.draw(screen, mouse_pos, on_dark=True, draw_menu=False)
+    if tool_dropdown.open:
+        tool_dropdown.draw_menu(screen, mouse_pos)
     if return_to_gallery_after_edit:
         buttons["gallery"].label = "← 返回 Display 大库"
         buttons["gallery"].action = "gallery_return"
@@ -2075,16 +2106,33 @@ def handle_global_clipboard_shortcuts(event):
     return False
 
 
-def try_sidebar_click(pos, tool_buttons, buttons):
+editor_tool_dropdown_open = False
+
+
+def try_sidebar_click(pos, tool_dropdown, buttons):
     mx, my = pos
-    return handle_sidebar_click(mx, my, tool_buttons, buttons)
+    return handle_sidebar_click(mx, my, tool_dropdown, buttons)
 
 
-def handle_sidebar_click(mx, my, tool_buttons, buttons):
-    for tool_id, btn in tool_buttons.items():
-        if btn.contains((mx, my)):
-            handle_toolbar(btn.action)
-            return True
+def handle_sidebar_click(mx, my, tool_dropdown, buttons):
+    global editor_tool_dropdown_open
+    hit = tool_dropdown.hit_test((mx, my))
+    if isinstance(hit, tuple) and hit[0] == "pick":
+        tool_dropdown.selected = hit[1]
+        tool_dropdown.open = False
+        editor_tool_dropdown_open = False
+        handle_toolbar(f"tool:{hit[1]}")
+        return True
+    if hit == "trigger":
+        tool_dropdown.open = not tool_dropdown.open
+        editor_tool_dropdown_open = tool_dropdown.open
+        return True
+    if tool_dropdown.open and hit == "outside":
+        tool_dropdown.open = False
+        editor_tool_dropdown_open = False
+        return True
+    if tool_dropdown.open:
+        return True
     for btn in buttons.values():
         if btn.contains((mx, my)):
             handle_toolbar(btn.action)
@@ -2285,7 +2333,7 @@ def main():
     pygame.display.set_caption(f"家具模板编辑器 v{ui.__version__}")
     clock = pygame.time.Clock()
 
-    tool_buttons, buttons = build_sidebar()
+    tool_dropdown, buttons = build_sidebar()
     running = True
     global _sidebar_click_start
     _gallery_click_start = None
@@ -2385,7 +2433,7 @@ def main():
                             if _sidebar_click_start is not None:
                                 sx, sy = _sidebar_click_start
                                 if abs(mx - sx) <= CLICK_MOVE_TOLERANCE and abs(my - sy) <= CLICK_MOVE_TOLERANCE:
-                                    try_sidebar_click(event.pos, tool_buttons, buttons)
+                                    try_sidebar_click(event.pos, tool_dropdown, buttons)
                             _sidebar_click_start = None
                         else:
                             if resizing_handle is not None:
@@ -2501,7 +2549,7 @@ def main():
             toast.draw(screen, screen.get_width() // 2)
         else:
             draw_canvas(screen)
-            draw_sidebar(tool_buttons, buttons)
+            draw_sidebar(tool_dropdown, buttons)
             tick_input_focus()
             sw = screen.get_width()
             toast.draw(screen, SIDEBAR_WIDTH + (sw - SIDEBAR_WIDTH) // 2)

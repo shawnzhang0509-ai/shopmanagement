@@ -49,6 +49,7 @@ from heatmap_metrics import (
     sales_data_ready,
     week_period_display,
 )
+from ui_common import Dropdown
 
 pygame.init()
 
@@ -269,6 +270,35 @@ search_text = ""
 search_box_active = False
 template_family_filter = ""
 template_scroll_offset = 0
+sidebar_tools_expanded = False
+open_dropdown_id: str | None = None
+WEEK_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("single", "单周查看"),
+    ("range:1", "周均 1 周"),
+    ("range:2", "周均 2 周"),
+    ("range:3", "周均 3 周"),
+    ("range:4", "周均 4 周"),
+    ("range:6", "周均 6 周"),
+    ("range:8", "周均 8 周"),
+    ("range:12", "周均 12 周"),
+)
+SALES_LEVEL_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("product", "坪效 · 单品"),
+    ("prefix", "坪效 · 前三位"),
+    ("family", "坪效 · 系列"),
+)
+ROI_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("off", "ROI · 关闭"),
+    ("on", "ROI · 重叠闪烁"),
+)
+ROTATE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("fine", "旋转 · 微调15°"),
+    ("90", "旋转 · 90°翻转"),
+)
+SIDEBAR_HEADER_H = 68
+SIDEBAR_BTN_H = 32
+SIDEBAR_BTN_GAP = 6
+SIDEBAR_SECTION_GAP = 8
 TEMPLATE_ROW_H = 56
 TEMPLATE_THUMB = 40
 rename_composition = ""
@@ -1872,38 +1902,148 @@ def heatmap_week_caption() -> str:
     return f"{shop} · {full}"
 
 
-def toggle_heatmap_sales_level(buttons=None) -> None:
+def toggle_heatmap_sales_level(buttons=None, dropdowns=None) -> None:
     global heatmap_sales_level
     heatmap_sales_level = next_sales_level(heatmap_sales_level)
+    apply_sales_level_dropdown(heatmap_sales_level, buttons, dropdowns)
+
+
+def week_dropdown_value() -> str:
+    if heatmap_week_mode == "single":
+        return "single"
+    return f"range:{heatmap_week_count}"
+
+
+def family_dropdown_options() -> list[tuple[str, str]]:
+    return [("", "全部")] + [(f, f) for f in template_families()]
+
+
+def sync_dropdowns(dropdowns: dict | None) -> None:
+    if not dropdowns:
+        return
+    if "week" in dropdowns:
+        dropdowns["week"].selected = week_dropdown_value()
+    if "sales_level" in dropdowns:
+        dropdowns["sales_level"].selected = normalize_sales_level(heatmap_sales_level)
+    if "family" in dropdowns:
+        dropdowns["family"].set_options(family_dropdown_options(), keep_selection=True)
+        dropdowns["family"].selected = template_family_filter
+    if "rotate_mode" in dropdowns:
+        dropdowns["rotate_mode"].selected = rotation_mode
+    if "roi" in dropdowns:
+        dropdowns["roi"].selected = "on" if show_roi_overlap_mode else "off"
+
+
+def close_all_dropdowns(dropdowns: dict | None = None) -> None:
+    global open_dropdown_id
+    if dropdowns:
+        for dd in dropdowns.values():
+            dd.open = False
+    open_dropdown_id = None
+
+
+def apply_week_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global heatmap_week_mode, heatmap_week_count
+    if value == "single":
+        heatmap_week_mode = "single"
+    elif str(value).startswith("range:"):
+        heatmap_week_mode = "range"
+        heatmap_week_count = max(1, min(52, int(str(value).split(":", 1)[1])))
+    mark_heatmap_dirty()
+    clear_heatmap_cache()
+    recompute_heatmap_metrics()
+    mark_heatmap_clean()
+    sync_heatmap_week_ui(buttons, dropdowns)
+    show_toast(heatmap_period_title())
+
+
+def apply_sales_level_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global heatmap_sales_level
+    heatmap_sales_level = normalize_sales_level(value)
     _sidebar_metric_cache.clear()
     clear_heatmap_cache()
     mark_heatmap_dirty()
     ensure_heatmap_metrics()
-    sync_heatmap_week_ui(buttons)
-    show_toast(f"坪效口径: {sales_level_label(heatmap_sales_level)}（同组共享坪效）")
+    sync_heatmap_week_ui(buttons, dropdowns)
+    show_toast(f"坪效口径: {sales_level_label(heatmap_sales_level)}")
 
 
-def sync_heatmap_week_ui(buttons=None) -> None:
-    if not buttons:
+def apply_family_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global template_family_filter, template_scroll_offset
+    template_family_filter = value
+    template_scroll_offset = 0
+    show_toast(f"系列筛选: {value or '全部'}")
+    sync_heatmap_week_ui(buttons, dropdowns)
+
+
+def apply_rotate_mode_dropdown(value: str, dropdowns=None) -> None:
+    global rotation_mode
+    rotation_mode = value if value in ("fine", "90") else "fine"
+    sync_dropdowns(dropdowns)
+    show_toast(f"旋转模式: {rotation_mode_label()}")
+
+
+def apply_roi_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global show_roi_overlap_mode
+    show_roi_overlap_mode = value == "on"
+    sync_heatmap_week_ui(buttons, dropdowns)
+    show_toast("ROI 重叠闪烁已开启" if show_roi_overlap_mode else "ROI 重叠闪烁已关闭")
+
+
+def handle_dropdown_click(mx, my, dropdowns: dict) -> str | None:
+    global open_dropdown_id
+    pos = ui_pos((mx, my))
+    if open_dropdown_id and open_dropdown_id in dropdowns:
+        dd = dropdowns[open_dropdown_id]
+        hit = dd.hit_test(pos)
+        if isinstance(hit, tuple) and hit[0] == "pick":
+            dd.selected = hit[1]
+            dd.open = False
+            picked_id = open_dropdown_id
+            open_dropdown_id = None
+            return f"dd:{picked_id}:{hit[1]}"
+        if hit in ("trigger", "outside"):
+            dd.open = False
+            open_dropdown_id = None
+            return "dd:closed"
+    for dd_id, dd in dropdowns.items():
+        if dd.hit_test(pos) == "trigger":
+            close_all_dropdowns(dropdowns)
+            dd.open = True
+            open_dropdown_id = dd_id
+            return "dd:opened"
+    return None
+
+
+def handle_dropdown_pick(action: str, buttons, dropdowns) -> None:
+    parts = action.split(":", 2)
+    if len(parts) != 3:
         return
+    _, dd_id, value = parts
+    if dd_id == "week":
+        apply_week_dropdown(value, buttons, dropdowns)
+    elif dd_id == "sales_level":
+        apply_sales_level_dropdown(value, buttons, dropdowns)
+    elif dd_id == "family":
+        apply_family_dropdown(value, buttons, dropdowns)
+    elif dd_id == "rotate_mode":
+        apply_rotate_mode_dropdown(value, dropdowns)
+    elif dd_id == "roi":
+        apply_roi_dropdown(value, buttons, dropdowns)
+
+
+def sync_heatmap_week_ui(buttons=None, dropdowns=None) -> None:
+    if not buttons:
+        buttons = {}
     is_range = heatmap_week_mode == "range"
-    if "week_mode" in buttons:
-        buttons["week_mode"].label = f"周均 {heatmap_week_count}周" if is_range else "单周查看"
-        buttons["week_mode"].active = is_range
-    if "sales_level" in buttons:
-        buttons["sales_level"].label = f"坪效: {sales_level_label(heatmap_sales_level)}"
-        buttons["sales_level"].active = heatmap_sales_level != "product"
+    sync_dropdowns(dropdowns)
     if "week_prev" in buttons:
         buttons["week_prev"].enabled = not is_range and bool(heatmap_store_weeks())
     if "week_next" in buttons:
         buttons["week_next"].enabled = not is_range and bool(heatmap_store_weeks())
-    if "range_less" in buttons:
-        buttons["range_less"].enabled = is_range
-    if "range_more" in buttons:
-        buttons["range_more"].enabled = is_range
 
 
-def navigate_heatmap_week(delta: int, buttons=None) -> None:
+def navigate_heatmap_week(delta: int, buttons=None, dropdowns=None) -> None:
     global heatmap_week_mode, heatmap_week_index
     weeks = heatmap_store_weeks()
     if not weeks:
@@ -1917,7 +2057,7 @@ def navigate_heatmap_week(delta: int, buttons=None) -> None:
     clear_heatmap_cache()
     recompute_heatmap_metrics()
     mark_heatmap_clean()
-    sync_heatmap_week_ui(buttons)
+    sync_heatmap_week_ui(buttons, dropdowns)
     show_toast(heatmap_period_title())
 
 
@@ -5239,10 +5379,13 @@ def filtered_templates():
     return items
 
 
-def template_visible_count(template_list_top):
-    bottom = SCREEN_HEIGHT - 112
-    avail = bottom - template_list_top - 96
+def template_visible_count(template_rows_top: int, template_rows_bottom: int) -> int:
+    avail = template_rows_bottom - template_rows_top - 4
     return max(1, avail // TEMPLATE_ROW_H)
+
+
+def _sidebar_section_y(y: int) -> int:
+    return y + SIDEBAR_SECTION_GAP
 
 
 # ── 绘制 ────────────────────────────────────────────────────
@@ -5705,145 +5848,211 @@ def draw_rename_dialog(surface):
 
 
 def build_sidebar_ui():
-    pad = 16
+    pad = 12
     w = SIDEBAR_WIDTH - pad * 2
-    y = 16
-    buttons = {}
-    input_box = InputBox((pad, 0, w, 36), placeholder="搜索家具模板…")
+    bw2 = (w - SIDEBAR_BTN_GAP) // 2
+    y = SIDEBAR_HEADER_H
+    buttons: dict[str, Button] = {}
+
+    # 顶栏：保存 / 撤销 / 返回 + 布局工具折叠
+    tools_label = "▾ 布局工具" if sidebar_tools_expanded else "▸ 布局工具"
+    btn_w3 = (w - SIDEBAR_BTN_GAP * 2) // 3
+    buttons["save"] = Button((pad, y, btn_w3, SIDEBAR_BTN_H), "保存", "save")
+    buttons["undo"] = Button((pad + btn_w3 + SIDEBAR_BTN_GAP, y, btn_w3, SIDEBAR_BTN_H), "撤销", "undo")
+    buttons["home"] = Button((pad + (btn_w3 + SIDEBAR_BTN_GAP) * 2, y, btn_w3, SIDEBAR_BTN_H), "返回", "home")
+    y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
+    buttons["tools_toggle"] = Button((pad, y, w, SIDEBAR_BTN_H - 2), tools_label, "tools_toggle", toggle=True)
+    buttons["tools_toggle"].active = sidebar_tools_expanded
+    y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
+
+    dropdowns: dict[str, Dropdown] = {}
+
+    if sidebar_tools_expanded:
+        y = _sidebar_section_y(y)
+        bw4 = (w - SIDEBAR_BTN_GAP * 3) // 4
+        # 障碍 / 墙体 / 标记（低频，合并展示）
+        buttons["obstacle"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "障碍", "obstacle", toggle=True)
+        buttons["wall"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "墙体", "wall")
+        y += SIDEBAR_BTN_H
+        buttons["merge"] = Button((pad, y, w, SIDEBAR_BTN_H - 2), "融合相邻障碍", "merge")
+        y += SIDEBAR_BTN_H
+        buttons["add_entrance"] = Button((pad, y, bw4, SIDEBAR_BTN_H - 2), "入口", "add_entrance")
+        buttons["add_stairs"] = Button((pad + bw4 + SIDEBAR_BTN_GAP, y, bw4, SIDEBAR_BTN_H - 2), "楼梯", "add_stairs")
+        buttons["add_cashier"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 2, y, bw4, SIDEBAR_BTN_H - 2), "收银", "add_cashier")
+        buttons["add_fire_exit"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 3, y, bw4, SIDEBAR_BTN_H - 2), "消防", "add_fire_exit")
+        y += SIDEBAR_BTN_H
+        buttons["select_all"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "全选", "select_all")
+        buttons["group"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "成组", "group")
+        y += SIDEBAR_BTN_H
+        buttons["ungroup"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "解组", "ungroup")
+        dropdowns["rotate_mode"] = Dropdown(
+            (pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2),
+            list(ROTATE_DROPDOWN_OPTIONS),
+            rotation_mode,
+            dropdown_id="rotate_mode",
+        )
+        y += SIDEBAR_BTN_H
+        buttons["rotate_l"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "左转", "rotate_l")
+        buttons["rotate_r"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "右转", "rotate_r")
+        y += SIDEBAR_BTN_H
+        buttons["layer_front"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "置顶", "layer_front")
+        buttons["layer_back"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "置底", "layer_back")
+        y += SIDEBAR_BTN_H
+        buttons["bind_parent"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "绑定父件", "bind_parent")
+        buttons["unbind"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "解绑", "unbind")
+        y += SIDEBAR_BTN_H
+        buttons["rename_store"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "重命名", "rename_store")
+        buttons["store"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "画布", "store")
+        y += SIDEBAR_BTN_H
+        buttons["fit_view"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "居中", "fit_view")
+        buttons["reset_layout"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "恢复默认", "reset_layout")
+        y += SIDEBAR_BTN_H + SIDEBAR_SECTION_GAP
+
+    # ── 核心：坪效 ──
+    y = _sidebar_section_y(y)
+    buttons["week_prev"] = Button((pad, y, bw2, SIDEBAR_BTN_H), "◀ 上周", "week_prev")
+    buttons["week_next"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H), "下周 ▶", "week_next")
+    y += SIDEBAR_BTN_H + 4
+    dropdowns["week"] = Dropdown(
+        (pad, y, w, SIDEBAR_BTN_H),
+        list(WEEK_DROPDOWN_OPTIONS),
+        week_dropdown_value(),
+        dropdown_id="week",
+    )
+    y += SIDEBAR_BTN_H + 4
+    dropdowns["sales_level"] = Dropdown(
+        (pad, y, bw2, SIDEBAR_BTN_H - 2),
+        list(SALES_LEVEL_DROPDOWN_OPTIONS),
+        normalize_sales_level(heatmap_sales_level),
+        dropdown_id="sales_level",
+    )
+    dropdowns["roi"] = Dropdown(
+        (pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2),
+        list(ROI_DROPDOWN_OPTIONS),
+        "on" if show_roi_overlap_mode else "off",
+        dropdown_id="roi",
+    )
+    y += SIDEBAR_BTN_H + SIDEBAR_SECTION_GAP
+
+    # ── 核心：家具模板（占满剩余高度）──
+    footer_h = (SIDEBAR_BTN_H + 4) + 8 + SIDEBAR_BTN_H + 16
+    template_rows_bottom = SCREEN_HEIGHT - footer_h - 8
+    input_box = InputBox((pad, y, w, 34), placeholder="搜索家具模板… (Ctrl+F)")
     input_box.text = search_text
     if search_box_active:
         input_box.active = True
-    y += 52
-
-    # toolbar row 1
-    bw = (w - 8) // 2
-    buttons["save"] = Button((pad, y, bw, 34), "保存", "save")
-    buttons["undo"] = Button((pad + bw + 8, y, bw, 34), "撤销", "undo")
-    y += 42
-    buttons["home"] = Button((pad, y, w, 34), "返回门店选择", "home")
-    y += 42
-    buttons["rename_store"] = Button((pad, y, w, 34), "重命名门店", "rename_store")
-    y += 42
-    buttons["store"] = Button((pad, y, w, 34), "修改画布尺寸", "store")
-    y += 42
-    buttons["fit_view"] = Button((pad, y, bw, 34), "居中视图", "fit_view")
-    buttons["reset_layout"] = Button((pad + bw + 8, y, bw, 34), "恢复默认", "reset_layout")
-    y += 42
-    buttons["obstacle"] = Button((pad, y, bw, 34), "刨除障碍", "obstacle", toggle=True)
-    buttons["wall"] = Button((pad + bw + 8, y, bw, 34), "添加墙体", "wall")
-    y += 42
-    buttons["add_entrance"] = Button((pad, y, bw, 34), "入口", "add_entrance")
-    buttons["add_stairs"] = Button((pad + bw + 8, y, bw, 34), "楼梯", "add_stairs")
-    y += 42
-    buttons["add_cashier"] = Button((pad, y, bw, 34), "收银台", "add_cashier")
-    buttons["add_fire_exit"] = Button((pad + bw + 8, y, bw, 34), "消防出口", "add_fire_exit")
-    y += 42
-    buttons["merge"] = Button((pad, y, w, 34), "融合相邻", "merge")
-    y += 42
-    buttons["select_all"] = Button((pad, y, bw, 34), "全选", "select_all")
-    buttons["group"] = Button((pad + bw + 8, y, bw, 34), "成组", "group")
-    y += 42
-    buttons["ungroup"] = Button((pad, y, w, 34), "解组", "ungroup")
-    y += 42
-    buttons["add"] = Button((pad, y, w, 40), "＋ 添加到画布", "add", primary=True)
-    y += 48
-    buttons["rotate_l"] = Button((pad, y, bw, 34), "左转", "rotate_l")
-    buttons["rotate_r"] = Button((pad + bw + 8, y, bw, 34), "右转", "rotate_r")
-    y += 42
-    buttons["rotate_mode"] = Button((pad, y, w, 30), "旋转: 微调 15°", "rotate_mode", toggle=True)
     y += 38
-    buttons["layer_front"] = Button((pad, y, bw, 34), "置顶", "layer_front")
-    buttons["layer_back"] = Button((pad + bw + 8, y, bw, 34), "置底", "layer_back")
-    y += 42
-    buttons["bind_parent"] = Button((pad, y, bw, 34), "绑定父件", "bind_parent")
-    buttons["unbind"] = Button((pad + bw + 8, y, bw, 34), "解绑", "unbind")
-    y += 42
-    buttons["roi_overlap"] = Button((pad, y, w, 30), "ROI重叠闪烁", "roi_overlap", toggle=True)
-    y += 36
-    buttons["week_prev"] = Button((pad, y, bw, 34), "◀ 上周", "week_prev")
-    buttons["week_next"] = Button((pad + bw + 8, y, bw, 34), "下周 ▶", "week_next")
-    y += 40
-    buttons["week_mode"] = Button((pad, y, w - 84, 34), "单周查看", "week_mode", toggle=True)
-    buttons["range_less"] = Button((pad + w - 76, y, 36, 34), "−", "range_less")
-    buttons["range_more"] = Button((pad + w - 36, y, 36, 34), "+", "range_more")
-    y += 40
-    buttons["sales_level"] = Button((pad, y, w, 30), "坪效: 单品", "sales_level", toggle=True)
-    y += 36
-    buttons["resize"] = Button((pad, y, w, 34), "修改尺寸", "resize")
-    y += 42
-    buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
-    buttons["delete"] = Button((pad + bw + 8, y, bw, 34), "删除", "delete", danger=True)
-    y += 42
-    buttons["family_filter"] = Button((pad, y, w, 28), "系列: 全部", "family_filter")
-    template_list_top = y + 38
-    return buttons, input_box, template_list_top
+    dropdowns["family"] = Dropdown(
+        (pad, y, w, 28),
+        family_dropdown_options(),
+        template_family_filter,
+        label="系列",
+        dropdown_id="family",
+    )
+    y += 32
+    template_rows_top = y + 18
+
+    # 底部操作栏（固定）
+    action_y = template_rows_bottom + 8
+    buttons["add"] = Button((pad, action_y, w, SIDEBAR_BTN_H + 4), "＋ 添加到画布", "add", primary=True)
+    action_y += SIDEBAR_BTN_H + 8
+    buttons["resize"] = Button((pad, action_y, btn_w3, SIDEBAR_BTN_H), "改尺寸", "resize")
+    buttons["rename"] = Button((pad + btn_w3 + SIDEBAR_BTN_GAP, action_y, btn_w3, SIDEBAR_BTN_H), "重命名", "rename")
+    buttons["delete"] = Button(
+        (pad + (btn_w3 + SIDEBAR_BTN_GAP) * 2, action_y, btn_w3, SIDEBAR_BTN_H),
+        "删除",
+        "delete",
+        danger=True,
+    )
+
+    if open_dropdown_id and open_dropdown_id in dropdowns:
+        dropdowns[open_dropdown_id].open = True
+    sync_dropdowns(dropdowns)
+
+    return buttons, input_box, dropdowns, template_rows_top, template_rows_bottom
 
 
-def draw_sidebar(buttons, input_box, template_list_top):
+def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows_bottom):
     ensure_heatmap_metrics()
     global template_scroll_offset
     surface = screen
     pygame.draw.rect(surface, C_SIDEBAR, (0, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT))
     pygame.draw.line(surface, C_BORDER, (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, SCREEN_HEIGHT))
 
-    surface.blit(FONT_TITLE.render("坪效布局编辑器", True, C_TEXT), (16, 16))
-    name_surf = FONT_SMALL.render(store_name, True, C_ACCENT)
-    surface.blit(name_surf, (16, 40))
-    shop_hint = f"销量: {sales_shop_display_label()}（仅本店 Branch）"
-    surface.blit(FONT_MARK.render(shop_hint, True, C_MUTED), (16, 58))
+    # 页眉
+    surface.blit(FONT_TITLE.render("坪效布局编辑器", True, C_TEXT), (12, 10))
+    surface.blit(FONT_SMALL.render(store_name, True, C_ACCENT), (12, 32))
+    shop_hint = f"销量: {sales_shop_display_label()}（本店）"
+    surface.blit(FONT_MARK.render(shop_hint, True, C_MUTED), (12, 50))
 
-    for key in (
-        "save", "undo", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall",
-        "add_entrance", "add_stairs", "add_cashier", "add_fire_exit", "merge",
-        "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
-        "rotate_mode", "layer_front", "layer_back", "bind_parent", "unbind", "roi_overlap",
-        "week_prev", "week_next", "week_mode", "range_less", "range_more", "sales_level",
-        "resize", "rename", "delete", "family_filter",
-    ):
-        buttons[key].draw(surface)
-    buttons["obstacle"].active = drawing_polygon
-    buttons["rotate_mode"].active = rotation_mode == "90"
-    buttons["rotate_mode"].label = f"旋转: {rotation_mode_label()}"
+    core_keys = (
+        "save", "undo", "home", "tools_toggle",
+        "week_prev", "week_next",
+        "add", "resize", "rename", "delete",
+    )
+    tool_keys = (
+        "obstacle", "wall", "merge",
+        "add_entrance", "add_stairs", "add_cashier", "add_fire_exit",
+        "select_all", "group", "ungroup", "rotate_l", "rotate_r",
+        "layer_front", "layer_back", "bind_parent", "unbind",
+        "rename_store", "store", "fit_view", "reset_layout",
+    )
+    for key in core_keys + tool_keys:
+        if key in buttons:
+            buttons[key].draw(surface)
+
+    if sidebar_tools_expanded and "obstacle" in buttons:
+        sep_y = buttons["week_prev"].rect.y - 6
+        pygame.draw.line(surface, C_BORDER, (12, sep_y), (SIDEBAR_WIDTH - 12, sep_y), 1)
+
+    if "obstacle" in buttons:
+        buttons["obstacle"].active = drawing_polygon
     if "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_mode
-    sync_heatmap_week_ui(buttons)
+    if "tools_toggle" in buttons:
+        buttons["tools_toggle"].label = "▾ 布局工具" if sidebar_tools_expanded else "▸ 布局工具"
+        buttons["tools_toggle"].active = sidebar_tools_expanded
+
+    sync_heatmap_week_ui(buttons, dropdowns)
     if "week_prev" in buttons:
         pr = buttons["week_prev"].rect
         nr = buttons["week_next"].rect
         cap = heatmap_week_caption()
-        if len(cap) > 22:
-            cap = cap[:20] + "…"
+        if len(cap) > 20:
+            cap = cap[:18] + "…"
         cap_surf = FONT_MARK.render(cap, True, C_ACCENT)
         gap = pygame.Rect(pr.right + 2, pr.y, nr.left - pr.right - 4, pr.height)
         surface.blit(cap_surf, cap_surf.get_rect(center=gap.center))
-        pygame.draw.line(surface, C_BORDER, (12, pr.y - 8), (SIDEBAR_WIDTH - 12, pr.y - 8), 1)
-        surface.blit(FONT_MARK.render("坪效周次", True, C_MUTED), (16, pr.y - 22))
-    fam = template_family_filter or "全部"
-    if "family_filter" in buttons:
-        buttons["family_filter"].label = f"系列: {fam}"
+        surface.blit(FONT_MARK.render("坪效周次", True, C_MUTED), (12, pr.y - 16))
 
-    y = template_list_top
-    input_box.rect = pygame.Rect(12, y, SIDEBAR_WIDTH - 24, 32)
+    if dropdowns:
+        sync_dropdowns(dropdowns)
+        for dd in dropdowns.values():
+            dd.draw(surface, ui_pos(mouse_pos), draw_menu=False)
+
+    # 搜索 + 模板列表（核心区域）
+    search_y = input_box.rect.y
+    surface.blit(FONT_LABEL.render("家具模板", True, C_TEXT), (12, search_y - 18))
     input_box.draw(surface)
-    y += 38
-    surface.blit(FONT_LABEL.render("家具模板", True, C_TEXT), (16, y))
-    y += 24
+
     filtered = filtered_templates()
-    visible_n = template_visible_count(template_list_top)
+    visible_n = template_visible_count(template_rows_top, template_rows_bottom)
     max_scroll = max(0, len(filtered) - visible_n)
     template_scroll_offset = min(template_scroll_offset, max_scroll)
     visible = filtered[template_scroll_offset : template_scroll_offset + visible_n]
     prefetch_template_list_images(visible)
+
     count_label = f"{len(filtered)} 项"
     q = search_text.strip()
     if q:
-        count_label += f" · 匹配「{q[:16]}{'…' if len(q) > 16 else ''}」"
+        count_label += f" · 「{q[:14]}{'…' if len(q) > 14 else ''}」"
     if len(filtered) > visible_n:
-        count_label += f" · 显示 {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}"
-    surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (16, y))
-    y += 20
+        count_label += f" · {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}"
+    surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (12, template_rows_top - 16))
+
+    list_y = template_rows_top
     for i, (idx, tpl) in enumerate(visible):
-        row = pygame.Rect(12, y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
+        row = pygame.Rect(12, list_y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
         selected = idx == selected_template_index
         discontinued = bool(getattr(tpl, "is_discontinued", False))
         bg = C_ACCENT_LIGHT if selected else ((255, 241, 235) if discontinued else (248, 250, 252))
@@ -5882,91 +6091,43 @@ def draw_sidebar(buttons, input_box, template_list_top):
             badge_rect = pygame.Rect(row.right - 44, row.y + 4, 40, 16)
             draw_discontinued_badge(surface, badge_rect, align="topright")
 
-    y = SCREEN_HEIGHT - 110
-    pygame.draw.line(surface, C_BORDER, (16, y), (SIDEBAR_WIDTH - 16, y))
-    y += 12
+    # 模板列表与底部操作栏分隔
+    pygame.draw.line(surface, C_BORDER, (12, template_rows_bottom + 2), (SIDEBAR_WIDTH - 12, template_rows_bottom + 2), 1)
+
+    sel_y = SCREEN_HEIGHT - 42
+    status_extra = ""
     if selected_marker_index is not None:
         marker = layout_markers[selected_marker_index]
         kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
         label = marker.get("label") or kind_label
-        surface.blit(FONT_SMALL.render(f"选中图标: {label} ({kind_label})", True, C_ACCENT), (16, y))
-        y += 20
-        surface.blit(
-            FONT_SMALL.render(
-                f"旋转 {marker.get('rotation', 0):.0f}°  |  "
-                f"{marker_width_mm(marker) / 1000:g}×{marker_height_mm(marker) / 1000:g} m  |  "
-                f"模式 {rotation_mode_label()}",
-                True,
-                C_MUTED,
-            ),
-            (16, y),
-        )
+        status_extra = f"图标:{label} · "
     elif selected_feature:
-        surface.blit(FONT_SMALL.render(f"选中: {selected_feature.name}", True, C_ACCENT), (16, y))
-        y += 20
-        layer_idx = placed_furnitures.index(selected_feature) + 1 if selected_feature in placed_furnitures else 0
-        parent = furniture_by_instance_id(getattr(selected_feature, "attach_to", ""))
-        parent_txt = f"  |  绑定→{parent.name}" if parent else ""
-        surface.blit(
-            FONT_SMALL.render(
-                f"旋转 {selected_feature.rotation:.0f}°  |  {format_revenue_per_sqm(selected_feature.revenue_per_sqm)}  |  层 {layer_idx}/{len(placed_furnitures)}{parent_txt}",
-                True,
-                C_MUTED,
-            ),
-            (16, y),
-        )
+        status_extra = f"{selected_feature.name} · "
     elif selected_collisions:
         if len(selected_collisions) == 1:
             name = collision_polygons[selected_collision]["name"]
-            surface.blit(FONT_SMALL.render(f"选中障碍物: {name}", True, C_DANGER), (16, y))
+            status_extra = f"障碍:{name} · "
         else:
-            surface.blit(
-                FONT_SMALL.render(f"已选 {len(selected_collisions)} 个障碍/墙体", True, C_DANGER),
-                (16, y),
-            )
-        y += 20
-        gids = sorted({
-            collision_polygons[i].get("group_id")
-            for i in selected_collisions
-            if collision_polygons[i].get("group_id")
-        })
-        metrics = None
-        if len(selected_collisions) == 1:
-            metrics = obstacle_rect_metrics(collision_polygons[selected_collision]["points"])
-        dim_text = ""
-        wall_hint = ""
-        if metrics:
-            _, _, length_mm, width_mm = metrics
-            dim_text = f"  |  {length_mm / 1000:g}×{width_mm / 1000:g} m"
-            if len(selected_collisions) == 1 and obstacle_is_wall(collision_polygons[selected_collision]):
-                wall_hint = "  |  拖蓝色角标调长度"
-        extra = f"  |  组 {', '.join(gids)}" if gids else ""
-        surface.blit(
-            FONT_SMALL.render(
-                f"可旋转/拖动{dim_text}{wall_hint}{extra}  |  模式 {rotation_mode_label()}",
-                True,
-                C_MUTED,
-            ),
-            (16, y),
-        )
-    else:
-        surface.blit(FONT_SMALL.render("未选中对象", True, C_MUTED), (16, y))
+            status_extra = f"障碍×{len(selected_collisions)} · "
 
-    y += 28
-    hints = "墙体名仅选中显示 | 可拖窗口边缘最大化 | 滚轮翻页模板"
-    surface.blit(FONT_SMALL.render(hints, True, C_MUTED), (16, y))
-    y += 18
     surface.blit(
         FONT_SMALL.render(
-            f"{store_name}  |  {store_width_mm / 1000:g}×{store_height_mm / 1000:g} m  |  家具 {len(placed_furnitures)}  |  障碍 {len(collision_polygons)}  |  图标 {len(layout_markers)}  |  v{APP_VERSION}",
+            status_extra
+            + f"{store_width_mm / 1000:g}×{store_height_mm / 1000:g}m · 家具{len(placed_furnitures)} · Ctrl+F 搜索",
             True,
-            C_MUTED,
+            C_ACCENT if status_extra else C_MUTED,
         ),
-        (16, SCREEN_HEIGHT - 24),
+        (12, SCREEN_HEIGHT - 22),
     )
 
+    if dropdowns:
+        for dd in dropdowns.values():
+            if dd.open:
+                dd.draw_menu(surface, ui_pos(mouse_pos))
 
-def handle_toolbar_click(action, buttons):
+
+def handle_toolbar_click(action, buttons, dropdowns=None):
+    global sidebar_tools_expanded
     if action == "save":
         save_current_layout()
     elif action == "undo":
@@ -6010,7 +6171,9 @@ def handle_toolbar_click(action, buttons):
     elif action == "rotate_r":
         rotate_selected(1)
     elif action == "rotate_mode":
-        toggle_rotation_mode()
+        apply_rotate_mode_dropdown("90" if rotation_mode == "fine" else "fine", dropdowns)
+    elif action == "family_filter":
+        cycle_family_filter(buttons)
     elif action == "layer_front":
         if selected_furniture is not None:
             bring_furniture_to_front(selected_furniture)
@@ -6026,15 +6189,15 @@ def handle_toolbar_click(action, buttons):
     elif action == "unbind":
         unbind_furniture()
     elif action == "roi_overlap":
-        toggle_roi_overlap_mode(buttons)
+        apply_roi_dropdown("on" if not show_roi_overlap_mode else "off", buttons, dropdowns)
     elif action == "week_prev":
-        navigate_heatmap_week(-1, buttons)
+        navigate_heatmap_week(-1, buttons, dropdowns)
     elif action == "week_next":
-        navigate_heatmap_week(1, buttons)
+        navigate_heatmap_week(1, buttons, dropdowns)
     elif action == "week_mode":
-        toggle_heatmap_week_mode(buttons)
+        apply_week_dropdown("range:4" if heatmap_week_mode == "single" else "single", buttons, dropdowns)
     elif action == "sales_level":
-        toggle_heatmap_sales_level(buttons)
+        toggle_heatmap_sales_level(buttons, dropdowns)
     elif action == "range_less":
         change_heatmap_range_weeks(-1, buttons)
     elif action == "range_more":
@@ -6051,17 +6214,28 @@ def handle_toolbar_click(action, buttons):
             start_rename_obstacle()
     elif action == "delete":
         delete_selected()
-    elif action == "family_filter":
-        cycle_family_filter(buttons)
+    elif action == "tools_toggle":
+        sidebar_tools_expanded = not sidebar_tools_expanded
+        show_toast("布局工具已展开" if sidebar_tools_expanded else "布局工具已收起")
+        return True
+    return False
 
 
-def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
+def handle_sidebar_click(mx, my, buttons, input_box, dropdowns, template_rows_top, template_rows_bottom):
     global search_box_active, selected_template_index, template_scroll_offset
 
     if buttons is None or input_box is None:
         return
 
     mx, my = ui_pos((mx, my))
+
+    if dropdowns:
+        dd_action = handle_dropdown_click(mx, my, dropdowns)
+        if dd_action and dd_action.startswith("dd:") and not dd_action.endswith(":closed") and not dd_action.endswith(":opened"):
+            handle_dropdown_pick(dd_action, buttons, dropdowns)
+            return
+        if dd_action in ("dd:opened", "dd:closed"):
+            return
 
     if input_box.contains((mx, my)):
         search_box_active = True
@@ -6072,12 +6246,13 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
 
     for btn in buttons.values():
         if btn.contains((mx, my)):
-            handle_toolbar_click(btn.action, buttons)
+            if handle_toolbar_click(btn.action, buttons, dropdowns):
+                return "rebuild_sidebar"
             return
 
     filtered = filtered_templates()
-    visible_n = template_visible_count(template_list_top)
-    list_y = template_list_top + 82
+    visible_n = template_visible_count(template_rows_top, template_rows_bottom)
+    list_y = template_rows_top
     for i, (idx, tpl) in enumerate(filtered[template_scroll_offset : template_scroll_offset + visible_n]):
         row = pygame.Rect(12, list_y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
         if row.collidepoint(mx, my):
@@ -6279,15 +6454,15 @@ def main():
 
     startup_buttons = build_store_catalog_ui(fast=True, cache_only=True) if startup_active else None
     store_picker_buttons = None
-    editor_buttons, input_box, template_list_top = (None, None, 0)
+    editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (None, None, {}, 0, 0)
     if not startup_active:
-        editor_buttons, input_box, template_list_top = build_sidebar_ui()
+        editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
     running = True
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
         if not startup_active and editor_buttons is None:
-            editor_buttons, input_box, template_list_top = build_sidebar_ui()
+            editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 if current_layout_path and not startup_active:
@@ -6414,9 +6589,9 @@ def main():
 
             if event.type == pygame.MOUSEWHEEL:
                 mx, my = mouse_pos
-                if mx < SIDEBAR_WIDTH and not startup_active and template_list_top:
+                if mx < SIDEBAR_WIDTH and not startup_active and template_rows_top:
                     filtered = filtered_templates()
-                    visible_n = template_visible_count(template_list_top)
+                    visible_n = template_visible_count(template_rows_top, template_rows_bottom)
                     max_scroll = max(0, len(filtered) - visible_n)
                     template_scroll_offset = max(0, min(max_scroll, template_scroll_offset - event.y))
                 else:
@@ -6472,11 +6647,11 @@ def main():
                     elif mx >= SIDEBAR_WIDTH and handle_heatmap_week_bar_click(event.pos[0], event.pos[1], editor_buttons):
                         pass
                     elif mx < SIDEBAR_WIDTH:
-                        home_btn = editor_buttons.get("home") if editor_buttons else None
-                        if home_btn and home_btn.contains((mx, my)):
-                            pass
-                        else:
-                            handle_sidebar_click(mx, my, editor_buttons, input_box, template_list_top)
+                        click_result = handle_sidebar_click(
+                            mx, my, editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom
+                        )
+                        if click_result == "rebuild_sidebar":
+                            editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
                 if event.button in (1, 3):
                     dragging_view = False
                 if event.button == 1:
@@ -6577,6 +6752,9 @@ def main():
                     preview_point = None
 
             elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE and open_dropdown_id:
+                    close_all_dropdowns(sidebar_dropdowns)
+                    continue
                 if search_box_active and input_box:
                     if input_box.handle_event(event):
                         search_text = input_box.text
@@ -6642,7 +6820,7 @@ def main():
             draw_startup_screen(screen, startup_buttons)
         else:
             if editor_buttons is None:
-                editor_buttons, input_box, template_list_top = build_sidebar_ui()
+                editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
             screen.fill(C_OUTSIDE)
             pygame.draw.rect(screen, C_OUTSIDE, CANVAS_RECT)
             draw_grid(screen)
@@ -6673,7 +6851,7 @@ def main():
             draw_heatmap_legend(screen)
             draw_heatmap_week_bar(screen)
             draw_banner(screen)
-            draw_sidebar(editor_buttons, input_box, template_list_top)
+            draw_sidebar(editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom)
             draw_toast(screen)
             if store_picker_active:
                 if store_picker_buttons is None:
