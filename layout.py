@@ -49,7 +49,7 @@ from heatmap_metrics import (
     sales_data_ready,
     week_period_display,
 )
-from ui_common import Dropdown
+from ui_common import Dropdown, draw_fitted_text
 
 pygame.init()
 
@@ -173,7 +173,18 @@ WALL_MIN_LENGTH_MM = 200
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
 # ── 字体 ────────────────────────────────────────────────────
-FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
+FONT_CANDIDATES = [
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK",
+    "WenQuanYi Micro Hei",
+    "WenQuanYi Zen Hei",
+    "Source Han Sans SC",
+    "SimHei",
+    "DejaVu Sans",
+    "Arial",
+]
 
 
 def load_font(size, bold=False):
@@ -961,8 +972,7 @@ class Button:
 
         pygame.draw.rect(surface, bg, self.rect, border_radius=8)
         pygame.draw.rect(surface, border, self.rect, 1, border_radius=8)
-        text = FONT_SMALL.render(self.label, True, fg)
-        surface.blit(text, text.get_rect(center=self.rect.center))
+        draw_fitted_text(surface, self.label, FONT_SMALL, fg, self.rect)
 
 
 class InputBox:
@@ -1001,8 +1011,9 @@ class InputBox:
         pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=8)
         display = self.text if self.text else self.placeholder
         color = C_TEXT if self.text else C_MUTED
-        prefix = "▎ " if self.active and self.text else ""
-        surface.blit(FONT_SMALL.render(prefix + display, True, color), (self.rect.x + 10, self.rect.y + 9))
+        prefix = "| " if self.active and self.text else ""
+        clip = pygame.Rect(self.rect.x + 10, self.rect.y + 6, self.rect.width - 20, self.rect.height - 12)
+        draw_fitted_text(surface, prefix + display, FONT_SMALL, color, clip, align="left", pad=0)
 
 
 # ── 几何工具 ────────────────────────────────────────────────
@@ -2375,10 +2386,6 @@ class Furniture:
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
             self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, 16, 16)
-        if self.is_discontinued and not blink_idle and span >= 24:
-            from ui_common import draw_discontinued_canvas_mark
-
-            draw_discontinued_canvas_mark(surface, cx, min_y, span_px=span)
 
     def is_label_clicked(self, mx, my):
         rect = getattr(self, "_label_rect", None)
@@ -2639,7 +2646,7 @@ def draw_furniture_roi_overlaps(surface):
                 if max(max(p[0] for p in screen_pts) - min(p[0] for p in screen_pts), 28) >= 28:
                     draw_label_pill(
                         surface,
-                        f"▶ {active.name}",
+                        f"> {active.name}",
                         (cx, cy),
                         font=FONT_TINY,
                         fg=C_TEXT,
@@ -5564,7 +5571,7 @@ def _truncate_label(text: str, font, max_px: int) -> str:
     text = str(text or "").strip()
     if not text or font.size(text)[0] <= max_px:
         return text
-    ell = "…"
+    ell = "..."
     while len(text) > 1 and font.size(text + ell)[0] > max_px:
         text = text[:-1]
     return text + ell
@@ -5598,33 +5605,42 @@ def draw_furniture_metric_tag(
     line_gap = max(1, int(2 * scale))
     max_inner = max(40, min(int(span_px * 0.94), int(168 * scale)))
     border_r = max(3, int(6 * scale))
+    compact = span_px < 70
 
     sku_px = (14 if selected else 13) * scale + (1 if selected else 0)
     family_px = 11 * scale
     metric_px = 12 * scale
 
     sku_font = cached_label_font(sku_px, bold=selected or scale >= 0.95)
-    sku_text = _truncate_label(sku, sku_font, max_inner)
-    sku_surf = sku_font.render(sku_text, True, C_TEXT)
-
-    family_text = display_family_label(product_family, sku)
-    family_surf = None
-    if family_text:
-        family_font = cached_label_font(family_px, bold=False)
-        family_text = _truncate_label(family_text, family_font, max_inner)
-        family_surf = family_font.render(family_text, True, C_FAMILY)
-
     metric_rgb = heat_color if metric.startswith("$0") else _shade_color(heat_color, 0.22)
     metric_font = cached_label_font(metric_px, bold=True)
-    metric_surf = metric_font.render(metric, True, metric_rgb)
 
-    line_surfs = [sku_surf]
-    if is_discontinued:
-        dc_font = cached_label_font(max(10, int(11 * scale)), bold=True)
-        line_surfs.append(dc_font.render("停产", True, C_DISCONTINUED))
-    if family_surf is not None:
-        line_surfs.append(family_surf)
-    line_surfs.append(metric_surf)
+    if compact:
+        sku_text = _truncate_label(sku, sku_font, max(24, max_inner - metric_font.size(" · " + metric)[0]))
+        line_text = f"{sku_text} · {metric}"
+        line_font = cached_label_font(max(10, int(11 * scale)), bold=selected)
+        line_text = _truncate_label(line_text, line_font, max_inner)
+        line_surfs = [line_font.render(line_text, True, C_TEXT if not is_discontinued else C_DISCONTINUED)]
+    else:
+        sku_text = _truncate_label(sku, sku_font, max_inner)
+        sku_surf = sku_font.render(sku_text, True, C_TEXT)
+
+        family_text = display_family_label(product_family, sku)
+        family_surf = None
+        if family_text:
+            family_font = cached_label_font(family_px, bold=False)
+            family_text = _truncate_label(family_text, family_font, max_inner)
+            family_surf = family_font.render(family_text, True, C_FAMILY)
+
+        metric_surf = metric_font.render(metric, True, metric_rgb)
+
+        line_surfs = [sku_surf]
+        if is_discontinued:
+            dc_font = cached_label_font(max(10, int(11 * scale)), bold=True)
+            line_surfs.append(dc_font.render("停产", True, C_DISCONTINUED))
+        if family_surf is not None:
+            line_surfs.append(family_surf)
+        line_surfs.append(metric_surf)
     inner_w = max(s.get_width() for s in line_surfs)
     inner_h = sum(s.get_height() for s in line_surfs) + line_gap * (len(line_surfs) - 1)
     pill_w = inner_w + pad_x * 2 + stripe_w + max(2, int(4 * scale))
@@ -5955,7 +5971,7 @@ def build_sidebar_ui():
     buttons: dict[str, Button] = {}
 
     # 顶栏：保存 / 撤销 / 返回 + 布局工具折叠
-    tools_label = "▾ 布局工具" if sidebar_tools_expanded else "▸ 布局工具"
+    tools_label = "展开 布局工具" if sidebar_tools_expanded else "收起 布局工具"
     btn_w3 = (w - SIDEBAR_BTN_GAP * 2) // 3
     buttons["save"] = Button((pad, y, btn_w3, SIDEBAR_BTN_H), "保存", "save")
     buttons["undo"] = Button((pad + btn_w3 + SIDEBAR_BTN_GAP, y, btn_w3, SIDEBAR_BTN_H), "撤销", "undo")
@@ -6010,9 +6026,9 @@ def build_sidebar_ui():
 
     # ── 核心：坪效 ──
     y = _sidebar_section_y(y)
-    buttons["week_prev"] = Button((pad, y, bw2, SIDEBAR_BTN_H), "◀ 上周", "week_prev")
-    buttons["week_next"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H), "下周 ▶", "week_next")
-    y += SIDEBAR_BTN_H + 4
+    buttons["week_prev"] = Button((pad, y, bw2, SIDEBAR_BTN_H), "上周", "week_prev")
+    buttons["week_next"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H), "下周", "week_next")
+    y += SIDEBAR_BTN_H + 18
     dropdowns["week"] = Dropdown(
         (pad, y, w, SIDEBAR_BTN_H),
         list(WEEK_DROPDOWN_OPTIONS),
@@ -6035,7 +6051,7 @@ def build_sidebar_ui():
     y += SIDEBAR_BTN_H + 4
     buttons["walls_lock"] = Button(
         (pad, y, w, SIDEBAR_BTN_H - 2),
-        "🔒 墙体已锁定" if walls_locked else "🔓 锁定墙体",
+        "墙体已锁定" if walls_locked else "锁定墙体",
         "walls_lock",
         toggle=True,
     )
@@ -6045,7 +6061,7 @@ def build_sidebar_ui():
     # ── 核心：家具模板（占满剩余高度）──
     footer_h = (SIDEBAR_BTN_H + 4) + 8 + SIDEBAR_BTN_H + 16
     template_rows_bottom = SCREEN_HEIGHT - footer_h - 8
-    input_box = InputBox((pad, y, w, 34), placeholder="搜索家具模板… (Ctrl+F)")
+    input_box = InputBox((pad, y, w, 34), placeholder="搜索家具模板... (Ctrl+F)")
     input_box.text = search_text
     if search_box_active:
         input_box.active = True
@@ -6062,7 +6078,7 @@ def build_sidebar_ui():
 
     # 底部操作栏（固定）
     action_y = template_rows_bottom + 8
-    buttons["add"] = Button((pad, action_y, w, SIDEBAR_BTN_H + 4), "＋ 添加到画布", "add", primary=True)
+    buttons["add"] = Button((pad, action_y, w, SIDEBAR_BTN_H + 4), "+ 添加到画布", "add", primary=True)
     action_y += SIDEBAR_BTN_H + 8
     buttons["resize"] = Button((pad, action_y, btn_w3, SIDEBAR_BTN_H), "改尺寸", "resize")
     buttons["rename"] = Button((pad + btn_w3 + SIDEBAR_BTN_GAP, action_y, btn_w3, SIDEBAR_BTN_H), "重命名", "rename")
@@ -6117,23 +6133,19 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     if "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_mode
     if "tools_toggle" in buttons:
-        buttons["tools_toggle"].label = "▾ 布局工具" if sidebar_tools_expanded else "▸ 布局工具"
+        buttons["tools_toggle"].label = "展开 布局工具" if sidebar_tools_expanded else "收起 布局工具"
         buttons["tools_toggle"].active = sidebar_tools_expanded
     if "walls_lock" in buttons:
-        buttons["walls_lock"].label = "🔒 墙体已锁定" if walls_locked else "🔓 锁定墙体"
+        buttons["walls_lock"].label = "墙体已锁定" if walls_locked else "锁定墙体"
         buttons["walls_lock"].active = walls_locked
 
     sync_heatmap_week_ui(buttons, dropdowns)
     if "week_prev" in buttons:
         pr = buttons["week_prev"].rect
-        nr = buttons["week_next"].rect
-        cap = heatmap_week_caption()
-        if len(cap) > 20:
-            cap = cap[:18] + "…"
-        cap_surf = FONT_MARK.render(cap, True, C_ACCENT)
-        gap = pygame.Rect(pr.right + 2, pr.y, nr.left - pr.right - 4, pr.height)
-        surface.blit(cap_surf, cap_surf.get_rect(center=gap.center))
         surface.blit(FONT_MARK.render("坪效周次", True, C_MUTED), (12, pr.y - 16))
+        cap = heatmap_week_caption()
+        cap_rect = pygame.Rect(12, pr.bottom + 2, SIDEBAR_WIDTH - 24, 16)
+        draw_fitted_text(surface, cap, FONT_MARK, C_ACCENT, cap_rect, align="left", pad=0)
 
     if dropdowns:
         sync_dropdowns(dropdowns)
@@ -6155,7 +6167,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     count_label = f"{len(filtered)} 项"
     q = search_text.strip()
     if q:
-        count_label += f" · 「{q[:14]}{'…' if len(q) > 14 else ''}」"
+        count_label += f' · "{q[:14]}{"..." if len(q) > 14 else ""}"'
     if len(filtered) > visible_n:
         count_label += f" · {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}"
     surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (12, template_rows_top - 16))
@@ -6187,7 +6199,8 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         family = getattr(tpl, "product_family", "") or "未分类"
         area = polygon_area(tpl.points)
         _, rps = template_sidebar_metrics(tpl.name, tpl.product_family, area)
-        surface.blit(FONT_BODY.render(tpl.name, True, C_TEXT), (tx, row.y + 6))
+        name_text = _truncate_label(tpl.name, FONT_BODY, row.width - TEMPLATE_THUMB - 16)
+        surface.blit(FONT_BODY.render(name_text, True, C_TEXT), (tx, row.y + 6))
         meta = f"{family}  ·  {format_revenue_per_sqm(rps)}"
         if discontinued:
             meta = f"停产  ·  {meta}"
@@ -6195,11 +6208,6 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
             FONT_SMALL.render(meta, True, C_DISCONTINUED if discontinued else C_MUTED),
             (tx, row.y + 26),
         )
-        if discontinued:
-            from ui_common import draw_discontinued_badge
-
-            badge_rect = pygame.Rect(row.right - 44, row.y + 4, 40, 16)
-            draw_discontinued_badge(surface, badge_rect, align="topright")
 
     # 模板列表与底部操作栏分隔
     pygame.draw.line(surface, C_BORDER, (12, template_rows_bottom + 2), (SIDEBAR_WIDTH - 12, template_rows_bottom + 2), 1)
