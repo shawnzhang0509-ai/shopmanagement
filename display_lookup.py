@@ -1427,6 +1427,27 @@ def display_items_including_blacklist() -> list[DisplayItem]:
     return _display_cache or []
 
 
+def lookup_display_item(name_or_code: str) -> DisplayItem | None:
+    """按 SKU 或产品名查找 Display 项（含黑名单列表）。"""
+    key = _normalize_key(name_or_code)
+    if not key:
+        return None
+    for item in display_items_including_blacklist():
+        if _normalize_key(item.product_code) == key or _normalize_key(item.product_name) == key:
+            return item
+    return None
+
+
+def resolve_is_discontinued(name_or_code: str, stored: bool | None = None) -> bool:
+    """解析产品是否停产：Display 缓存优先，否则用已存字段。"""
+    item = lookup_display_item(name_or_code)
+    if item is not None:
+        return bool(item.is_discontinued)
+    if stored is not None:
+        return bool(stored)
+    return False
+
+
 def filter_items(items: list[DisplayItem], shop_id: str, query: str = "") -> list[DisplayItem]:
     q = _normalize_key(query)
     out: list[DisplayItem] = []

@@ -34,9 +34,11 @@ from display_lookup import (
     last_load_source,
     last_family_column,
     load_display_items,
+    lookup_display_item,
     match_template_index,
     find_template_index_by_id,
     prune_orphan_templates,
+    resolve_is_discontinued,
     reload_display_items,
     shop_stats,
     shops_for_display_tabs,
@@ -592,6 +594,7 @@ def _blit_thumb_fit(surface, thumb_surf, rect: pygame.Rect) -> None:
 
 def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
     has_model = tpl is not None
+    discontinued = bool(getattr(item, "is_discontinued", False))
     sku_show = (item.product_code or "").strip()
     if len(sku_show) > 13:
         sku_show = sku_show[:12] + "…"
@@ -601,7 +604,11 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
     img_rect.centerx = rect.centerx
     img_rect.y = rect.y + 18
 
-    if has_model:
+    if discontinued:
+        border = ui.C_DISCONTINUED_BORDER
+        border_w = 2
+        bg = ui.C_DISCONTINUED_BG if not selected else (255, 228, 220)
+    elif has_model:
         border = C_SUCCESS
         border_w = 3
         bg = (232, 245, 236) if not selected else (200, 225, 245)
@@ -616,6 +623,8 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
 
     pygame.draw.rect(surface, bg, rect, border_radius=8)
     pygame.draw.rect(surface, border, rect, border_w, border_radius=8)
+    if discontinued:
+        ui.draw_discontinued_card_stripe(surface, rect, radius=8)
     if selected:
         ring = rect.inflate(8, 8)
         pygame.draw.rect(surface, C_ACCENT, ring, 3, border_radius=11)
@@ -668,6 +677,8 @@ def draw_display_card(surface, item, tpl, rect, selected=False, shop_id="all"):
     qty_color = C_SUCCESS if has_model else C_MUTED
     qty_surf = FONT_MARK.render(f"Display ×{qty}", True, qty_color)
     surface.blit(qty_surf, (rect.x + 6, rect.bottom - 16))
+    if discontinued:
+        ui.draw_discontinued_badge(surface, rect, align="topright")
 
 
 def draw_template_card(surface, tpl, rect, selected=False):
@@ -905,6 +916,7 @@ def _bind_template_to_display(tpl: dict, item) -> dict:
     tpl["roi"] = lookup_roi(family)
     tpl["display_key"] = item.key
     tpl["source"] = "display"
+    tpl["is_discontinued"] = bool(getattr(item, "is_discontinued", False))
     return tpl
 
 
@@ -1429,6 +1441,9 @@ def draw_product_reference_card(surface):
     text_w = card.right - text_x - 8
 
     if item:
+        if getattr(item, "is_discontinued", False):
+            pygame.draw.rect(surface, ui.C_DISCONTINUED_BORDER, card, 2, border_radius=8)
+            ui.draw_discontinued_badge(surface, card, align="topright")
         if getattr(item, "image_url", ""):
             thumb = request_image(item.image_url, max_size=(120, 100))
             if thumb is not None:
@@ -1555,6 +1570,8 @@ def draw_sidebar(tool_buttons, buttons):
         tpl = furniture_templates[selected_index]
         status = f"当前: {tpl.get('id', '')}"
         sub = tpl.get("product_family", "")
+        if tpl.get("is_discontinued"):
+            sub = (sub + " · 停产").strip(" ·")
     else:
         status = "未选中模板"
         sub = "从产品总览打开或新建"
@@ -1738,6 +1755,10 @@ def load_templates_file(path=TEMPLATES_FILE):
             tpl["roi"] = float(tpl.get("roi") or 0)
         else:
             tpl["roi"] = lookup_roi(family)
+        tpl["is_discontinued"] = resolve_is_discontinued(
+            tpl.get("id", ""),
+            tpl.get("is_discontinued"),
+        )
     selected_index = -1
     removed = prune_templates_against_display(persist=path == TEMPLATES_FILE)
     if removed:
