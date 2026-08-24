@@ -7,13 +7,13 @@ SELECT
     p.Name AS ProductName,
     CAST('' AS NVARCHAR(200)) AS ProductFamily,
     p.Name AS SubProductFamily,
+    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
     CAST('' AS NVARCHAR(500)) AS ImageUrl,
     SUM(s.Quantity) AS DisplayQty
 FROM Stocks s
 JOIN Warehouses w ON s.WarehouseId = w.Id
 JOIN Products p ON s.ProductId = p.Id
 WHERE w.Name LIKE '%Display%'
-  AND p.IsDiscontinued = 0
-GROUP BY w.Name, p.Sku, p.Name
+GROUP BY w.Name, p.Sku, p.Name, p.IsDiscontinued
 HAVING SUM(s.Quantity) > 0
 ORDER BY w.Name, DisplayQty DESC;
