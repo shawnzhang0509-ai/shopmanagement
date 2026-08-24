@@ -105,6 +105,14 @@ LAST_STORE_FILE = os.path.join(LAYOUTS_DIR, "_last.json")
 CATALOG_LAYOUT_SPECS = {
     "onehunga": (43000, 76300),
 }
+# 布局 slug → weekly_sales 门店 id（与 display_lookup.SHOPS 一致）
+LAYOUT_SLUG_TO_SALES_SHOP = {
+    "onehunga": "onehunga",
+    "hamilton": "hamilton",
+    "westgate": "westgate",
+    "christchurch_colombo": "chch",
+    "christchurch_bleiham": "chch",
+}
 # 固定门店列表：(显示名称, 文件标识)
 STORE_CATALOG = [
     ("Onehunga店", "onehunga"),
@@ -858,6 +866,25 @@ class InputBox:
     def contains(self, pos):
         return self.rect.collidepoint(ui_pos(pos))
 
+    def get_text(self) -> str:
+        return self.text.strip()
+
+    def handle_event(self, event) -> bool:
+        if not self.active:
+            return False
+        if event.type == pygame.TEXTINPUT and event.text:
+            self.text += event.text
+            return True
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_BACKSPACE:
+                if self.text:
+                    self.text = self.text[:-1]
+                return True
+            if event.key == pygame.K_ESCAPE:
+                self.active = False
+                return True
+        return False
+
     def draw(self, surface):
         bg = (255, 255, 255) if self.active else (248, 250, 252)
         pygame.draw.rect(surface, bg, self.rect, border_radius=8)
@@ -865,7 +892,7 @@ class InputBox:
         pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=8)
         display = self.text if self.text else self.placeholder
         color = C_TEXT if self.text else C_MUTED
-        prefix = "搜索 " if not self.text else ""
+        prefix = "▎ " if self.active and self.text else ""
         surface.blit(FONT_SMALL.render(prefix + display, True, color), (self.rect.x + 10, self.rect.y + 9))
 
 
@@ -1688,6 +1715,41 @@ def current_store_slug() -> str | None:
     return None
 
 
+def current_sales_shop_id() -> str | None:
+    """坪效/周销量使用的门店 id（仅本店 Branch，非全局）。"""
+    slug = current_store_slug()
+    if slug:
+        return LAYOUT_SLUG_TO_SALES_SHOP.get(slug, slug)
+    from display_lookup import shop_id_for_location
+
+    sid = shop_id_for_location(store_name or "")
+    if sid and sid != "other":
+        return sid
+    return None
+
+
+def sales_shop_display_label() -> str:
+    sid = current_sales_shop_id()
+    if not sid:
+        return "未识别门店"
+    from display_lookup import shop_label
+
+    return shop_label(sid)
+
+
+_sales_shop_warned = False
+
+
+def ensure_sales_shop_resolved() -> bool:
+    global _sales_shop_warned
+    if current_sales_shop_id():
+        return True
+    if not _sales_shop_warned:
+        show_toast("⚠ 无法识别本店，坪效将不计入销量（不会使用全局销量）")
+        _sales_shop_warned = True
+    return False
+
+
 def furniture_area_mm2(furn) -> float:
     return polygon_area(furn.get_rotated_points())
 
@@ -1732,7 +1794,7 @@ def template_sidebar_metrics(name: str, family: str, area: float) -> tuple[float
     key = (
         name,
         family,
-        current_store_slug(),
+        current_sales_shop_id(),
         heatmap_week_mode,
         heatmap_week_count,
         tuple(active_heatmap_week_keys()),
@@ -1766,11 +1828,11 @@ def template_sidebar_metrics(name: str, family: str, area: float) -> tuple[float
 
 
 def heatmap_store_weeks() -> list[str]:
-    return list_all_week_keys(current_store_slug())
+    return list_all_week_keys(current_sales_shop_id())
 
 
 def active_heatmap_week_keys() -> list[str]:
-    slug = current_store_slug()
+    slug = current_sales_shop_id()
     if heatmap_week_mode == "range":
         return list_recent_week_keys(slug, heatmap_week_count)
     weeks = heatmap_store_weeks()
@@ -1784,7 +1846,7 @@ def active_heatmap_week_keys() -> list[str]:
 
 def heatmap_period_title() -> str:
     keys = active_heatmap_week_keys()
-    slug = current_store_slug()
+    slug = current_sales_shop_id()
     if heatmap_week_mode == "range":
         if not keys:
             return f"周均 · 近 {heatmap_week_count} 周（无数据）"
@@ -1798,15 +1860,16 @@ def heatmap_period_title() -> str:
 
 def heatmap_week_caption() -> str:
     keys = active_heatmap_week_keys()
+    shop = sales_shop_display_label()
     if heatmap_week_mode == "range":
-        return f"周均 · 近 {heatmap_week_count} 周"
+        return f"{shop} · 周均 {heatmap_week_count}周"
     if not keys:
-        return "无周数据"
+        return f"{shop} · 无周数据"
     key = keys[0]
-    full = week_period_display(current_store_slug(), key)
-    if len(full) > 28:
-        return key + " " + full.split("(", 1)[-1].rstrip(")")
-    return full
+    full = week_period_display(current_sales_shop_id(), key)
+    if len(full) > 22:
+        return f"{shop} · {key}"
+    return f"{shop} · {full}"
 
 
 def toggle_heatmap_sales_level(buttons=None) -> None:
@@ -1900,7 +1963,8 @@ def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> flo
 
 def recompute_heatmap_metrics() -> None:
     global heatmap_vmin, heatmap_vmax, heatmap_color_step
-    slug = current_store_slug()
+    ensure_sales_shop_resolved()
+    slug = current_sales_shop_id()
     level = heatmap_sales_level
     values: list[float] = []
     kwargs = heatmap_lookup_kwargs()
@@ -1941,7 +2005,7 @@ def recompute_heatmap_metrics() -> None:
 
 def heatmap_lookup_kwargs() -> dict:
     return {
-        "shop_id": current_store_slug(),
+        "shop_id": current_sales_shop_id(),
         "num_weeks": heatmap_week_count,
         "week_keys": active_heatmap_week_keys(),
     }
@@ -3451,6 +3515,7 @@ def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
     global heatmap_week_count, heatmap_week_mode, heatmap_week_index, heatmap_sales_level, _pending_heatmap_week
+    global _sales_shop_warned
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -3464,6 +3529,7 @@ def load_layout(filepath, *, keep_undo=False):
     if heatmap_week_mode not in ("single", "range"):
         heatmap_week_mode = "single"
     heatmap_sales_level = normalize_sales_level(heatmap.get("sales_level") or heatmap_sales_level)
+    _sales_shop_warned = False
     clear_heatmap_cache()
     mark_heatmap_dirty()
     _pending_heatmap_week = str(heatmap.get("selected_week") or "").strip() or None
@@ -5160,18 +5226,22 @@ def filtered_templates():
         ]
     q = search_text.strip().lower()
     if q:
+        from heatmap_metrics import sku_prefix
+
         items = [
             (i, t)
             for i, t in items
             if q in t.name.lower()
             or q in (getattr(t, "product_family", "") or "").lower()
+            or q in sku_prefix(t.name).lower()
+            or (getattr(t, "is_discontinued", False) and q in ("停产", "discontinued", "dc"))
         ]
     return items
 
 
 def template_visible_count(template_list_top):
     bottom = SCREEN_HEIGHT - 112
-    avail = bottom - template_list_top - 56
+    avail = bottom - template_list_top - 96
     return max(1, avail // TEMPLATE_ROW_H)
 
 
@@ -5639,7 +5709,10 @@ def build_sidebar_ui():
     w = SIDEBAR_WIDTH - pad * 2
     y = 16
     buttons = {}
-    input_box = InputBox((pad, 0, w, 36), placeholder="搜索家具模板...")
+    input_box = InputBox((pad, 0, w, 36), placeholder="搜索家具模板…")
+    input_box.text = search_text
+    if search_box_active:
+        input_box.active = True
     y += 52
 
     # toolbar row 1
@@ -5716,9 +5789,8 @@ def draw_sidebar(buttons, input_box, template_list_top):
     surface.blit(FONT_TITLE.render("坪效布局编辑器", True, C_TEXT), (16, 16))
     name_surf = FONT_SMALL.render(store_name, True, C_ACCENT)
     surface.blit(name_surf, (16, 40))
-
-    input_box.rect.y = 58
-    input_box.draw(surface)
+    shop_hint = f"销量: {sales_shop_display_label()}（仅本店 Branch）"
+    surface.blit(FONT_MARK.render(shop_hint, True, C_MUTED), (16, 58))
 
     for key in (
         "save", "undo", "home", "rename_store", "store", "fit_view", "reset_layout", "obstacle", "wall",
@@ -5751,6 +5823,9 @@ def draw_sidebar(buttons, input_box, template_list_top):
         buttons["family_filter"].label = f"系列: {fam}"
 
     y = template_list_top
+    input_box.rect = pygame.Rect(12, y, SIDEBAR_WIDTH - 24, 32)
+    input_box.draw(surface)
+    y += 38
     surface.blit(FONT_LABEL.render("家具模板", True, C_TEXT), (16, y))
     y += 24
     filtered = filtered_templates()
@@ -5759,7 +5834,12 @@ def draw_sidebar(buttons, input_box, template_list_top):
     template_scroll_offset = min(template_scroll_offset, max_scroll)
     visible = filtered[template_scroll_offset : template_scroll_offset + visible_n]
     prefetch_template_list_images(visible)
-    count_label = f"{len(filtered)} 项" + (f" · 显示 {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}" if len(filtered) > visible_n else "")
+    count_label = f"{len(filtered)} 项"
+    q = search_text.strip()
+    if q:
+        count_label += f" · 匹配「{q[:16]}{'…' if len(q) > 16 else ''}」"
+    if len(filtered) > visible_n:
+        count_label += f" · 显示 {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}"
     surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (16, y))
     y += 20
     for i, (idx, tpl) in enumerate(visible):
@@ -5985,8 +6065,10 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
 
     if input_box.contains((mx, my)):
         search_box_active = True
+        input_box.active = True
         return
     search_box_active = False
+    input_box.active = False
 
     for btn in buttons.values():
         if btn.contains((mx, my)):
@@ -5995,7 +6077,7 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_list_top):
 
     filtered = filtered_templates()
     visible_n = template_visible_count(template_list_top)
-    list_y = template_list_top + 44
+    list_y = template_list_top + 82
     for i, (idx, tpl) in enumerate(filtered[template_scroll_offset : template_scroll_offset + visible_n]):
         row = pygame.Rect(12, list_y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
         if row.collidepoint(mx, my):
@@ -6344,8 +6426,8 @@ def main():
                     offset_y = wy - my / scale
 
             elif event.type in (pygame.TEXTINPUT, pygame.TEXTEDITING):
-                if search_box_active and event.type == pygame.TEXTINPUT and event.text:
-                    search_text += event.text
+                if search_box_active and input_box and input_box.handle_event(event):
+                    search_text = input_box.text
                     template_scroll_offset = 0
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -6495,12 +6577,13 @@ def main():
                     preview_point = None
 
             elif event.type == pygame.KEYDOWN:
-                if search_box_active:
-                    if event.key == pygame.K_BACKSPACE:
-                        search_text = search_text[:-1]
+                if search_box_active and input_box:
+                    if input_box.handle_event(event):
+                        search_text = input_box.text
                         template_scroll_offset = 0
                     elif event.key == pygame.K_ESCAPE:
                         search_box_active = False
+                        input_box.active = False
                 elif drawing_polygon:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         finish_obstacle()
@@ -6514,6 +6597,10 @@ def main():
                         show_toast("已取消绑定")
                         continue
                     mods = pygame.key.get_mods()
+                    if event.key == pygame.K_f and mods & pygame.KMOD_CTRL and input_box:
+                        search_box_active = True
+                        input_box.active = True
+                        continue
                     if not search_box_active and not renaming_store and not editing_obstacle_dialog and not editing_marker_dialog:
                         if event.key == pygame.K_z and mods & pygame.KMOD_CTRL:
                             undo_layout()

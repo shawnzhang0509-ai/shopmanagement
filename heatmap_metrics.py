@@ -165,11 +165,16 @@ def lookup_sales_amount(
         _amount_cache[cache_key] = 0.0
         return 0.0
 
-    amount = 0.0
+    # shop_id 为空时不汇总全公司销量（避免布局误用全局 Branch）
+    if not shop_id:
+        _amount_cache[cache_key] = 0.0
+        return 0.0
+
+    sku_n = _normalize_key(sku)
     fam = resolve_product_family(family or sku) or family or sku
     fam_n = _normalize_key(fam)
-    sku_n = _normalize_key(sku)
     prefix_n = _normalize_key(sku_prefix(sku))
+    amount = 0.0
 
     for row in load_weekly_sales():
         if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
