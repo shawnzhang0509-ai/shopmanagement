@@ -3,6 +3,7 @@
 --
 -- 图片逻辑与库存 stock SQL 一致：ProductDocuments + Documents → RelativeFilePath
 -- ProductFamily 直接读 Products 表字段（无 ProductFamilies 查找表）
+-- Display 库存含 Normal + Clearance（清仓 Demo 仍在门店 Display 上）
 
 SELECT
     w.Name AS WarehouseName,
@@ -11,6 +12,7 @@ SELECT
     ISNULL(p.ProductFamily, '') AS ProductFamily,
     p.Name AS SubProductFamily,
     CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    s.StockStatus AS StockStatus,
     MAX(
         CASE
             WHEN img.RelativeFilePath IS NOT NULL
@@ -45,7 +47,7 @@ LEFT JOIN (
 
 INNER JOIN [dbo].[Stocks] s
     ON s.ProductId = p.Id
-    AND s.StockStatus = 'Normal'
+    AND s.StockStatus IN ('Normal', 'Clearance')
     AND s.StockOnHoldStatus IS NULL
 
 INNER JOIN [dbo].[Warehouses] w
@@ -58,7 +60,8 @@ GROUP BY
     p.Sku,
     p.Name,
     p.ProductFamily,
-    p.IsDiscontinued
+    p.IsDiscontinued,
+    s.StockStatus
 
 HAVING SUM(s.Quantity) > 0
 

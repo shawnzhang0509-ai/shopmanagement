@@ -8,6 +8,7 @@ SELECT
     ISNULL(pf.Name, '') AS ProductFamily,
     ISNULL(psf.Name, p.Name) AS SubProductFamily,
     CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    s.StockStatus AS StockStatus,
     COALESCE(p.ImageUrl, p.ImagePath, '') AS ImageUrl,
     SUM(s.Quantity) AS DisplayQty
 FROM Stocks s
@@ -16,6 +17,8 @@ JOIN Products p ON s.ProductId = p.Id
 LEFT JOIN ProductFamilies pf ON p.ProductFamilyId = pf.Id
 LEFT JOIN ProductSubFamilies psf ON p.ProductSubFamilyId = psf.Id
 WHERE w.Name LIKE '%Display%'
-GROUP BY w.Name, p.Sku, p.Name, pf.Name, psf.Name, p.ImageUrl, p.ImagePath, p.IsDiscontinued
+  AND s.StockStatus IN ('Normal', 'Clearance')
+  AND s.StockOnHoldStatus IS NULL
+GROUP BY w.Name, p.Sku, p.Name, pf.Name, psf.Name, p.ImageUrl, p.ImagePath, p.IsDiscontinued, s.StockStatus
 HAVING SUM(s.Quantity) > 0
 ORDER BY w.Name, ProductFamily, SubProductFamily, DisplayQty DESC;
