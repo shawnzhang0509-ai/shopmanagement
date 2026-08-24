@@ -34,12 +34,14 @@ from heatmap_metrics import (
     adaptive_color_step,
     compute_grouped_revenue_per_sqm,
     format_revenue_per_sqm,
+    heatmap_color_vrange,
     legend_tick_values,
     list_all_week_keys,
     lookup_sales_amount,
     next_sales_level,
     normalize_sales_level,
     revenue_per_sqm,
+    heatmap_color_vrange,
     revenue_per_sqm_to_color,
     sales_group_key,
     sales_level_label,
@@ -147,7 +149,7 @@ FURNITURE_IMG_SOURCE_PX = 96  # 统一从该尺寸解码，缩放走缓存
 FURNITURE_DISPLAY_BUCKET_PX = 16  # 显示尺寸分桶，zoom 时减少重复 smoothscale
 FURNITURE_DISPLAY_CACHE_MAX = 512
 FURNITURE_PREFETCH_INTERVAL_MS = 1200
-VIEW_INTERACTION_MS = 150  # zoom/平移结束后恢复精细绘制的延迟
+VIEW_INTERACTION_MS = 200  # zoom/平移结束后恢复精细绘制的延迟
 UNDO_LIMIT = 40
 MARKER_SIZE_MM = 1000
 MARKER_HIT_PAD_PX = 14
@@ -430,7 +432,11 @@ def mark_view_interacting(ms: int = VIEW_INTERACTION_MS) -> None:
 
 
 def view_interaction_fast_mode() -> bool:
-    return pygame.time.get_ticks() < _view_interaction_until_ms
+    if pygame.time.get_ticks() < _view_interaction_until_ms:
+        return True
+    if dragging_furniture is not None and getattr(dragging_furniture, "dragging", False):
+        return True
+    return False
 
 
 def clear_obstacle_selection():
@@ -567,13 +573,13 @@ def build_furniture_drag_snapshot(primary) -> list[tuple[object, float, float]]:
     return [(item, item.x, item.y) for item in collect_furniture_drag_pack(primary)]
 
 
-def apply_furniture_drag_motion(primary, wx: float, wy: float) -> bool:
-    """Move primary + batch snapshot; return True if any collision blocked the move."""
+def apply_furniture_drag_motion(primary, wx: float, wy: float) -> None:
+    """Move primary + batch snapshot. Collision is checked on mouse up only."""
     if primary is None or not furniture_drag_snapshot:
-        return False
+        return
     primary_snap = next(((ox, oy) for item, ox, oy in furniture_drag_snapshot if item is primary), None)
     if primary_snap is None:
-        return False
+        return
     pox, poy = primary_snap
     primary.x, primary.y = wx, wy
     dx, dy = primary.x - pox, primary.y - poy
@@ -582,6 +588,9 @@ def apply_furniture_drag_motion(primary, wx: float, wy: float) -> bool:
             continue
         item.x = ox + dx
         item.y = oy + dy
+
+
+def furniture_drag_has_collision() -> bool:
     for item, _, _ in furniture_drag_snapshot:
         if check_collision(item, collision_polygons):
             return True
@@ -2281,7 +2290,8 @@ def recompute_heatmap_metrics() -> None:
                 values.append(rps)
 
     heatmap_vmin = min(values) if values else 0.0
-    heatmap_vmax = max(values) if values else 1.0
+    raw_vmax = max(values) if values else 1.0
+    heatmap_vmin, heatmap_vmax = heatmap_color_vrange(heatmap_vmin, raw_vmax)
     heatmap_color_step = adaptive_color_step(heatmap_vmin, heatmap_vmax)
 
 
@@ -2403,15 +2413,16 @@ class Furniture:
         else:
             border_c = _shade_color(border_rgb, 0.45)
         pygame.draw.polygon(surface, border_c, pts, border_w)
-        if self.is_discontinued and not blink_idle:
+        img_cy = cy - span * 0.16
+        fast_view = view_interaction_fast_mode()
+
+        if self.is_discontinued and not blink_idle and not fast_view:
             inset = [
                 (int(px + (cx - px) * 0.04), int(py + (cy - py) * 0.04))
                 for px, py in pts
             ]
             if len(inset) >= 3:
                 pygame.draw.polygon(surface, C_DISCONTINUED, inset, 2)
-        img_cy = cy - span * 0.16
-        fast_view = view_interaction_fast_mode()
 
         if not fast_view and span >= 50 and not blink_idle:
             display_w = max(FURNITURE_IMAGE_MIN_PX, min(160, int(span * 0.78)))
@@ -6651,6 +6662,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             clear_obstacle_selection()
             push_undo()
             furniture_drag_snapshot = build_furniture_drag_snapshot(f)
+            mark_view_interacting(400)
             return
 
     group_rect = furniture_multi_selection_screen_rect()
@@ -6664,6 +6676,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
         clear_obstacle_selection()
         push_undo()
         furniture_drag_snapshot = build_furniture_drag_snapshot(primary)
+        mark_view_interacting(400)
         return
 
     for i, col in enumerate(collision_polygons):
@@ -6929,6 +6942,9 @@ def main():
                 if event.button in (1, 3):
                     dragging_view = False
                 if event.button == 1:
+                    if furniture_drag_snapshot and furniture_drag_has_collision():
+                        restore_furniture_drag_snapshot()
+                        show_toast("不能与障碍重叠")
                     if dragging_furniture:
                         dragging_furniture.dragging = False
                         dragging_furniture = None
@@ -6992,8 +7008,7 @@ def main():
                     marquee_current = (mx, my)
                 elif dragging_furniture and dragging_furniture.dragging:
                     wx, wy = screen_to_world(mx, my)
-                    if apply_furniture_drag_motion(dragging_furniture, wx, wy):
-                        restore_furniture_drag_snapshot()
+                    apply_furniture_drag_motion(dragging_furniture, wx, wy)
                 elif dragging_marker and selected_marker_index is not None:
                     marker = layout_markers[selected_marker_index]
                     marker["x_mm"] = int(round(wx + marker_drag_offset[0]))
