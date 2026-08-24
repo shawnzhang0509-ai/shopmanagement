@@ -307,6 +307,10 @@ ROI_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
     ("off", "ROI · 关闭"),
     ("on", "ROI · 重叠闪烁"),
 )
+CANVAS_MODE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("edit", "画布 · 编辑（流畅）"),
+    ("full", "画布 · 完整坪效"),
+)
 ROTATE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
     ("fine", "旋转 · 微调15°"),
     ("90", "旋转 · 90°翻转"),
@@ -405,6 +409,7 @@ _last_furniture_prefetch_ms = 0
 _next_furniture_instance_id = 1
 pending_bind_child = None
 show_roi_overlap_mode = False
+canvas_display_mode = "edit"  # edit=流畅布局 | full=完整坪效/缩略图/ROI
 ROI_OVERLAP_BLINK_MS = 750
 heatmap_week_count = 4
 heatmap_week_mode = "single"  # single | range
@@ -419,10 +424,27 @@ _heatmap_metrics_dirty = True
 _sidebar_metric_cache: dict[tuple, tuple[float, float]] = {}
 furniture_drag_snapshot: list[tuple[object, float, float]] = []
 _overlap_blink_cache: dict = {"phase_tick": -1, "active": set()}
+_overlap_groups_frame_id = -1
+_overlap_groups_frame_cache: list = []
+_sidebar_blit_cache = None
+_sidebar_blit_cache_key: tuple | None = None
 _view_interaction_until_ms = 0
 _cached_family_dropdown_options: list[tuple[str, str]] | None = None
 _cached_family_dropdown_key: tuple[str, ...] = ()
 _template_list_thumb_cache: dict[tuple[str, str], object] = {}
+
+
+def canvas_full_mode() -> bool:
+    return canvas_display_mode == "full"
+
+
+def canvas_edit_mode() -> bool:
+    return canvas_display_mode == "edit"
+
+
+def invalidate_overlap_groups_cache() -> None:
+    global _overlap_groups_frame_id
+    _overlap_groups_frame_id = -1
 
 
 def mark_view_interacting(ms: int = VIEW_INTERACTION_MS) -> None:
@@ -2083,6 +2105,8 @@ def sync_dropdowns(dropdowns: dict | None) -> None:
         dropdowns["rotate_mode"].selected = rotation_mode
     if "roi" in dropdowns:
         dropdowns["roi"].selected = "on" if show_roi_overlap_mode else "off"
+    if "canvas_mode" in dropdowns:
+        dropdowns["canvas_mode"].selected = canvas_display_mode
 
 
 def close_all_dropdowns(dropdowns: dict | None = None) -> None:
@@ -2135,10 +2159,38 @@ def apply_rotate_mode_dropdown(value: str, dropdowns=None) -> None:
 
 
 def apply_roi_dropdown(value: str, buttons=None, dropdowns=None) -> None:
-    global show_roi_overlap_mode
-    show_roi_overlap_mode = value == "on"
+    global show_roi_overlap_mode, canvas_display_mode
+    want_on = value == "on"
+    if want_on and canvas_edit_mode():
+        canvas_display_mode = "full"
+        sync_dropdowns(dropdowns)
+    show_roi_overlap_mode = want_on
+    invalidate_overlap_groups_cache()
     sync_heatmap_week_ui(buttons, dropdowns)
-    show_toast("ROI 重叠闪烁已开启" if show_roi_overlap_mode else "ROI 重叠闪烁已关闭")
+    if want_on and canvas_full_mode():
+        show_toast("ROI 重叠闪烁已开启")
+    elif not want_on:
+        show_toast("ROI 重叠闪烁已关闭")
+    elif want_on:
+        show_toast("已切换到完整坪效并开启 ROI 重叠")
+
+
+def apply_canvas_mode_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global canvas_display_mode, show_roi_overlap_mode
+    mode = value if value in ("edit", "full") else "edit"
+    canvas_display_mode = mode
+    if canvas_edit_mode() and show_roi_overlap_mode:
+        show_roi_overlap_mode = False
+    invalidate_overlap_groups_cache()
+    _sidebar_blit_cache_clear()
+    sync_dropdowns(dropdowns)
+    sync_heatmap_week_ui(buttons, dropdowns)
+    if canvas_full_mode():
+        mark_heatmap_dirty()
+        ensure_heatmap_metrics()
+        show_toast("完整坪效：缩略图、详细标签、ROI 重叠")
+    else:
+        show_toast("编辑模式：流畅摆场（热力色块保留）")
 
 
 def handle_dropdown_click(mx, my, dropdowns: dict) -> str | None:
@@ -2181,6 +2233,8 @@ def handle_dropdown_pick(action: str, buttons, dropdowns) -> None:
         apply_rotate_mode_dropdown(value, dropdowns)
     elif dd_id == "roi":
         apply_roi_dropdown(value, buttons, dropdowns)
+    elif dd_id == "canvas_mode":
+        apply_canvas_mode_dropdown(value, buttons, dropdowns)
 
 
 def sync_heatmap_week_ui(buttons=None, dropdowns=None) -> None:
@@ -2389,9 +2443,10 @@ class Furniture:
             self._label_rect = None
             return
         pts = [world_to_screen(x, y) for x, y in self.get_rotated_points()]
-        blink_active = _overlap_blink_active(self)
-        in_overlap = _furniture_overlap_group(self) is not None
-        blink_idle = show_roi_overlap_mode and in_overlap and not blink_active
+        roi_visual = show_roi_overlap_mode and canvas_full_mode()
+        blink_active = _overlap_blink_active(self) if roi_visual else True
+        in_overlap = _furniture_overlap_group(self) is not None if roi_visual else False
+        blink_idle = roi_visual and in_overlap and not blink_active
         fill = HEATMAP_BLINK_IDLE if blink_idle else heatmap_color_for_value(self.revenue_per_sqm)
         border_rgb = heatmap_color_for_value(self.revenue_per_sqm)
         cx = sum(p[0] for p in pts) / len(pts)
@@ -2413,8 +2468,17 @@ class Furniture:
         else:
             border_c = _shade_color(border_rgb, 0.45)
         pygame.draw.polygon(surface, border_c, pts, border_w)
-        img_cy = cy - span * 0.16
         fast_view = view_interaction_fast_mode()
+
+        if canvas_edit_mode():
+            if not fast_view and span >= 24 and not blink_idle:
+                name = _truncate_label(self.name, FONT_TINY, max(20, int(span * 0.88)))
+                surf = FONT_TINY.render(name, True, C_TEXT)
+                surface.blit(surf, surf.get_rect(center=(int(cx), int(cy))))
+            self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, max(16, int(span * 0.5)), 16)
+            return
+
+        img_cy = cy - span * 0.16
 
         if self.is_discontinued and not blink_idle and not fast_view:
             inset = [
@@ -2577,7 +2641,7 @@ def _darken_color(color, factor=0.55):
     return tuple(max(0, min(255, int(c * factor))) for c in color[:3])
 
 
-def _overlap_groups() -> list[list["Furniture"]]:
+def _compute_overlap_groups() -> list[list["Furniture"]]:
     """空间重叠或父子绑定的家具分为一组（如床架+床垫）。"""
     n = len(placed_furnitures)
     if n < 2:
@@ -2613,8 +2677,27 @@ def _overlap_groups() -> list[list["Furniture"]]:
     return [g for g in buckets.values() if len(g) >= 2]
 
 
+def get_overlap_groups() -> list[list["Furniture"]]:
+    """每帧最多计算一次重叠分组，避免 O(n^3) 卡顿。"""
+    global _overlap_groups_frame_id, _overlap_groups_frame_cache
+    if not show_roi_overlap_mode or not canvas_full_mode():
+        return []
+    frame_id = pygame.time.get_ticks() // 16
+    if frame_id == _overlap_groups_frame_id:
+        return _overlap_groups_frame_cache
+    _overlap_groups_frame_cache = _compute_overlap_groups()
+    _overlap_groups_frame_id = frame_id
+    return _overlap_groups_frame_cache
+
+
+def _overlap_groups() -> list[list["Furniture"]]:
+    return get_overlap_groups()
+
+
 def _furniture_overlap_group(furn: "Furniture") -> list["Furniture"] | None:
-    for group in _overlap_groups():
+    if not show_roi_overlap_mode or not canvas_full_mode():
+        return None
+    for group in get_overlap_groups():
         if furn in group:
             return group
     return None
@@ -2670,7 +2753,7 @@ def draw_crosshatch_polygon(surface, screen_pts, color_a, color_b, spacing=7):
 
 def furniture_draw_order() -> list:
     """重叠闪烁：非当前件先画（底层），当前轮到的件最后画（置顶）。"""
-    if not show_roi_overlap_mode:
+    if not show_roi_overlap_mode or not canvas_full_mode():
         return placed_furnitures
     _refresh_overlap_blink_cache()
     active = _overlap_blink_cache.get("active", set())
@@ -2691,7 +2774,7 @@ def draw_furniture_selection_ring(surface, furn) -> None:
 
 def draw_furniture_roi_overlaps(surface):
     """重叠区：脉冲描边 + 当前件名称。"""
-    if view_interaction_fast_mode():
+    if view_interaction_fast_mode() or canvas_edit_mode():
         return
     if not show_roi_overlap_mode or len(placed_furnitures) < 2:
         return
@@ -3729,6 +3812,7 @@ def build_layout_data(filepath):
         },
         "editor": {
             "walls_locked": bool(walls_locked),
+            "canvas_display_mode": canvas_display_mode,
         },
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -3829,7 +3913,7 @@ def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
     global heatmap_week_count, heatmap_week_mode, heatmap_week_index, heatmap_sales_level, _pending_heatmap_week
-    global _sales_shop_warned, walls_locked
+    global _sales_shop_warned, walls_locked, canvas_display_mode
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -3845,6 +3929,8 @@ def load_layout(filepath, *, keep_undo=False):
     heatmap_sales_level = normalize_sales_level(heatmap.get("sales_level") or heatmap_sales_level)
     editor = data.get("editor") or {}
     walls_locked = bool(editor.get("walls_locked", False))
+    loaded_mode = str(editor.get("canvas_display_mode") or "edit").strip()
+    canvas_display_mode = loaded_mode if loaded_mode in ("edit", "full") else "edit"
     _sales_shop_warned = False
     clear_heatmap_cache()
     mark_heatmap_dirty()
@@ -6178,6 +6264,13 @@ def build_sidebar_ui():
         dropdown_id="roi",
     )
     y += SIDEBAR_BTN_H + 4
+    dropdowns["canvas_mode"] = Dropdown(
+        (pad, y, w, SIDEBAR_BTN_H - 2),
+        list(CANVAS_MODE_DROPDOWN_OPTIONS),
+        canvas_display_mode,
+        dropdown_id="canvas_mode",
+    )
+    y += SIDEBAR_BTN_H + 4
     buttons["walls_lock"] = Button(
         (pad, y, w, SIDEBAR_BTN_H - 2),
         "墙体已锁定" if walls_locked else "锁定墙体",
@@ -6225,9 +6318,22 @@ def build_sidebar_ui():
     return buttons, input_box, dropdowns, template_rows_top, template_rows_bottom
 
 
+def _sidebar_blit_cache_clear() -> None:
+    global _sidebar_blit_cache, _sidebar_blit_cache_key
+    _sidebar_blit_cache = None
+    _sidebar_blit_cache_key = None
+
+
 def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows_bottom):
-    global template_scroll_offset
+    global template_scroll_offset, _sidebar_blit_cache, _sidebar_blit_cache_key
     surface = screen
+    if view_interaction_fast_mode() and _sidebar_blit_cache is not None:
+        surface.blit(_sidebar_blit_cache, (0, 0))
+        if dropdowns:
+            for dd in dropdowns.values():
+                if dd.open:
+                    dd.draw_menu(surface, ui_pos(mouse_pos))
+        return
     pygame.draw.rect(surface, C_SIDEBAR, (0, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT))
     pygame.draw.line(surface, C_BORDER, (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, SCREEN_HEIGHT))
 
@@ -6368,6 +6474,12 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         ),
         (12, SCREEN_HEIGHT - 22),
     )
+
+    if not view_interaction_fast_mode() and not open_dropdown_id:
+        try:
+            _sidebar_blit_cache = surface.subsurface((0, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT)).copy()
+        except Exception:
+            _sidebar_blit_cache_clear()
 
     if dropdowns:
         for dd in dropdowns.values():
@@ -7168,7 +7280,7 @@ def main():
         if startup_active and _catalog_refresh_ready:
             _catalog_refresh_ready = False
             startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
-        clock.tick(60)
+        clock.tick(30 if view_interaction_fast_mode() else 60)
         poll_dialog_backspace_repeat()
 
     pygame.quit()
