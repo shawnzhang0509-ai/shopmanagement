@@ -219,6 +219,122 @@ class Button:
         surface.blit(text, text.get_rect(center=self.rect.center))
 
 
+class Dropdown:
+    """Traditional dropdown: click trigger to open a list, pick one option."""
+
+    ITEM_H = 28
+
+    def __init__(
+        self,
+        rect,
+        options: list[tuple[str, str]],
+        selected: str = "",
+        *,
+        label: str = "",
+        dropdown_id: str = "",
+        max_visible: int = 10,
+    ):
+        self.rect = pygame.Rect(rect)
+        self.options = list(options)
+        self.selected = selected or (options[0][0] if options else "")
+        self.label = label
+        self.dropdown_id = dropdown_id
+        self.open = False
+        self.enabled = True
+        self.max_visible = max_visible
+
+    def set_options(self, options: list[tuple[str, str]], *, keep_selection: bool = True) -> None:
+        self.options = list(options)
+        values = {v for v, _ in self.options}
+        if not keep_selection or self.selected not in values:
+            self.selected = self.options[0][0] if self.options else ""
+
+    def selected_label(self) -> str:
+        for value, text in self.options:
+            if value == self.selected:
+                return text
+        return self.selected
+
+    def trigger_label(self) -> str:
+        text = self.selected_label()
+        if self.label:
+            return f"{self.label}  {text}  ▾"
+        return f"{text}  ▾"
+
+    def menu_rect(self) -> pygame.Rect:
+        count = min(len(self.options), self.max_visible)
+        return pygame.Rect(self.rect.x, self.rect.bottom + 2, self.rect.width, count * self.ITEM_H + 4)
+
+    def contains_trigger(self, pos) -> bool:
+        return self.enabled and self.rect.collidepoint(pos)
+
+    def hit_test(self, pos):
+        """Return 'trigger', ('pick', value), 'outside', or None."""
+        if not self.enabled:
+            return None
+        if self.open:
+            menu = self.menu_rect()
+            if menu.collidepoint(pos):
+                idx = int((pos[1] - menu.y - 2) // self.ITEM_H)
+                if 0 <= idx < len(self.options):
+                    return ("pick", self.options[idx][0])
+                return "outside"
+            if self.rect.collidepoint(pos):
+                return "trigger"
+            return "outside"
+        if self.rect.collidepoint(pos):
+            return "trigger"
+        return None
+
+    def draw(self, surface, mouse_pos, *, on_dark: bool = False, draw_menu: bool = True):
+        init_fonts()
+        hover = self.enabled and self.rect.collidepoint(mouse_pos)
+        if on_dark:
+            bg = C_SIDEBAR_HOVER if hover or self.open else C_SIDEBAR_DARK
+            fg = C_SIDEBAR_TEXT
+            border = C_SIDEBAR_ACTIVE if self.open else C_SIDEBAR_HOVER
+        else:
+            bg = C_ACCENT_LIGHT if hover or self.open else (255, 255, 255)
+            fg = C_ACCENT if hover or self.open else C_TEXT
+            border = C_ACCENT if self.open else C_BORDER
+        if not self.enabled:
+            bg, fg, border = (241, 245, 249), C_MUTED, C_BORDER
+        pygame.draw.rect(surface, bg, self.rect, border_radius=6)
+        pygame.draw.rect(surface, border, self.rect, 1, border_radius=6)
+        label_surf = FONT_SMALL.render(self.trigger_label(), True, fg)
+        clip = label_surf.get_rect(centery=self.rect.centery)
+        clip.x = self.rect.x + 8
+        clip.width = self.rect.width - 16
+        surface.set_clip(clip)
+        surface.blit(label_surf, (self.rect.x + 8, self.rect.centery - label_surf.get_height() // 2))
+        surface.set_clip(None)
+
+        if draw_menu and self.open and self.options:
+            self.draw_menu(surface, mouse_pos)
+
+    def draw_menu(self, surface, mouse_pos):
+        init_fonts()
+        if not self.open or not self.options:
+            return
+        menu = self.menu_rect()
+        pygame.draw.rect(surface, (255, 255, 255), menu, border_radius=6)
+        pygame.draw.rect(surface, C_ACCENT, menu, 2, border_radius=6)
+        shadow = menu.copy()
+        shadow.y += 1
+        pygame.draw.rect(surface, (226, 232, 240), shadow, border_radius=6)
+        pygame.draw.rect(surface, (255, 255, 255), menu, border_radius=6)
+        pygame.draw.rect(surface, C_ACCENT, menu, 2, border_radius=6)
+        for i, (value, text) in enumerate(self.options[: self.max_visible]):
+            row = pygame.Rect(menu.x + 2, menu.y + 2 + i * self.ITEM_H, menu.width - 4, self.ITEM_H)
+            active = value == self.selected
+            if row.collidepoint(mouse_pos):
+                pygame.draw.rect(surface, C_ACCENT_LIGHT, row, border_radius=4)
+            elif active:
+                pygame.draw.rect(surface, (241, 245, 249), row, border_radius=4)
+            color = C_ACCENT if active else C_TEXT
+            surface.blit(FONT_SMALL.render(text, True, color), (row.x + 8, row.y + 6))
+
+
 class InputBox:
     def __init__(self, rect, placeholder="", numeric=False):
         self.rect = pygame.Rect(rect)

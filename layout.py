@@ -49,6 +49,7 @@ from heatmap_metrics import (
     sales_data_ready,
     week_period_display,
 )
+from ui_common import Dropdown
 
 pygame.init()
 
@@ -270,6 +271,30 @@ search_box_active = False
 template_family_filter = ""
 template_scroll_offset = 0
 sidebar_tools_expanded = False
+open_dropdown_id: str | None = None
+WEEK_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("single", "单周查看"),
+    ("range:1", "周均 1 周"),
+    ("range:2", "周均 2 周"),
+    ("range:3", "周均 3 周"),
+    ("range:4", "周均 4 周"),
+    ("range:6", "周均 6 周"),
+    ("range:8", "周均 8 周"),
+    ("range:12", "周均 12 周"),
+)
+SALES_LEVEL_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("product", "坪效 · 单品"),
+    ("prefix", "坪效 · 前三位"),
+    ("family", "坪效 · 系列"),
+)
+ROI_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("off", "ROI · 关闭"),
+    ("on", "ROI · 重叠闪烁"),
+)
+ROTATE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("fine", "旋转 · 微调15°"),
+    ("90", "旋转 · 90°翻转"),
+)
 SIDEBAR_HEADER_H = 68
 SIDEBAR_BTN_H = 32
 SIDEBAR_BTN_GAP = 6
@@ -1877,38 +1902,148 @@ def heatmap_week_caption() -> str:
     return f"{shop} · {full}"
 
 
-def toggle_heatmap_sales_level(buttons=None) -> None:
+def toggle_heatmap_sales_level(buttons=None, dropdowns=None) -> None:
     global heatmap_sales_level
     heatmap_sales_level = next_sales_level(heatmap_sales_level)
+    apply_sales_level_dropdown(heatmap_sales_level, buttons, dropdowns)
+
+
+def week_dropdown_value() -> str:
+    if heatmap_week_mode == "single":
+        return "single"
+    return f"range:{heatmap_week_count}"
+
+
+def family_dropdown_options() -> list[tuple[str, str]]:
+    return [("", "全部")] + [(f, f) for f in template_families()]
+
+
+def sync_dropdowns(dropdowns: dict | None) -> None:
+    if not dropdowns:
+        return
+    if "week" in dropdowns:
+        dropdowns["week"].selected = week_dropdown_value()
+    if "sales_level" in dropdowns:
+        dropdowns["sales_level"].selected = normalize_sales_level(heatmap_sales_level)
+    if "family" in dropdowns:
+        dropdowns["family"].set_options(family_dropdown_options(), keep_selection=True)
+        dropdowns["family"].selected = template_family_filter
+    if "rotate_mode" in dropdowns:
+        dropdowns["rotate_mode"].selected = rotation_mode
+    if "roi" in dropdowns:
+        dropdowns["roi"].selected = "on" if show_roi_overlap_mode else "off"
+
+
+def close_all_dropdowns(dropdowns: dict | None = None) -> None:
+    global open_dropdown_id
+    if dropdowns:
+        for dd in dropdowns.values():
+            dd.open = False
+    open_dropdown_id = None
+
+
+def apply_week_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global heatmap_week_mode, heatmap_week_count
+    if value == "single":
+        heatmap_week_mode = "single"
+    elif str(value).startswith("range:"):
+        heatmap_week_mode = "range"
+        heatmap_week_count = max(1, min(52, int(str(value).split(":", 1)[1])))
+    mark_heatmap_dirty()
+    clear_heatmap_cache()
+    recompute_heatmap_metrics()
+    mark_heatmap_clean()
+    sync_heatmap_week_ui(buttons, dropdowns)
+    show_toast(heatmap_period_title())
+
+
+def apply_sales_level_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global heatmap_sales_level
+    heatmap_sales_level = normalize_sales_level(value)
     _sidebar_metric_cache.clear()
     clear_heatmap_cache()
     mark_heatmap_dirty()
     ensure_heatmap_metrics()
-    sync_heatmap_week_ui(buttons)
-    show_toast(f"坪效口径: {sales_level_label(heatmap_sales_level)}（同组共享坪效）")
+    sync_heatmap_week_ui(buttons, dropdowns)
+    show_toast(f"坪效口径: {sales_level_label(heatmap_sales_level)}")
 
 
-def sync_heatmap_week_ui(buttons=None) -> None:
-    if not buttons:
+def apply_family_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global template_family_filter, template_scroll_offset
+    template_family_filter = value
+    template_scroll_offset = 0
+    show_toast(f"系列筛选: {value or '全部'}")
+    sync_heatmap_week_ui(buttons, dropdowns)
+
+
+def apply_rotate_mode_dropdown(value: str, dropdowns=None) -> None:
+    global rotation_mode
+    rotation_mode = value if value in ("fine", "90") else "fine"
+    sync_dropdowns(dropdowns)
+    show_toast(f"旋转模式: {rotation_mode_label()}")
+
+
+def apply_roi_dropdown(value: str, buttons=None, dropdowns=None) -> None:
+    global show_roi_overlap_mode
+    show_roi_overlap_mode = value == "on"
+    sync_heatmap_week_ui(buttons, dropdowns)
+    show_toast("ROI 重叠闪烁已开启" if show_roi_overlap_mode else "ROI 重叠闪烁已关闭")
+
+
+def handle_dropdown_click(mx, my, dropdowns: dict) -> str | None:
+    global open_dropdown_id
+    pos = ui_pos((mx, my))
+    if open_dropdown_id and open_dropdown_id in dropdowns:
+        dd = dropdowns[open_dropdown_id]
+        hit = dd.hit_test(pos)
+        if isinstance(hit, tuple) and hit[0] == "pick":
+            dd.selected = hit[1]
+            dd.open = False
+            picked_id = open_dropdown_id
+            open_dropdown_id = None
+            return f"dd:{picked_id}:{hit[1]}"
+        if hit in ("trigger", "outside"):
+            dd.open = False
+            open_dropdown_id = None
+            return "dd:closed"
+    for dd_id, dd in dropdowns.items():
+        if dd.hit_test(pos) == "trigger":
+            close_all_dropdowns(dropdowns)
+            dd.open = True
+            open_dropdown_id = dd_id
+            return "dd:opened"
+    return None
+
+
+def handle_dropdown_pick(action: str, buttons, dropdowns) -> None:
+    parts = action.split(":", 2)
+    if len(parts) != 3:
         return
+    _, dd_id, value = parts
+    if dd_id == "week":
+        apply_week_dropdown(value, buttons, dropdowns)
+    elif dd_id == "sales_level":
+        apply_sales_level_dropdown(value, buttons, dropdowns)
+    elif dd_id == "family":
+        apply_family_dropdown(value, buttons, dropdowns)
+    elif dd_id == "rotate_mode":
+        apply_rotate_mode_dropdown(value, dropdowns)
+    elif dd_id == "roi":
+        apply_roi_dropdown(value, buttons, dropdowns)
+
+
+def sync_heatmap_week_ui(buttons=None, dropdowns=None) -> None:
+    if not buttons:
+        buttons = {}
     is_range = heatmap_week_mode == "range"
-    if "week_mode" in buttons:
-        buttons["week_mode"].label = f"周均 {heatmap_week_count}周" if is_range else "单周查看"
-        buttons["week_mode"].active = is_range
-    if "sales_level" in buttons:
-        buttons["sales_level"].label = f"坪效: {sales_level_label(heatmap_sales_level)}"
-        buttons["sales_level"].active = heatmap_sales_level != "product"
+    sync_dropdowns(dropdowns)
     if "week_prev" in buttons:
         buttons["week_prev"].enabled = not is_range and bool(heatmap_store_weeks())
     if "week_next" in buttons:
         buttons["week_next"].enabled = not is_range and bool(heatmap_store_weeks())
-    if "range_less" in buttons:
-        buttons["range_less"].enabled = is_range
-    if "range_more" in buttons:
-        buttons["range_more"].enabled = is_range
 
 
-def navigate_heatmap_week(delta: int, buttons=None) -> None:
+def navigate_heatmap_week(delta: int, buttons=None, dropdowns=None) -> None:
     global heatmap_week_mode, heatmap_week_index
     weeks = heatmap_store_weeks()
     if not weeks:
@@ -1922,7 +2057,7 @@ def navigate_heatmap_week(delta: int, buttons=None) -> None:
     clear_heatmap_cache()
     recompute_heatmap_metrics()
     mark_heatmap_clean()
-    sync_heatmap_week_ui(buttons)
+    sync_heatmap_week_ui(buttons, dropdowns)
     show_toast(heatmap_period_title())
 
 
@@ -5730,6 +5865,8 @@ def build_sidebar_ui():
     buttons["tools_toggle"].active = sidebar_tools_expanded
     y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
 
+    dropdowns: dict[str, Dropdown] = {}
+
     if sidebar_tools_expanded:
         y = _sidebar_section_y(y)
         bw4 = (w - SIDEBAR_BTN_GAP * 3) // 4
@@ -5748,7 +5885,12 @@ def build_sidebar_ui():
         buttons["group"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "成组", "group")
         y += SIDEBAR_BTN_H
         buttons["ungroup"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "解组", "ungroup")
-        buttons["rotate_mode"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "旋转15°", "rotate_mode", toggle=True)
+        dropdowns["rotate_mode"] = Dropdown(
+            (pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2),
+            list(ROTATE_DROPDOWN_OPTIONS),
+            rotation_mode,
+            dropdown_id="rotate_mode",
+        )
         y += SIDEBAR_BTN_H
         buttons["rotate_l"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "左转", "rotate_l")
         buttons["rotate_r"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "右转", "rotate_r")
@@ -5771,12 +5913,25 @@ def build_sidebar_ui():
     buttons["week_prev"] = Button((pad, y, bw2, SIDEBAR_BTN_H), "◀ 上周", "week_prev")
     buttons["week_next"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H), "下周 ▶", "week_next")
     y += SIDEBAR_BTN_H + 4
-    buttons["week_mode"] = Button((pad, y, w - 76, SIDEBAR_BTN_H), "单周查看", "week_mode", toggle=True)
-    buttons["range_less"] = Button((pad + w - 76, y, 34, SIDEBAR_BTN_H), "−", "range_less")
-    buttons["range_more"] = Button((pad + w - 34, y, 34, SIDEBAR_BTN_H), "+", "range_more")
+    dropdowns["week"] = Dropdown(
+        (pad, y, w, SIDEBAR_BTN_H),
+        list(WEEK_DROPDOWN_OPTIONS),
+        week_dropdown_value(),
+        dropdown_id="week",
+    )
     y += SIDEBAR_BTN_H + 4
-    buttons["sales_level"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "坪效: 单品", "sales_level", toggle=True)
-    buttons["roi_overlap"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "ROI闪烁", "roi_overlap", toggle=True)
+    dropdowns["sales_level"] = Dropdown(
+        (pad, y, bw2, SIDEBAR_BTN_H - 2),
+        list(SALES_LEVEL_DROPDOWN_OPTIONS),
+        normalize_sales_level(heatmap_sales_level),
+        dropdown_id="sales_level",
+    )
+    dropdowns["roi"] = Dropdown(
+        (pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2),
+        list(ROI_DROPDOWN_OPTIONS),
+        "on" if show_roi_overlap_mode else "off",
+        dropdown_id="roi",
+    )
     y += SIDEBAR_BTN_H + SIDEBAR_SECTION_GAP
 
     # ── 核心：家具模板（占满剩余高度）──
@@ -5787,7 +5942,13 @@ def build_sidebar_ui():
     if search_box_active:
         input_box.active = True
     y += 38
-    buttons["family_filter"] = Button((pad, y, w, 28), "系列: 全部", "family_filter")
+    dropdowns["family"] = Dropdown(
+        (pad, y, w, 28),
+        family_dropdown_options(),
+        template_family_filter,
+        label="系列",
+        dropdown_id="family",
+    )
     y += 32
     template_rows_top = y + 18
 
@@ -5804,10 +5965,14 @@ def build_sidebar_ui():
         danger=True,
     )
 
-    return buttons, input_box, template_rows_top, template_rows_bottom
+    if open_dropdown_id and open_dropdown_id in dropdowns:
+        dropdowns[open_dropdown_id].open = True
+    sync_dropdowns(dropdowns)
+
+    return buttons, input_box, dropdowns, template_rows_top, template_rows_bottom
 
 
-def draw_sidebar(buttons, input_box, template_rows_top, template_rows_bottom):
+def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows_bottom):
     ensure_heatmap_metrics()
     global template_scroll_offset
     surface = screen
@@ -5822,14 +5987,13 @@ def draw_sidebar(buttons, input_box, template_rows_top, template_rows_bottom):
 
     core_keys = (
         "save", "undo", "home", "tools_toggle",
-        "week_prev", "week_next", "week_mode", "range_less", "range_more",
-        "sales_level", "roi_overlap",
-        "family_filter", "add", "resize", "rename", "delete",
+        "week_prev", "week_next",
+        "add", "resize", "rename", "delete",
     )
     tool_keys = (
         "obstacle", "wall", "merge",
         "add_entrance", "add_stairs", "add_cashier", "add_fire_exit",
-        "select_all", "group", "ungroup", "rotate_mode", "rotate_l", "rotate_r",
+        "select_all", "group", "ungroup", "rotate_l", "rotate_r",
         "layer_front", "layer_back", "bind_parent", "unbind",
         "rename_store", "store", "fit_view", "reset_layout",
     )
@@ -5843,16 +6007,13 @@ def draw_sidebar(buttons, input_box, template_rows_top, template_rows_bottom):
 
     if "obstacle" in buttons:
         buttons["obstacle"].active = drawing_polygon
-    if "rotate_mode" in buttons:
-        buttons["rotate_mode"].active = rotation_mode == "90"
-        buttons["rotate_mode"].label = f"旋转{rotation_mode_label()}"
     if "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_mode
     if "tools_toggle" in buttons:
         buttons["tools_toggle"].label = "▾ 布局工具" if sidebar_tools_expanded else "▸ 布局工具"
         buttons["tools_toggle"].active = sidebar_tools_expanded
 
-    sync_heatmap_week_ui(buttons)
+    sync_heatmap_week_ui(buttons, dropdowns)
     if "week_prev" in buttons:
         pr = buttons["week_prev"].rect
         nr = buttons["week_next"].rect
@@ -5864,9 +6025,10 @@ def draw_sidebar(buttons, input_box, template_rows_top, template_rows_bottom):
         surface.blit(cap_surf, cap_surf.get_rect(center=gap.center))
         surface.blit(FONT_MARK.render("坪效周次", True, C_MUTED), (12, pr.y - 16))
 
-    fam = template_family_filter or "全部"
-    if "family_filter" in buttons:
-        buttons["family_filter"].label = f"系列: {fam}"
+    if dropdowns:
+        sync_dropdowns(dropdowns)
+        for dd in dropdowns.values():
+            dd.draw(surface, ui_pos(mouse_pos), draw_menu=False)
 
     # 搜索 + 模板列表（核心区域）
     search_y = input_box.rect.y
@@ -5958,8 +6120,13 @@ def draw_sidebar(buttons, input_box, template_rows_top, template_rows_bottom):
         (12, SCREEN_HEIGHT - 22),
     )
 
+    if dropdowns:
+        for dd in dropdowns.values():
+            if dd.open:
+                dd.draw_menu(surface, ui_pos(mouse_pos))
 
-def handle_toolbar_click(action, buttons):
+
+def handle_toolbar_click(action, buttons, dropdowns=None):
     global sidebar_tools_expanded
     if action == "save":
         save_current_layout()
@@ -6004,7 +6171,9 @@ def handle_toolbar_click(action, buttons):
     elif action == "rotate_r":
         rotate_selected(1)
     elif action == "rotate_mode":
-        toggle_rotation_mode()
+        apply_rotate_mode_dropdown("90" if rotation_mode == "fine" else "fine", dropdowns)
+    elif action == "family_filter":
+        cycle_family_filter(buttons)
     elif action == "layer_front":
         if selected_furniture is not None:
             bring_furniture_to_front(selected_furniture)
@@ -6020,15 +6189,15 @@ def handle_toolbar_click(action, buttons):
     elif action == "unbind":
         unbind_furniture()
     elif action == "roi_overlap":
-        toggle_roi_overlap_mode(buttons)
+        apply_roi_dropdown("on" if not show_roi_overlap_mode else "off", buttons, dropdowns)
     elif action == "week_prev":
-        navigate_heatmap_week(-1, buttons)
+        navigate_heatmap_week(-1, buttons, dropdowns)
     elif action == "week_next":
-        navigate_heatmap_week(1, buttons)
+        navigate_heatmap_week(1, buttons, dropdowns)
     elif action == "week_mode":
-        toggle_heatmap_week_mode(buttons)
+        apply_week_dropdown("range:4" if heatmap_week_mode == "single" else "single", buttons, dropdowns)
     elif action == "sales_level":
-        toggle_heatmap_sales_level(buttons)
+        toggle_heatmap_sales_level(buttons, dropdowns)
     elif action == "range_less":
         change_heatmap_range_weeks(-1, buttons)
     elif action == "range_more":
@@ -6045,8 +6214,6 @@ def handle_toolbar_click(action, buttons):
             start_rename_obstacle()
     elif action == "delete":
         delete_selected()
-    elif action == "family_filter":
-        cycle_family_filter(buttons)
     elif action == "tools_toggle":
         sidebar_tools_expanded = not sidebar_tools_expanded
         show_toast("布局工具已展开" if sidebar_tools_expanded else "布局工具已收起")
@@ -6054,13 +6221,21 @@ def handle_toolbar_click(action, buttons):
     return False
 
 
-def handle_sidebar_click(mx, my, buttons, input_box, template_rows_top, template_rows_bottom):
+def handle_sidebar_click(mx, my, buttons, input_box, dropdowns, template_rows_top, template_rows_bottom):
     global search_box_active, selected_template_index, template_scroll_offset
 
     if buttons is None or input_box is None:
         return
 
     mx, my = ui_pos((mx, my))
+
+    if dropdowns:
+        dd_action = handle_dropdown_click(mx, my, dropdowns)
+        if dd_action and dd_action.startswith("dd:") and not dd_action.endswith(":closed") and not dd_action.endswith(":opened"):
+            handle_dropdown_pick(dd_action, buttons, dropdowns)
+            return
+        if dd_action in ("dd:opened", "dd:closed"):
+            return
 
     if input_box.contains((mx, my)):
         search_box_active = True
@@ -6071,7 +6246,7 @@ def handle_sidebar_click(mx, my, buttons, input_box, template_rows_top, template
 
     for btn in buttons.values():
         if btn.contains((mx, my)):
-            if handle_toolbar_click(btn.action, buttons):
+            if handle_toolbar_click(btn.action, buttons, dropdowns):
                 return "rebuild_sidebar"
             return
 
@@ -6279,15 +6454,15 @@ def main():
 
     startup_buttons = build_store_catalog_ui(fast=True, cache_only=True) if startup_active else None
     store_picker_buttons = None
-    editor_buttons, input_box, template_rows_top, template_rows_bottom = (None, None, 0, 0)
+    editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (None, None, {}, 0, 0)
     if not startup_active:
-        editor_buttons, input_box, template_rows_top, template_rows_bottom = build_sidebar_ui()
+        editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
     running = True
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
         if not startup_active and editor_buttons is None:
-            editor_buttons, input_box, template_rows_top, template_rows_bottom = build_sidebar_ui()
+            editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 if current_layout_path and not startup_active:
@@ -6473,10 +6648,10 @@ def main():
                         pass
                     elif mx < SIDEBAR_WIDTH:
                         click_result = handle_sidebar_click(
-                            mx, my, editor_buttons, input_box, template_rows_top, template_rows_bottom
+                            mx, my, editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom
                         )
                         if click_result == "rebuild_sidebar":
-                            editor_buttons, input_box, template_rows_top, template_rows_bottom = build_sidebar_ui()
+                            editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
                 if event.button in (1, 3):
                     dragging_view = False
                 if event.button == 1:
@@ -6577,6 +6752,9 @@ def main():
                     preview_point = None
 
             elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE and open_dropdown_id:
+                    close_all_dropdowns(sidebar_dropdowns)
+                    continue
                 if search_box_active and input_box:
                     if input_box.handle_event(event):
                         search_text = input_box.text
@@ -6642,7 +6820,7 @@ def main():
             draw_startup_screen(screen, startup_buttons)
         else:
             if editor_buttons is None:
-                editor_buttons, input_box, template_rows_top, template_rows_bottom = build_sidebar_ui()
+                editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
             screen.fill(C_OUTSIDE)
             pygame.draw.rect(screen, C_OUTSIDE, CANVAS_RECT)
             draw_grid(screen)
@@ -6673,7 +6851,7 @@ def main():
             draw_heatmap_legend(screen)
             draw_heatmap_week_bar(screen)
             draw_banner(screen)
-            draw_sidebar(editor_buttons, input_box, template_rows_top, template_rows_bottom)
+            draw_sidebar(editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom)
             draw_toast(screen)
             if store_picker_active:
                 if store_picker_buttons is None:
