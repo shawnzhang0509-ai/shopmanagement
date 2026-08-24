@@ -144,9 +144,10 @@ FURNITURE_IMAGE_MIN_PX = 10  # zoom out 时仍显示的最小缩略图边长（�
 FURNITURE_LABEL_MIN_SPAN_PX = 32  # 标签随缩放变小；低于此像素仅保留点击热区
 FURNITURE_LABEL_REF_SPAN_PX = 96  # 家具在屏幕上约此宽度时使用标准字号
 FURNITURE_IMG_SOURCE_PX = 96  # 统一从该尺寸解码，缩放走缓存
-FURNITURE_DISPLAY_BUCKET_PX = 8  # 显示尺寸分桶，zoom 时减少重复 smoothscale
+FURNITURE_DISPLAY_BUCKET_PX = 16  # 显示尺寸分桶，zoom 时减少重复 smoothscale
 FURNITURE_DISPLAY_CACHE_MAX = 512
 FURNITURE_PREFETCH_INTERVAL_MS = 1200
+VIEW_INTERACTION_MS = 150  # zoom/平移结束后恢复精细绘制的延迟
 UNDO_LIMIT = 40
 MARKER_SIZE_MM = 1000
 MARKER_HIT_PAD_PX = 14
@@ -416,6 +417,20 @@ _heatmap_metrics_dirty = True
 _sidebar_metric_cache: dict[tuple, tuple[float, float]] = {}
 furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
 _overlap_blink_cache: dict = {"phase_tick": -1, "active": set()}
+_view_interaction_until_ms = 0
+_cached_family_dropdown_options: list[tuple[str, str]] | None = None
+_cached_family_dropdown_key: tuple[str, ...] = ()
+_template_list_thumb_cache: dict[tuple[str, str], object] = {}
+
+
+def mark_view_interacting(ms: int = VIEW_INTERACTION_MS) -> None:
+    """Mark canvas zoom/pan in progress — use lighter draw path briefly."""
+    global _view_interaction_until_ms
+    _view_interaction_until_ms = pygame.time.get_ticks() + max(40, int(ms))
+
+
+def view_interaction_fast_mode() -> bool:
+    return pygame.time.get_ticks() < _view_interaction_until_ms
 
 
 def clear_obstacle_selection():
@@ -1989,7 +2004,12 @@ def week_dropdown_value() -> str:
 
 
 def family_dropdown_options() -> list[tuple[str, str]]:
-    return [("", "全部")] + [(f, f) for f in template_families()]
+    global _cached_family_dropdown_options, _cached_family_dropdown_key
+    fams = tuple(template_families())
+    if fams != _cached_family_dropdown_key:
+        _cached_family_dropdown_key = fams
+        _cached_family_dropdown_options = [("", "全部")] + [(f, f) for f in fams]
+    return _cached_family_dropdown_options
 
 
 def sync_dropdowns(dropdowns: dict | None) -> None:
@@ -2000,7 +2020,9 @@ def sync_dropdowns(dropdowns: dict | None) -> None:
     if "sales_level" in dropdowns:
         dropdowns["sales_level"].selected = normalize_sales_level(heatmap_sales_level)
     if "family" in dropdowns:
-        dropdowns["family"].set_options(family_dropdown_options(), keep_selection=True)
+        opts = family_dropdown_options()
+        if list(dropdowns["family"].options) != opts:
+            dropdowns["family"].set_options(opts, keep_selection=True)
         dropdowns["family"].selected = template_family_filter
     if "rotate_mode" in dropdowns:
         dropdowns["rotate_mode"].selected = rotation_mode
@@ -2343,8 +2365,9 @@ class Furniture:
             if len(inset) >= 3:
                 pygame.draw.polygon(surface, C_DISCONTINUED, inset, 2)
         img_cy = cy - span * 0.16
+        fast_view = view_interaction_fast_mode()
 
-        if span >= 50 and not blink_idle:
+        if not fast_view and span >= 50 and not blink_idle:
             display_w = max(FURNITURE_IMAGE_MIN_PX, min(160, int(span * 0.78)))
             aspect = _furniture_aspect(self.name, self.product_family)
             display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
@@ -2366,7 +2389,7 @@ class Furniture:
                 if len(inner) >= 3:
                     pygame.draw.polygon(surface, _shade_color(border_rgb, 0.75), inner)
 
-        if (span >= FURNITURE_LABEL_MIN_SPAN_PX or selected) and not blink_idle:
+        if not fast_view and (span >= FURNITURE_LABEL_MIN_SPAN_PX or selected) and not blink_idle:
             metric = format_revenue_per_sqm(self.revenue_per_sqm)
             tag_rect = draw_furniture_metric_tag(
                 surface,
@@ -2611,6 +2634,8 @@ def draw_furniture_selection_ring(surface, furn) -> None:
 
 def draw_furniture_roi_overlaps(surface):
     """重叠区：脉冲描边 + 当前件名称。"""
+    if view_interaction_fast_mode():
+        return
     if not show_roi_overlap_mode or len(placed_furnitures) < 2:
         return
     _refresh_overlap_blink_cache()
@@ -3261,7 +3286,7 @@ def furniture_display_image(name: str, display_w: int, display_h: int, *, family
         return None
     if base.get_width() == bw and base.get_height() == bh:
         scaled = base
-    elif max(bw, bh) <= 28:
+    elif max(bw, bh) <= 48:
         scaled = pygame.transform.scale(base, (bw, bh))
     else:
         scaled = pygame.transform.smoothscale(base, (bw, bh))
@@ -3300,6 +3325,23 @@ def furniture_image_surface(name: str, max_px: int = 96, *, family: str = ""):
         return request_image(url, max_size=(max_px, max_px))
     except Exception:
         return None
+
+
+def template_list_thumb(tpl) -> object | None:
+    """Cached sidebar template thumbnail (smoothscale once per template)."""
+    key = (tpl.name, tpl.product_family)
+    cached = _template_list_thumb_cache.get(key)
+    if cached is not None:
+        return cached
+    img = furniture_image_surface(tpl.name, TEMPLATE_THUMB - 4, family=tpl.product_family)
+    if img is None:
+        return None
+    size = TEMPLATE_THUMB - 8
+    scaled = pygame.transform.smoothscale(img, (size, size))
+    if len(_template_list_thumb_cache) >= 320:
+        _template_list_thumb_cache.clear()
+    _template_list_thumb_cache[key] = scaled
+    return scaled
 
 
 def prefetch_template_list_images(items):
@@ -5492,6 +5534,8 @@ def _grid_step(span_mm, max_lines=160):
 
 
 def draw_grid(surface):
+    if view_interaction_fast_mode():
+        return
     start_x = int(offset_x // GRID_SPACING * GRID_SPACING)
     end_x = int((offset_x + CANVAS_RECT.width / scale) // GRID_SPACING * GRID_SPACING + GRID_SPACING)
     start_y = int(offset_y // GRID_SPACING * GRID_SPACING)
@@ -5736,7 +5780,7 @@ def draw_obstacles(surface):
             label_color = (127, 29, 29)
         pygame.draw.polygon(surface, fill, pts)
         pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
-        if should_show_obstacle_label(col, idx, selected):
+        if should_show_obstacle_label(col, idx, selected) and not view_interaction_fast_mode():
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
             if is_wall:
@@ -6214,10 +6258,9 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         thumb = pygame.Rect(row.x + 6, row.centery - TEMPLATE_THUMB // 2, TEMPLATE_THUMB, TEMPLATE_THUMB)
         pygame.draw.rect(surface, (255, 255, 255), thumb, border_radius=6)
         pygame.draw.rect(surface, C_BORDER, thumb, 1, border_radius=6)
-        img = furniture_image_surface(tpl.name, TEMPLATE_THUMB - 4, family=tpl.product_family)
+        img = None if view_interaction_fast_mode() else template_list_thumb(tpl)
         if img is not None:
-            scaled = pygame.transform.smoothscale(img, (TEMPLATE_THUMB - 8, TEMPLATE_THUMB - 8))
-            surface.blit(scaled, scaled.get_rect(center=thumb.center))
+            surface.blit(img, img.get_rect(center=thumb.center))
         else:
             area = polygon_area(tpl.points)
             _, rps = template_sidebar_metrics(tpl.name, tpl.product_family, area)
@@ -6637,6 +6680,7 @@ def main():
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
+        pending_canvas_wheel = 0
         if not startup_active and editor_buttons is None:
             editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
         for event in pygame.event.get():
@@ -6771,10 +6815,8 @@ def main():
                     max_scroll = max(0, len(filtered) - visible_n)
                     template_scroll_offset = max(0, min(max_scroll, template_scroll_offset - event.y))
                 else:
-                    wx, wy = screen_to_world(mx, my)
-                    scale = max(MIN_SCALE, min(MAX_SCALE, scale * (ZOOM_IN if event.y > 0 else ZOOM_OUT)))
-                    offset_x = wx - (mx - SIDEBAR_WIDTH) / scale
-                    offset_y = wy - my / scale
+                    pending_canvas_wheel += event.y
+                    mark_view_interacting()
 
             elif event.type in (pygame.TEXTINPUT, pygame.TEXTEDITING):
                 if search_box_active and input_box and input_box.handle_event(event):
@@ -6886,6 +6928,7 @@ def main():
                 mx, my = ui_pos(event.pos)
                 wx, wy = screen_to_world(mx, my)
                 if dragging_view:
+                    mark_view_interacting()
                     offset_x += (last_mouse_pos[0] - mx) / scale
                     offset_y += (last_mouse_pos[1] - my) / scale
                     last_mouse_pos = (mx, my)
@@ -6997,6 +7040,14 @@ def main():
                         toggle_draw_obstacle()
                         editor_buttons["obstacle"].active = drawing_polygon
 
+        if pending_canvas_wheel and not startup_active:
+            mx, my = mouse_pos
+            wx, wy = screen_to_world(mx, my)
+            factor = ZOOM_IN ** pending_canvas_wheel
+            scale = max(MIN_SCALE, min(MAX_SCALE, scale * factor))
+            offset_x = wx - (mx - SIDEBAR_WIDTH) / scale
+            offset_y = wy - my / scale
+
         if startup_active:
             if force_rebuild_startup or startup_buttons is None:
                 startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
@@ -7029,7 +7080,8 @@ def main():
                     f.draw(screen, selected=True)
             draw_furniture_roi_overlaps(screen)
             draw_furniture_multi_selection_overlay(screen)
-            prefetch_furniture_images()
+            if not view_interaction_fast_mode():
+                prefetch_furniture_images()
             draw_selection_overlay(screen)
             draw_marquee(screen)
             draw_polygon_preview(screen)
