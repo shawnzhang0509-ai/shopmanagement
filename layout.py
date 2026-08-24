@@ -6714,7 +6714,7 @@ def main():
     global layout_markers, selected_marker_index, dragging_marker, marker_drag_offset
     global editing_marker_dialog, marker_edit_name, marker_edit_focus
     global marker_edit_length, marker_edit_width
-    global dragging_wall_endpoint, wall_endpoint_snapshot
+    global dragging_wall_endpoint, wall_endpoint_snapshot, furniture_drag_snapshot
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
