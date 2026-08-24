@@ -75,6 +75,7 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
         "thumbnail",
     ),
     "stock_details": ("stock_details", "stockdetails", "stock details", "stock", "display stock", "inventory"),
+    "is_discontinued": ("is_discontinued", "isdiscontinued", "is discontinued", "discontinued"),
 }
 
 _display_cache: list["DisplayItem"] | None = None
@@ -101,6 +102,7 @@ class DisplayItem:
     sub_product_family: str = ""
     image_url: str = ""
     stock_details: str = ""
+    is_discontinued: bool = False
     displays: list[DisplaySlot] = field(default_factory=list)
 
     @property
@@ -137,6 +139,23 @@ def _cell_value(val) -> str:
     if s.lower() in ("nan", "none", "null", "#n/a", "n/a"):
         return ""
     return s
+
+
+def _cell_bool(val) -> bool:
+    """Excel/SQL 布尔/位字段 → bool。"""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        try:
+            import math
+
+            if isinstance(val, float) and math.isnan(val):
+                return False
+        except Exception:
+            pass
+        return bool(val)
+    s = _cell_value(val).lower()
+    return s in ("1", "true", "yes", "y", "是")
 
 
 def _canonicalize_row(raw: dict) -> dict:
@@ -308,6 +327,7 @@ def _row_to_item(row: dict) -> DisplayItem | None:
     sub_family = _cell_value(row.get("sub_product_family") or row.get("subfamily"))
     image_url = _cell_value(row.get("image_url") or row.get("imageurl") or row.get("imagepath"))
     stock = _cell_value(row.get("stock_details") or row.get("stock") or row.get("Stock Details"))
+    is_discontinued = _cell_bool(row.get("is_discontinued"))
     if not name and not code:
         return None
     family = _resolve_family_name(family, name, code)
@@ -328,7 +348,16 @@ def _row_to_item(row: dict) -> DisplayItem | None:
         slots = parse_stock_details(stock)
     if not slots:
         return None
-    return DisplayItem(code or name, name or code, family, sub_family, image_url, stock, slots)
+    return DisplayItem(
+        code or name,
+        name or code,
+        family,
+        sub_family,
+        image_url,
+        stock,
+        is_discontinued,
+        slots,
+    )
 
 
 def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
@@ -349,6 +378,7 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
         family = _cell_value(row.get("product_family"))
         sub_family = _cell_value(row.get("sub_product_family"))
         image_url = _cell_value(row.get("image_url"))
+        is_discontinued = _cell_bool(row.get("is_discontinued"))
         if key not in groups:
             groups[key] = {
                 "product_code": code or name,
@@ -356,6 +386,7 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 "product_family": _resolve_family_name(family, name, code),
                 "sub_product_family": _resolve_sub_family_name(sub_family, name, code),
                 "image_url": image_url,
+                "is_discontinued": is_discontinued,
                 "slots": {},
             }
         else:
@@ -367,6 +398,8 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 groups[key]["sub_product_family"] = sub_family
             if image_url and not groups[key].get("image_url"):
                 groups[key]["image_url"] = image_url
+            if is_discontinued:
+                groups[key]["is_discontinued"] = True
         sid = shop_id_for_location(warehouse)
         slot_key = (sid, warehouse)
         groups[key]["slots"][slot_key] = groups[key]["slots"].get(slot_key, 0) + qty
@@ -1049,6 +1082,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
             "ProductFamily": row.get("product_family", ""),
             "SubProductFamily": row.get("sub_product_family", ""),
             "ImageUrl": row.get("image_url", ""),
+            "IsDiscontinued": 1 if _cell_bool(row.get("is_discontinued")) else 0,
             "DisplayQty": row.get("display_qty", 0),
         })
     try:
@@ -1062,7 +1096,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["WarehouseName", "Sku", "ProductName", "ProductFamily", "SubProductFamily", "ImageUrl", "DisplayQty"])
+    ws.append(["WarehouseName", "Sku", "ProductName", "ProductFamily", "SubProductFamily", "ImageUrl", "IsDiscontinued", "DisplayQty"])
     for r in export:
         ws.append([
             r["WarehouseName"],
@@ -1071,6 +1105,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
             r["ProductFamily"],
             r["SubProductFamily"],
             r["ImageUrl"],
+            r["IsDiscontinued"],
             r["DisplayQty"],
         ])
     wb.save(path)
@@ -1194,6 +1229,7 @@ def save_cache(items: list[DisplayItem], path: str | None = None) -> None:
                 "sub_product_family": it.sub_product_family,
                 "image_url": it.image_url,
                 "stock_details": it.stock_details,
+                "is_discontinued": it.is_discontinued,
                 "displays": [
                     {
                         "shop_id": s.shop_id,

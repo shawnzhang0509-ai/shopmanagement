@@ -10,6 +10,7 @@ SELECT
     p.Name AS ProductName,
     ISNULL(p.ProductFamily, '') AS ProductFamily,
     p.Name AS SubProductFamily,
+    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
     MAX(
         CASE
             WHEN img.RelativeFilePath IS NOT NULL
@@ -51,13 +52,13 @@ INNER JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id
 
 WHERE w.Name LIKE '%Display%'
-  AND p.IsDiscontinued = 0
 
 GROUP BY
     w.Name,
     p.Sku,
     p.Name,
-    p.ProductFamily
+    p.ProductFamily,
+    p.IsDiscontinued
 
 HAVING SUM(s.Quantity) > 0
 
