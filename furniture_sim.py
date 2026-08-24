@@ -20,13 +20,16 @@ except ModuleNotFoundError:
 from roi_lookup import lookup_roi, reload_roi_map
 from display_lookup import (
     SHOPS,
+    TemplateIndexCache,
     blacklist_files_revision,
     blacklist_status,
+    cached_shop_stats,
     display_items_including_blacklist,
     filter_gallery_items,
     filter_items,
     find_display_item_for_template,
     group_by_family,
+    invalidate_shop_stats_cache,
     last_load_error,
     last_load_source,
     last_family_column,
@@ -198,6 +201,7 @@ class GalleryView:
     FAMILY_GAP = 24
     SCROLLBAR_W = 12
     SCROLLBAR_MARGIN = 6
+    SEARCH_DEBOUNCE_MS = 180
 
     def __init__(self):
         self.scroll_y = 0
@@ -215,16 +219,43 @@ class GalleryView:
         self._scroll_drag = False
         self._scroll_drag_offset = 0
         self._last_sw = 0
+        self._search_query = ""
+        self._search_dirty = False
+        self._search_dirty_at = 0
+        self._template_index = TemplateIndexCache()
 
     def _filtered_displays(self, templates):
         return filter_gallery_items(
             display_items_including_blacklist(),
             display_shop,
-            input_search.get_text(),
+            self._search_query,
             templates,
             survey_filter=display_survey_filter,
             blacklist_mode=display_blacklist_mode,
+            template_index=self._template_index,
         )
+
+    def sync_search_query(self) -> None:
+        """立即把搜索框文字同步到筛选条件（切换 Tab / 打开大库时用）。"""
+        self._search_query = input_search.get_text()
+        self._search_dirty = False
+
+    def mark_search_dirty(self) -> None:
+        self._search_dirty = True
+        self._search_dirty_at = pygame.time.get_ticks()
+
+    def tick_search_debounce(self) -> None:
+        if not self._search_dirty:
+            return
+        if pygame.time.get_ticks() - self._search_dirty_at < self.SEARCH_DEBOUNCE_MS:
+            return
+        self._search_dirty = False
+        query = input_search.get_text()
+        if query == self._search_query:
+            return
+        self._search_query = query
+        self.scroll_y = 0
+        self.invalidate_layout()
 
     def invalidate_layout(self) -> None:
         self._layout_key = None
@@ -236,7 +267,7 @@ class GalleryView:
             display_survey_filter,
             display_blacklist_mode,
             blacklist_files_revision(),
-            input_search.get_text(),
+            self._search_query,
             len(display_items),
             len(templates),
             id(display_items),
@@ -326,9 +357,10 @@ class GalleryView:
         self._layout = []
         self._cards = []
         y = self.PAD
+        idx_cache = self._template_index.for_templates(templates)
         filtered = self._filtered_displays(templates)
         for family, items in group_by_family(filtered):
-            modeled = sum(1 for it in items if match_template_index(it, templates) >= 0)
+            modeled = sum(1 for it in items if idx_cache.lookup(it) >= 0)
             self._layout.append(("family", family, len(items), modeled, y))
             y += self.FAMILY_H
             x = self.PAD
@@ -338,7 +370,7 @@ class GalleryView:
                     x = self.PAD
                     row_y += self.CARD_H + self.CARD_GAP
                 rect = pygame.Rect(x, row_y, self.CARD_W, self.CARD_H)
-                tpl_idx = match_template_index(item, templates)
+                tpl_idx = idx_cache.lookup(item)
                 self._layout.append(("card_disp", rect, item, tpl_idx))
                 self._cards.append((rect, "display", item.key))
                 x += self.CARD_W + self.CARD_GAP
@@ -392,7 +424,7 @@ class GalleryView:
         input_search.rect = pygame.Rect(20, 10, min(360, sw - 560), 28)
         input_search.draw(surface, None, on_dark=True)
 
-        stats = shop_stats(display_items, templates) if display_items else {}
+        stats = cached_shop_stats(display_items, templates) if display_items else {}
         if stats.get("all"):
             s = stats["all"]
             label = f"已测绘 {s['modeled']}/{s['total']}"
@@ -804,11 +836,13 @@ def open_gallery(reset_scroll: bool = True):
     app_screen = "gallery"
     if reset_scroll:
         gallery_view.scroll_y = 0
+    gallery_view.sync_search_query()
     gallery_view.invalidate_layout()
     return_to_gallery_after_edit = False
     _gallery_snapshot = None
     if not display_items:
         display_items = reload_display_items(prefer_db=False)
+        invalidate_shop_stats_cache()
     removed = prune_templates_against_display()
     bl_n, bl_src, _ = blacklist_status()
     if removed:
@@ -844,6 +878,8 @@ def return_to_gallery_view():
     _gallery_snapshot = None
     app_screen = "gallery"
     display_items = reload_display_items(prefer_db=False)
+    invalidate_shop_stats_cache()
+    gallery_view.sync_search_query()
     gallery_view.invalidate_layout()
     toast.show("已返回 Display 大库")
 
@@ -901,6 +937,7 @@ def prune_templates_against_display(*, persist: bool = True) -> list[str]:
     furniture_templates = kept
     if selected_index >= len(furniture_templates):
         selected_index = len(furniture_templates) - 1
+    invalidate_shop_stats_cache()
     gallery_view.invalidate_layout()
     if persist and os.path.isfile(TEMPLATES_FILE):
         with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
@@ -2080,6 +2117,7 @@ def apply_template_to_display_item(item, src_tpl: dict) -> None:
         action = "已粘贴"
     with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
         json.dump(furniture_templates, f, ensure_ascii=False, indent=2)
+    invalidate_shop_stats_cache()
     gallery_view.invalidate_layout()
     toast.show(f"{action}模型 → {item.product_name}")
 
@@ -2121,12 +2159,16 @@ def refresh_display_data(prefer_db: bool = True) -> None:
 
             display_items, excel_path = grab_and_save()
             clear_image_cache()
+            invalidate_shop_stats_cache()
+            gallery_view.sync_search_query()
             gallery_view.invalidate_layout()
             toast.show(f"已抓取 {len(display_items)} 款 → {os.path.basename(excel_path)}")
             return
     except Exception:
         pass
     display_items = reload_display_items(prefer_db=False)
+    invalidate_shop_stats_cache()
+    gallery_view.sync_search_query()
     gallery_view.invalidate_layout()
     src = last_load_source() or "display.xlsx"
     bl_n, bl_src, _ = blacklist_status()
@@ -2273,14 +2315,20 @@ def main():
                         pass
                     else:
                         handled = input_search.handle_event(event)
+                        if handled and input_search.active and event.type == pygame.KEYDOWN:
+                            if event.key in (
+                                pygame.K_BACKSPACE,
+                                pygame.K_DELETE,
+                            ) or ui.is_ctrl_key(event, "v"):
+                                gallery_view.mark_search_dirty()
                         if handled and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                            pass
+                            gallery_view.sync_search_query()
+                            gallery_view.invalidate_layout()
                 elif event.type in (pygame.TEXTEDITING, pygame.TEXTINPUT):
                     if input_search.active:
                         input_search.handle_event(event)
                         if event.type == pygame.TEXTINPUT:
-                            gallery_view.scroll_y = 0
-                            gallery_view.invalidate_layout()
+                            gallery_view.mark_search_dirty()
 
             else:
                 if event.type == pygame.MOUSEWHEEL:
@@ -2426,6 +2474,7 @@ def main():
                         input_family.handle_event(event)
 
         if app_screen == "gallery":
+            gallery_view.tick_search_debounce()
             gallery_view.draw(screen, furniture_templates, selected_index)
             tick_input_focus()
             toast.draw(screen, screen.get_width() // 2)

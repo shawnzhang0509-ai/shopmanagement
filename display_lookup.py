@@ -1289,6 +1289,52 @@ def last_family_column() -> str | None:
     return _last_family_column
 
 
+class TemplateIndexCache:
+    """模板 id → 下标缓存，画廊筛选/统计时避免 O(n×m) 线性扫描。"""
+
+    __slots__ = ("_key", "_by_id")
+
+    def __init__(self) -> None:
+        self._key: tuple | None = None
+        self._by_id: dict[str, int] = {}
+
+    @staticmethod
+    def _templates_key(templates: list[dict]) -> tuple:
+        if not templates:
+            return (0,)
+        return (len(templates),) + tuple(_normalize_key(t.get("id", "")) for t in templates)
+
+    def for_templates(self, templates: list[dict]) -> "TemplateIndexCache":
+        key = self._templates_key(templates)
+        if key == self._key:
+            return self
+        self._key = key
+        by_id: dict[str, int] = {}
+        for i, tpl in enumerate(templates):
+            tid = _normalize_key(tpl.get("id", ""))
+            if tid and tid not in by_id:
+                by_id[tid] = i
+        self._by_id = by_id
+        return self
+
+    def lookup(self, item: DisplayItem) -> int:
+        code = _normalize_key(item.product_code)
+        name = _normalize_key(item.product_name)
+        best: int | None = None
+        if code and code in self._by_id:
+            best = self._by_id[code]
+        if name and name in self._by_id:
+            idx = self._by_id[name]
+            if best is None or idx < best:
+                best = idx
+        return best if best is not None else -1
+
+
+_template_index_cache = TemplateIndexCache()
+_shop_stats_cache_key: tuple | None = None
+_shop_stats_cache: dict[str, dict[str, int]] = {}
+
+
 def filter_gallery_items(
     items: list[DisplayItem],
     shop_id: str,
@@ -1297,8 +1343,10 @@ def filter_gallery_items(
     *,
     survey_filter: str = "all",
     blacklist_mode: str = "exclude",
+    template_index: TemplateIndexCache | None = None,
 ) -> list[DisplayItem]:
     """画廊筛选：门店 / 搜索 / 已测绘 / 黑名单模式。"""
+    idx_cache = (template_index or _template_index_cache).for_templates(templates)
     blocked = load_blacklist()
     q = _normalize_key(query)
     out: list[DisplayItem] = []
@@ -1319,7 +1367,7 @@ def filter_gallery_items(
             ]).lower()
             if q not in blob:
                 continue
-        modeled = match_template_index(it, templates) >= 0
+        modeled = idx_cache.lookup(it) >= 0
         if survey_filter == "modeled" and not modeled:
             continue
         if survey_filter == "unmodeled" and modeled:
@@ -1387,26 +1435,61 @@ def group_by_family_hierarchy(
     return out
 
 
-def shop_stats(items: list[DisplayItem], templates: list[dict]) -> dict[str, dict[str, int]]:
-    stats: dict[str, dict[str, int]] = {}
-    for shop in SHOPS:
-        sid = shop["id"]
-        filtered = filter_items(items, sid)
-        modeled = sum(1 for it in filtered if match_template_index(it, templates) >= 0)
-        families = len({
-            it.product_family
-            for it in filtered
-            if it.product_family and it.product_family != "未分类"
-        })
-        stats[sid] = {"total": len(filtered), "modeled": modeled, "families": families}
+def shop_stats(
+    items: list[DisplayItem],
+    templates: list[dict],
+    *,
+    template_index: TemplateIndexCache | None = None,
+) -> dict[str, dict[str, int]]:
+    idx_cache = (template_index or _template_index_cache).for_templates(templates)
+    stats: dict[str, dict[str, int]] = {
+        shop["id"]: {"total": 0, "modeled": 0, "families": 0, "_fam_set": set()}
+        for shop in SHOPS
+    }
+    for it in items:
+        modeled = idx_cache.lookup(it) >= 0
+        fam = it.product_family if it.product_family and it.product_family != "未分类" else None
+        for shop in SHOPS:
+            sid = shop["id"]
+            if sid != "all" and it.display_qty_for_shop(sid) <= 0:
+                continue
+            row = stats[sid]
+            row["total"] += 1
+            if modeled:
+                row["modeled"] += 1
+            if fam:
+                row["_fam_set"].add(fam)
+    for sid, row in stats.items():
+        row["families"] = len(row.pop("_fam_set"))
     return stats
+
+
+def cached_shop_stats(items: list[DisplayItem], templates: list[dict]) -> dict[str, dict[str, int]]:
+    """门店 Tab 统计：仅在 Display/模板变更时重算，避免每帧 O(n×shops)。"""
+    global _shop_stats_cache_key, _shop_stats_cache
+    key = (
+        len(items),
+        len(templates),
+        id(items),
+        _template_index_cache._templates_key(templates),
+        blacklist_files_revision(),
+    )
+    if key != _shop_stats_cache_key:
+        _shop_stats_cache_key = key
+        _shop_stats_cache = shop_stats(items, templates)
+    return _shop_stats_cache
+
+
+def invalidate_shop_stats_cache() -> None:
+    global _shop_stats_cache_key
+    _shop_stats_cache_key = None
 
 
 def shops_for_display_tabs(
     items: list[DisplayItem], templates: list[dict]
 ) -> list[tuple[dict[str, Any], dict[str, int]]]:
     """门店 Tab：全部固定第一，其余按 Product Family 数量从高到低。"""
-    stats = shop_stats(items, templates)
+    stats = cached_shop_stats(items, templates)
     rows: list[tuple[dict[str, Any], dict[str, int]]] = []
     for shop in SHOPS:
         sid = shop["id"]
@@ -1426,17 +1509,14 @@ def shops_for_display_tabs(
     return out
 
 
-def match_template_index(item: DisplayItem, templates: list[dict]) -> int:
+def match_template_index(
+    item: DisplayItem,
+    templates: list[dict],
+    *,
+    template_index: TemplateIndexCache | None = None,
+) -> int:
     """按 SKU 或产品名精确匹配模板，不按 Family 模糊匹配（避免测绘一款整族都变绿）。"""
-    code = _normalize_key(item.product_code)
-    name = _normalize_key(item.product_name)
-    for i, tpl in enumerate(templates):
-        tid = _normalize_key(tpl.get("id", ""))
-        if code and code == tid:
-            return i
-        if name and name == tid:
-            return i
-    return -1
+    return (template_index or _template_index_cache).for_templates(templates).lookup(item)
 
 
 def find_template_index_by_id(templates: list[dict], tpl_id: str) -> int:
