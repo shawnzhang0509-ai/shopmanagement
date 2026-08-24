@@ -76,6 +76,7 @@ _COL_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "stock_details": ("stock_details", "stockdetails", "stock details", "stock", "display stock", "inventory"),
     "is_discontinued": ("is_discontinued", "isdiscontinued", "is discontinued", "discontinued"),
+    "stock_status": ("stock_status", "stockstatus", "stock status"),
 }
 
 _display_cache: list["DisplayItem"] | None = None
@@ -1083,6 +1084,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
             "SubProductFamily": row.get("sub_product_family", ""),
             "ImageUrl": row.get("image_url", ""),
             "IsDiscontinued": 1 if _cell_bool(row.get("is_discontinued")) else 0,
+            "StockStatus": row.get("stock_status", ""),
             "DisplayQty": row.get("display_qty", 0),
         })
     try:
@@ -1096,7 +1098,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["WarehouseName", "Sku", "ProductName", "ProductFamily", "SubProductFamily", "ImageUrl", "IsDiscontinued", "DisplayQty"])
+    ws.append(["WarehouseName", "Sku", "ProductName", "ProductFamily", "SubProductFamily", "ImageUrl", "IsDiscontinued", "StockStatus", "DisplayQty"])
     for r in export:
         ws.append([
             r["WarehouseName"],
@@ -1106,6 +1108,7 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
             r["SubProductFamily"],
             r["ImageUrl"],
             r["IsDiscontinued"],
+            r["StockStatus"],
             r["DisplayQty"],
         ])
     wb.save(path)
