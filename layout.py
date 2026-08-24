@@ -415,7 +415,7 @@ heatmap_week_bar_rects: dict[str, pygame.Rect] = {}
 _pending_heatmap_week: str | None = None
 _heatmap_metrics_dirty = True
 _sidebar_metric_cache: dict[tuple, tuple[float, float]] = {}
-furniture_drag_snapshot: dict[str, tuple[float, float]] = {}
+furniture_drag_snapshot: list[tuple[object, float, float]] = []
 _overlap_blink_cache: dict = {"phase_tick": -1, "active": set()}
 _view_interaction_until_ms = 0
 _cached_family_dropdown_options: list[tuple[str, str]] | None = None
@@ -547,10 +547,56 @@ def toggle_furniture_selection(furn) -> None:
     set_furniture_selection(cur)
 
 
+def furniture_is_selected(furn) -> bool:
+    return any(furn is sel for sel in selected_furnitures)
+
+
+def furniture_multi_selection_screen_rect() -> pygame.Rect | None:
+    if len(selected_furnitures) < 2:
+        return None
+    all_pts = []
+    for furn in selected_furnitures:
+        all_pts.extend(world_to_screen(x, y) for x, y in furn.get_rotated_points())
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    return pygame.Rect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+
+
+def build_furniture_drag_snapshot(primary) -> list[tuple[object, float, float]]:
+    sync_furniture_instance_ids()
+    return [(item, item.x, item.y) for item in collect_furniture_drag_pack(primary)]
+
+
+def apply_furniture_drag_motion(primary, wx: float, wy: float) -> bool:
+    """Move primary + batch snapshot; return True if any collision blocked the move."""
+    if primary is None or not furniture_drag_snapshot:
+        return False
+    primary_snap = next(((ox, oy) for item, ox, oy in furniture_drag_snapshot if item is primary), None)
+    if primary_snap is None:
+        return False
+    pox, poy = primary_snap
+    primary.x, primary.y = wx, wy
+    dx, dy = primary.x - pox, primary.y - poy
+    for item, ox, oy in furniture_drag_snapshot:
+        if item is primary:
+            continue
+        item.x = ox + dx
+        item.y = oy + dy
+    for item, _, _ in furniture_drag_snapshot:
+        if check_collision(item, collision_polygons):
+            return True
+    return False
+
+
+def restore_furniture_drag_snapshot() -> None:
+    for item, ox, oy in furniture_drag_snapshot:
+        item.x, item.y = ox, oy
+
+
 def collect_furniture_drag_pack(primary) -> list:
     if primary is None:
         return []
-    if primary in selected_furnitures and len(selected_furnitures) > 1:
+    if furniture_is_selected(primary) and len(selected_furnitures) > 1:
         pack = []
         seen = set()
         for root in selected_furnitures:
@@ -6597,18 +6643,28 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             if shift:
                 toggle_furniture_selection(f)
             else:
-                if f not in selected_furnitures:
+                if not furniture_is_selected(f):
                     set_furniture_selection([f])
             selected_furniture = f
             selected_feature = f
             selected_marker_index = None
             clear_obstacle_selection()
             push_undo()
-            furniture_drag_snapshot = {
-                item.instance_id: (item.x, item.y)
-                for item in collect_furniture_drag_pack(f)
-            }
+            furniture_drag_snapshot = build_furniture_drag_snapshot(f)
             return
+
+    group_rect = furniture_multi_selection_screen_rect()
+    if group_rect is not None and group_rect.collidepoint(mx, my):
+        primary = selected_furnitures[0]
+        dragging_furniture = primary
+        primary.dragging = True
+        selected_furniture = primary
+        selected_feature = primary
+        selected_marker_index = None
+        clear_obstacle_selection()
+        push_undo()
+        furniture_drag_snapshot = build_furniture_drag_snapshot(primary)
+        return
 
     for i, col in enumerate(collision_polygons):
         if walls_locked:
@@ -6876,7 +6932,7 @@ def main():
                     if dragging_furniture:
                         dragging_furniture.dragging = False
                         dragging_furniture = None
-                    furniture_drag_snapshot = {}
+                    furniture_drag_snapshot = []
                     if dragging_marker and selected_marker_index is not None:
                         marker = layout_markers[selected_marker_index]
                         marker["x_mm"], marker["y_mm"] = snap_world_point(
@@ -6935,26 +6991,9 @@ def main():
                 elif marquee_active:
                     marquee_current = (mx, my)
                 elif dragging_furniture and dragging_furniture.dragging:
-                    old_x, old_y = dragging_furniture.x, dragging_furniture.y
-                    dragging_furniture.x, dragging_furniture.y = wx, wy
-                    dx, dy = dragging_furniture.x - old_x, dragging_furniture.y - old_y
-                    for iid, (ox, oy) in furniture_drag_snapshot.items():
-                        item = furniture_by_instance_id(iid)
-                        if item is None or item is dragging_furniture:
-                            continue
-                        item.x = ox + (dragging_furniture.x - furniture_drag_snapshot[dragging_furniture.instance_id][0])
-                        item.y = oy + (dragging_furniture.y - furniture_drag_snapshot[dragging_furniture.instance_id][1])
-                    collided = False
-                    for iid in furniture_drag_snapshot:
-                        item = furniture_by_instance_id(iid)
-                        if item and check_collision(item, collision_polygons):
-                            collided = True
-                            break
-                    if collided:
-                        for iid, (ox, oy) in furniture_drag_snapshot.items():
-                            item = furniture_by_instance_id(iid)
-                            if item is not None:
-                                item.x, item.y = ox, oy
+                    wx, wy = screen_to_world(mx, my)
+                    if apply_furniture_drag_motion(dragging_furniture, wx, wy):
+                        restore_furniture_drag_snapshot()
                 elif dragging_marker and selected_marker_index is not None:
                     marker = layout_markers[selected_marker_index]
                     marker["x_mm"] = int(round(wx + marker_drag_offset[0]))
