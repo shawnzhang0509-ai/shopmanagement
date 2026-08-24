@@ -29,6 +29,8 @@ HEATMAP_PALETTE: tuple[tuple[int, int, int], ...] = (
     (21, 128, 61),
 )
 HEATMAP_ZERO = HEATMAP_PALETTE[0]  # 0 坪效 = 最差，深红报警
+HEATMAP_TOP = HEATMAP_PALETTE[-1]  # 封顶坪效 = 最好，深绿
+HEATMAP_COLOR_CAP = 1000.0  # 色阶上限：>$1000/㎡·周 一律最好绿，避免离群值压扁色阶
 HEATMAP_BLINK_IDLE = (210, 214, 218)
 
 # 坪效销量聚合：product=单品 SKU，prefix=SKU 前三位，family=Product Family
@@ -317,6 +319,18 @@ def _lerp_palette(t: float) -> tuple[int, int, int]:
     return tuple(int(a[i] + (b[i] - a[i]) * frac) for i in range(3))
 
 
+def heatmap_color_vrange(vmin: float, vmax: float) -> tuple[float, float]:
+    """Clamp vmax used for color scale so one outlier does not wash out the floor."""
+    lo = max(0.0, float(vmin))
+    hi = max(0.0, float(vmax))
+    if hi <= 0:
+        return lo, 1.0
+    capped = min(hi, HEATMAP_COLOR_CAP)
+    if capped <= lo:
+        capped = min(HEATMAP_COLOR_CAP, max(lo + 1.0, hi))
+    return lo, capped
+
+
 def revenue_per_sqm_to_color(
     value: float,
     vmin: float,
@@ -327,8 +341,11 @@ def revenue_per_sqm_to_color(
     """实色 RGB：绿=高坪效，黄=中，红=低；0 坪效固定深红报警。"""
     if value <= 0:
         return HEATMAP_ZERO
-    step = step or adaptive_color_step(vmin, vmax)
-    t = heatmap_normalize_t(value, vmin, vmax, step=step)
+    if value >= HEATMAP_COLOR_CAP:
+        return HEATMAP_TOP
+    cmin, cmax = heatmap_color_vrange(vmin, vmax)
+    step = step or adaptive_color_step(cmin, cmax)
+    t = heatmap_normalize_t(value, cmin, cmax, step=step)
     return _lerp_palette(t)
 
 
