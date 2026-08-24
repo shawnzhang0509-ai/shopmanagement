@@ -41,7 +41,18 @@ DISCONTINUED_LABEL = "停产"
 C_PREVIEW = (52, 152, 219)
 C_PREVIEW_FILL = (214, 234, 248)
 
-FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
+FONT_CANDIDATES = [
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK",
+    "WenQuanYi Micro Hei",
+    "WenQuanYi Zen Hei",
+    "Source Han Sans SC",
+    "SimHei",
+    "DejaVu Sans",
+    "Arial",
+]
 
 FONT_TITLE = None
 FONT_BODY = None
@@ -173,6 +184,56 @@ def init_fonts():
     FONT_MARK = load_font(12)
 
 
+def truncate_text(text: str, font: pygame.font.Font, max_px: int, *, ell: str = "...") -> str:
+    """Truncate text with ellipsis so rendered width fits max_px."""
+    text = str(text or "").strip()
+    if not text or font.size(text)[0] <= max_px:
+        return text
+    while len(text) > 1 and font.size(text + ell)[0] > max_px:
+        text = text[:-1]
+    return text + ell
+
+
+def draw_fitted_text(
+    surface,
+    text: str,
+    font: pygame.font.Font,
+    color,
+    rect: pygame.Rect,
+    *,
+    align: str = "center",
+    pad: int = 6,
+) -> None:
+    """Render text centered/left within rect, truncating if needed."""
+    max_w = max(1, rect.width - pad * 2)
+    label = truncate_text(text, font, max_w)
+    surf = font.render(label, True, color)
+    if align == "left":
+        x = rect.x + pad
+    else:
+        x = rect.centerx - surf.get_width() // 2
+    y = rect.centery - surf.get_height() // 2
+    clip = pygame.Rect(rect.x + pad, rect.y, max_w, rect.height)
+    surface.set_clip(clip)
+    surface.blit(surf, (x, y))
+    surface.set_clip(None)
+
+
+def sanitize_display_text(val, default: str = "") -> str:
+    """Normalize Excel/JSON cell values; NaN and 'nan' become default."""
+    import math
+
+    if val is None:
+        return default
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return default
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", "null", "#n/a", "n/a", "<na>"):
+        return default
+    return s
+
+
 class Button:
     def __init__(self, rect, label, action, primary=False, danger=False, toggle=False):
         self.rect = pygame.Rect(rect)
@@ -215,8 +276,7 @@ class Button:
             bg, fg, border = (241, 245, 249), C_MUTED, C_BORDER
         pygame.draw.rect(surface, bg, self.rect, border_radius=4)
         pygame.draw.rect(surface, border, self.rect, 1, border_radius=4)
-        text = FONT_SMALL.render(self.label, True, fg)
-        surface.blit(text, text.get_rect(center=self.rect.center))
+        draw_fitted_text(surface, self.label, FONT_SMALL, fg, self.rect)
 
 
 class Dropdown:
@@ -258,8 +318,8 @@ class Dropdown:
     def trigger_label(self) -> str:
         text = self.selected_label()
         if self.label:
-            return f"{self.label}  {text}  ▾"
-        return f"{text}  ▾"
+            return f"{self.label}  {text}  v"
+        return f"{text}  v"
 
     def menu_rect(self) -> pygame.Rect:
         count = min(len(self.options), self.max_visible)

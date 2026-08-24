@@ -257,6 +257,9 @@ def revenue_per_sqm(
 
 
 def format_revenue_per_sqm(value: float) -> str:
+    if value is None or (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+        return "$0/㎡·周"
+    value = float(value)
     if value <= 0:
         return "$0/㎡·周"
     if value >= 1000:
