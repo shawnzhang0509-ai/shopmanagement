@@ -32,12 +32,17 @@ from tkinter import filedialog, messagebox
 from roi_lookup import lookup_roi
 from heatmap_metrics import (
     adaptive_color_step,
+    compute_grouped_revenue_per_sqm,
     format_revenue_per_sqm,
     legend_tick_values,
     list_all_week_keys,
     lookup_sales_amount,
+    next_sales_level,
+    normalize_sales_level,
     revenue_per_sqm,
     revenue_per_sqm_to_color,
+    sales_group_key,
+    sales_level_label,
     clear_heatmap_cache,
     HEATMAP_BLINK_IDLE,
     list_recent_week_keys,
@@ -348,6 +353,7 @@ ROI_OVERLAP_BLINK_MS = 750
 heatmap_week_count = 4
 heatmap_week_mode = "single"  # single | range
 heatmap_week_index = -1
+heatmap_sales_level = "product"  # product | prefix | family
 heatmap_vmin = 0.0
 heatmap_vmax = 1.0
 heatmap_color_step = 200.0
@@ -1730,12 +1736,31 @@ def template_sidebar_metrics(name: str, family: str, area: float) -> tuple[float
         heatmap_week_mode,
         heatmap_week_count,
         tuple(active_heatmap_week_keys()),
+        heatmap_sales_level,
+        len(placed_furnitures),
     )
     cached = _sidebar_metric_cache.get(key)
     if cached is not None:
         return cached
-    amt = lookup_sales_amount(name, family, **heatmap_lookup_kwargs())
-    rps = revenue_per_sqm(amt, area, num_weeks=heatmap_week_divisor())
+    kwargs = heatmap_lookup_kwargs()
+    level = heatmap_sales_level
+    week_div = heatmap_week_divisor()
+    if normalize_sales_level(level) == "product":
+        amt = lookup_sales_amount(name, family, level="product", **kwargs)
+        rps = revenue_per_sqm(amt, area, num_weeks=week_div)
+    else:
+        group_key = sales_group_key(name, family, level=level)
+        members = [
+            f
+            for f in placed_furnitures
+            if sales_group_key(f.name, f.product_family, level=level) == group_key
+        ]
+        amt = lookup_sales_amount(name, family, level=level, **kwargs)
+        if members:
+            total_area = sum(furniture_area_mm2(f) for f in members)
+            rps = revenue_per_sqm(amt, total_area, num_weeks=week_div)
+        else:
+            rps = revenue_per_sqm(amt, area, num_weeks=week_div)
     _sidebar_metric_cache[key] = (amt, rps)
     return amt, rps
 
@@ -1784,6 +1809,17 @@ def heatmap_week_caption() -> str:
     return full
 
 
+def toggle_heatmap_sales_level(buttons=None) -> None:
+    global heatmap_sales_level
+    heatmap_sales_level = next_sales_level(heatmap_sales_level)
+    _sidebar_metric_cache.clear()
+    clear_heatmap_cache()
+    mark_heatmap_dirty()
+    ensure_heatmap_metrics()
+    sync_heatmap_week_ui(buttons)
+    show_toast(f"坪效口径: {sales_level_label(heatmap_sales_level)}（同组共享坪效）")
+
+
 def sync_heatmap_week_ui(buttons=None) -> None:
     if not buttons:
         return
@@ -1791,6 +1827,9 @@ def sync_heatmap_week_ui(buttons=None) -> None:
     if "week_mode" in buttons:
         buttons["week_mode"].label = f"周均 {heatmap_week_count}周" if is_range else "单周查看"
         buttons["week_mode"].active = is_range
+    if "sales_level" in buttons:
+        buttons["sales_level"].label = f"坪效: {sales_level_label(heatmap_sales_level)}"
+        buttons["sales_level"].active = heatmap_sales_level != "product"
     if "week_prev" in buttons:
         buttons["week_prev"].enabled = not is_range and bool(heatmap_store_weeks())
     if "week_next" in buttons:
@@ -1854,6 +1893,7 @@ def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> flo
         shop_id=shop_slug,
         num_weeks=heatmap_week_count,
         week_keys=active_heatmap_week_keys(),
+        level="product",
     )
     return revenue_per_sqm(amount, area, num_weeks=heatmap_week_divisor())
 
@@ -1861,11 +1901,39 @@ def compute_furniture_revenue_per_sqm(furn, shop_slug: str | None = None) -> flo
 def recompute_heatmap_metrics() -> None:
     global heatmap_vmin, heatmap_vmax, heatmap_color_step
     slug = current_store_slug()
+    level = heatmap_sales_level
     values: list[float] = []
-    for furn in placed_furnitures:
-        furn.revenue_per_sqm = compute_furniture_revenue_per_sqm(furn, slug)
-        if furn.revenue_per_sqm > 0:
-            values.append(furn.revenue_per_sqm)
+    kwargs = heatmap_lookup_kwargs()
+    week_div = heatmap_week_divisor()
+
+    if normalize_sales_level(level) == "product":
+        for furn in placed_furnitures:
+            furn.revenue_per_sqm = compute_furniture_revenue_per_sqm(furn, slug)
+            if furn.revenue_per_sqm > 0:
+                values.append(furn.revenue_per_sqm)
+    else:
+        groups: dict[str, list] = {}
+        for furn in placed_furnitures:
+            gkey = sales_group_key(furn.name, furn.product_family, level=level)
+            if not gkey:
+                furn.revenue_per_sqm = 0.0
+                continue
+            groups.setdefault(gkey, []).append(furn)
+        for members in groups.values():
+            rps = compute_grouped_revenue_per_sqm(
+                members,
+                area_mm2_fn=furniture_area_mm2,
+                shop_id=slug,
+                num_weeks=heatmap_week_count,
+                week_keys=active_heatmap_week_keys(),
+                week_divisor=week_div,
+                level=level,
+            )
+            for furn in members:
+                furn.revenue_per_sqm = rps
+            if rps > 0:
+                values.append(rps)
+
     heatmap_vmin = min(values) if values else 0.0
     heatmap_vmax = max(values) if values else 1.0
     heatmap_color_step = adaptive_color_step(heatmap_vmin, heatmap_vmax)
@@ -3281,6 +3349,7 @@ def build_layout_data(filepath):
         "heatmap": {
             "week_count": heatmap_week_count,
             "week_mode": heatmap_week_mode,
+            "sales_level": heatmap_sales_level,
             "selected_week": (active_heatmap_week_keys()[0] if heatmap_week_mode == "single" and active_heatmap_week_keys() else ""),
         },
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -3381,7 +3450,7 @@ def refresh_catalog_cache_async():
 def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
-    global heatmap_week_count, heatmap_week_mode, heatmap_week_index, _pending_heatmap_week
+    global heatmap_week_count, heatmap_week_mode, heatmap_week_index, heatmap_sales_level, _pending_heatmap_week
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
@@ -3394,6 +3463,7 @@ def load_layout(filepath, *, keep_undo=False):
     heatmap_week_mode = heatmap.get("week_mode") or heatmap_week_mode
     if heatmap_week_mode not in ("single", "range"):
         heatmap_week_mode = "single"
+    heatmap_sales_level = normalize_sales_level(heatmap.get("sales_level") or heatmap_sales_level)
     clear_heatmap_cache()
     mark_heatmap_dirty()
     _pending_heatmap_week = str(heatmap.get("selected_week") or "").strip() or None
@@ -5624,6 +5694,8 @@ def build_sidebar_ui():
     buttons["range_less"] = Button((pad + w - 76, y, 36, 34), "−", "range_less")
     buttons["range_more"] = Button((pad + w - 36, y, 36, 34), "+", "range_more")
     y += 40
+    buttons["sales_level"] = Button((pad, y, w, 30), "坪效: 单品", "sales_level", toggle=True)
+    y += 36
     buttons["resize"] = Button((pad, y, w, 34), "修改尺寸", "resize")
     y += 42
     buttons["rename"] = Button((pad, y, bw, 34), "重命名", "rename")
@@ -5653,7 +5725,7 @@ def draw_sidebar(buttons, input_box, template_list_top):
         "add_entrance", "add_stairs", "add_cashier", "add_fire_exit", "merge",
         "select_all", "group", "ungroup", "add", "rotate_l", "rotate_r",
         "rotate_mode", "layer_front", "layer_back", "bind_parent", "unbind", "roi_overlap",
-        "week_prev", "week_next", "week_mode", "range_less", "range_more",
+        "week_prev", "week_next", "week_mode", "range_less", "range_more", "sales_level",
         "resize", "rename", "delete", "family_filter",
     ):
         buttons[key].draw(surface)
@@ -5881,6 +5953,8 @@ def handle_toolbar_click(action, buttons):
         navigate_heatmap_week(1, buttons)
     elif action == "week_mode":
         toggle_heatmap_week_mode(buttons)
+    elif action == "sales_level":
+        toggle_heatmap_sales_level(buttons)
     elif action == "range_less":
         change_heatmap_range_weeks(-1, buttons)
     elif action == "range_more":

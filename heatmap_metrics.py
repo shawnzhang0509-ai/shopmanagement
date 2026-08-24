@@ -31,6 +31,56 @@ HEATMAP_PALETTE: tuple[tuple[int, int, int], ...] = (
 HEATMAP_ZERO = HEATMAP_PALETTE[0]  # 0 坪效 = 最差，深红报警
 HEATMAP_BLINK_IDLE = (210, 214, 218)
 
+# 坪效销量聚合：product=单品 SKU，prefix=SKU 前三位，family=Product Family
+SALES_LEVELS: tuple[str, ...] = ("product", "prefix", "family")
+SALES_LEVEL_LABELS: dict[str, str] = {
+    "product": "单品",
+    "prefix": "前三位",
+    "family": "系列",
+}
+
+
+def normalize_sales_level(level: str | None) -> str:
+    key = str(level or "product").strip().lower()
+    if key in SALES_LEVEL_LABELS:
+        return key
+    return "product"
+
+
+def sales_level_label(level: str | None) -> str:
+    return SALES_LEVEL_LABELS.get(normalize_sales_level(level), "单品")
+
+
+def next_sales_level(level: str | None) -> str:
+    cur = normalize_sales_level(level)
+    idx = SALES_LEVELS.index(cur)
+    return SALES_LEVELS[(idx + 1) % len(SALES_LEVELS)]
+
+
+def sku_prefix(sku: str) -> str:
+    """SKU 前三位分组键，如 830-002 → 830，172-307 → 172。"""
+    text = str(sku or "").strip()
+    if not text:
+        return ""
+    if "-" in text:
+        head = text.split("-", 1)[0].strip()
+        if head:
+            return head[:3] if len(head) >= 3 else head
+    compact = re.sub(r"[^a-zA-Z0-9]", "", text)
+    token = compact[:3] if compact else text[:3]
+    return token.upper()
+
+
+def sales_group_key(sku: str, product_family: str = "", *, level: str = "product") -> str:
+    """布局上用于合并坪效的组键。"""
+    lvl = normalize_sales_level(level)
+    if lvl == "family":
+        fam = resolve_product_family(product_family or sku) or product_family or sku
+        return _normalize_key(fam)
+    if lvl == "prefix":
+        return _normalize_key(sku_prefix(sku))
+    return _normalize_key(sku)
+
 
 def _week_key(period: str) -> str:
     text = str(period or "")
@@ -90,9 +140,11 @@ def lookup_sales_amount(
     shop_id: str | None = None,
     num_weeks: int = 4,
     week_keys: list[str] | None = None,
+    level: str = "product",
 ) -> float:
     sku = str(sku or "").strip()
     family = str(product_family or "").strip()
+    lvl = normalize_sales_level(level)
     wk_tuple = tuple(sorted(week_keys)) if week_keys else None
     cache_key = (
         _normalize_key(sku),
@@ -100,6 +152,7 @@ def lookup_sales_amount(
         shop_id,
         wk_tuple,
         max(1, int(num_weeks)),
+        lvl,
     )
     if cache_key in _amount_cache:
         return _amount_cache[cache_key]
@@ -112,31 +165,72 @@ def lookup_sales_amount(
         _amount_cache[cache_key] = 0.0
         return 0.0
 
-    sku_n = _normalize_key(sku)
     amount = 0.0
-    matched_sku = False
+    fam = resolve_product_family(family or sku) or family or sku
+    fam_n = _normalize_key(fam)
+    sku_n = _normalize_key(sku)
+    prefix_n = _normalize_key(sku_prefix(sku))
+
     for row in load_weekly_sales():
         if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
             continue
         if _week_key(row.year_week_period) not in allowed:
             continue
-        if sku_n and _normalize_key(row.sku) == sku_n:
+        row_sku = _normalize_key(row.sku)
+        row_fam = _normalize_key(row.product_family)
+        if lvl == "family":
+            if fam_n and row_fam == fam_n:
+                amount += row.total_amount
+            continue
+        if lvl == "prefix":
+            if prefix_n and _normalize_key(sku_prefix(row.sku)) == prefix_n:
+                amount += row.total_amount
+            continue
+        # product：先 SKU，无匹配再回落系列
+        if sku_n and row_sku == sku_n:
             amount += row.total_amount
-            matched_sku = True
 
-    if not matched_sku:
-        fam = resolve_product_family(family or sku) or family or sku
-        fam_n = _normalize_key(fam)
+    if lvl == "product" and amount <= 0 and fam_n:
         for row in load_weekly_sales():
             if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
                 continue
             if _week_key(row.year_week_period) not in allowed:
                 continue
-            if fam_n and _normalize_key(row.product_family) == fam_n:
+            if _normalize_key(row.product_family) == fam_n:
                 amount += row.total_amount
 
     _amount_cache[cache_key] = amount
     return amount
+
+
+def compute_grouped_revenue_per_sqm(
+    members: list[Any],
+    *,
+    area_mm2_fn,
+    shop_id: str | None = None,
+    num_weeks: int = 4,
+    week_keys: list[str] | None = None,
+    week_divisor: int = 1,
+    level: str = "product",
+) -> float:
+    """系列/前三位：组内共享同一周均坪效 = 组总销量 ÷ 组总面积。"""
+    if not members:
+        return 0.0
+    rep = members[0]
+    sku = getattr(rep, "name", "") or ""
+    family = getattr(rep, "product_family", "") or ""
+    total_area = sum(max(0.0, float(area_mm2_fn(item))) for item in members)
+    if total_area <= 0:
+        return 0.0
+    amount = lookup_sales_amount(
+        sku,
+        family,
+        shop_id=shop_id,
+        num_weeks=num_weeks,
+        week_keys=week_keys,
+        level=level,
+    )
+    return revenue_per_sqm(amount, total_area, num_weeks=week_divisor)
 
 
 def furniture_area_sqm(area_mm2: float) -> float:
