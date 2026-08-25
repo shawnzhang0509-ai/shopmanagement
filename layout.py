@@ -6729,9 +6729,6 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
     def try_open_obstacle_editor(i):
         if not double:
             return False
-        metrics = obstacle_rect_metrics(collision_polygons[i]["points"])
-        if not metrics:
-            return False
         start_edit_obstacle_dialog(i)
         return True
 
