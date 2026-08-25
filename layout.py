@@ -51,7 +51,7 @@ from heatmap_metrics import (
     sales_data_ready,
     week_period_display,
 )
-from ui_common import Dropdown, draw_fitted_text, sanitize_display_text
+from ui_common import Dropdown, InputBox, draw_fitted_text, sanitize_display_text
 
 pygame.init()
 
@@ -305,7 +305,7 @@ SALES_LEVEL_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 ROI_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
     ("off", "ROI · 关闭"),
-    ("on", "ROI · 重叠闪烁"),
+    ("on", "ROI · 交叠闪烁"),
 )
 CANVAS_MODE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
     ("edit", "画布 · 编辑（流畅）"),
@@ -888,7 +888,7 @@ def complete_bind_to_parent(parent):
     push_undo()
     child.attach_to = parent.instance_id
     pending_bind_child = None
-    show_toast(f"已绑定：{child.name} → {parent.name}（拖父件时联动；可开「ROI重叠闪烁」查看坪效）")
+    show_toast(f"已绑定：{child.name} → {parent.name}（拖父件时联动；可开「ROI交叠闪烁」查看坪效）")
     return True
 
 
@@ -913,9 +913,9 @@ def toggle_roi_overlap_mode(buttons=None):
     if buttons and "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_mode
     show_toast(
-        "已开启 ROI 重叠闪烁：叠放家具将轮流置顶显示坪效"
+        "已开启 ROI 交叠闪烁：叠放家具将轮流置顶显示坪效"
         if show_roi_overlap_mode
-        else "已关闭 ROI 重叠模式"
+        else "已关闭 ROI 交叠闪烁"
     )
 
 
@@ -1067,47 +1067,6 @@ class Button:
         pygame.draw.rect(surface, bg, self.rect, border_radius=8)
         pygame.draw.rect(surface, border, self.rect, 1, border_radius=8)
         draw_fitted_text(surface, self.label, FONT_SMALL, fg, self.rect)
-
-
-class InputBox:
-    def __init__(self, rect, placeholder=""):
-        self.rect = pygame.Rect(rect)
-        self.text = ""
-        self.placeholder = placeholder
-        self.active = False
-
-    def contains(self, pos):
-        return self.rect.collidepoint(ui_pos(pos))
-
-    def get_text(self) -> str:
-        return self.text.strip()
-
-    def handle_event(self, event) -> bool:
-        if not self.active:
-            return False
-        if event.type == pygame.TEXTINPUT and event.text:
-            self.text += event.text
-            return True
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_BACKSPACE:
-                if self.text:
-                    self.text = self.text[:-1]
-                return True
-            if event.key == pygame.K_ESCAPE:
-                self.active = False
-                return True
-        return False
-
-    def draw(self, surface):
-        bg = (255, 255, 255) if self.active else (248, 250, 252)
-        pygame.draw.rect(surface, bg, self.rect, border_radius=8)
-        border = C_ACCENT if self.active else C_BORDER
-        pygame.draw.rect(surface, border, self.rect, 2 if self.active else 1, border_radius=8)
-        display = self.text if self.text else self.placeholder
-        color = C_TEXT if self.text else C_MUTED
-        prefix = "| " if self.active and self.text else ""
-        clip = pygame.Rect(self.rect.x + 10, self.rect.y + 6, self.rect.width - 20, self.rect.height - 12)
-        draw_fitted_text(surface, prefix + display, FONT_SMALL, color, clip, align="left", pad=0)
 
 
 # ── 几何工具 ────────────────────────────────────────────────
@@ -2168,11 +2127,11 @@ def apply_roi_dropdown(value: str, buttons=None, dropdowns=None) -> None:
     invalidate_overlap_groups_cache()
     sync_heatmap_week_ui(buttons, dropdowns)
     if want_on and canvas_full_mode():
-        show_toast("ROI 重叠闪烁已开启")
+        show_toast("ROI 交叠闪烁已开启")
     elif not want_on:
-        show_toast("ROI 重叠闪烁已关闭")
+        show_toast("ROI 交叠闪烁已关闭")
     elif want_on:
-        show_toast("已切换到完整坪效并开启 ROI 重叠")
+        show_toast("已切换到完整坪效并开启 ROI 交叠闪烁")
 
 
 def apply_canvas_mode_dropdown(value: str, buttons=None, dropdowns=None) -> None:
@@ -2188,7 +2147,7 @@ def apply_canvas_mode_dropdown(value: str, buttons=None, dropdowns=None) -> None
     if canvas_full_mode():
         mark_heatmap_dirty()
         ensure_heatmap_metrics()
-        show_toast("完整坪效：缩略图、详细标签、ROI 重叠")
+        show_toast("完整坪效：缩略图、详细标签、ROI 交叠闪烁")
     else:
         show_toast("编辑模式：流畅摆场（热力色块保留）")
 
@@ -3575,6 +3534,42 @@ def load_furniture_templates(json_path):
 
 
 furniture_templates = []
+
+
+def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
+    """测绘/模板更新后热刷新，无需关闭重开布局编辑器。"""
+    global furniture_templates, _display_items_cache, template_scroll_offset, selected_template_index
+    try:
+        furniture_templates = load_furniture_templates("furniture_templates.json")
+    except Exception as exc:
+        show_toast(f"模板刷新失败: {exc}")
+        return False
+
+    if reload_display:
+        _display_items_cache = None
+        try:
+            _load_display_items_cache()
+        except Exception:
+            pass
+
+    clear_furniture_display_cache()
+    invalidate_overlap_groups_cache()
+    clear_heatmap_cache()
+    mark_heatmap_dirty()
+
+    try:
+        from product_images import clear_image_cache
+
+        clear_image_cache()
+    except Exception:
+        pass
+
+    template_scroll_offset = 0
+    if selected_template_index >= len(furniture_templates):
+        selected_template_index = max(0, len(furniture_templates) - 1)
+
+    show_toast(f"已刷新 {len(furniture_templates)} 个家具模板（测绘/Display 已同步）")
+    return True
 
 
 # ── 数据持久化 ──────────────────────────────────────────────
@@ -5636,6 +5631,29 @@ def cycle_family_filter(buttons=None):
         buttons["family_filter"].label = f"系列: {label}"
 
 
+def _template_search_blob(t) -> str:
+    from heatmap_metrics import sku_prefix
+
+    parts = [
+        t.name or "",
+        sanitize_display_text(getattr(t, "product_family", ""), ""),
+        sku_prefix(t.name) if t.name else "",
+    ]
+    return " ".join(p for p in parts if p)
+
+
+def _matches_template_search(q: str, t) -> bool:
+    if not q:
+        return True
+    blob = _template_search_blob(t)
+    q_lower = q.lower()
+    if q_lower in blob.lower() or q in blob:
+        return True
+    if getattr(t, "is_discontinued", False) and q_lower in ("停产", "discontinued", "dc"):
+        return True
+    return False
+
+
 def filtered_templates():
     items = list(enumerate(furniture_templates))
     if template_family_filter:
@@ -5644,18 +5662,9 @@ def filtered_templates():
             for i, t in items
             if sanitize_display_text(getattr(t, "product_family", ""), "未分类") or "未分类" == template_family_filter
         ]
-    q = search_text.strip().lower()
+    q = search_text.strip()
     if q:
-        from heatmap_metrics import sku_prefix
-
-        items = [
-            (i, t)
-            for i, t in items
-            if q in t.name.lower()
-            or q in sanitize_display_text(getattr(t, "product_family", ""), "").lower()
-            or q in sku_prefix(t.name).lower()
-            or (getattr(t, "is_discontinued", False) and q in ("停产", "discontinued", "dc"))
-        ]
+        items = [(i, t) for i, t in items if _matches_template_search(q, t)]
     return items
 
 
@@ -6183,12 +6192,13 @@ def build_sidebar_ui():
     y = SIDEBAR_HEADER_H
     buttons: dict[str, Button] = {}
 
-    # 顶栏：保存 / 撤销 / 返回 + 布局工具折叠
-    tools_label = "展开 布局工具" if sidebar_tools_expanded else "收起 布局工具"
-    btn_w3 = (w - SIDEBAR_BTN_GAP * 2) // 3
-    buttons["save"] = Button((pad, y, btn_w3, SIDEBAR_BTN_H), "保存", "save")
-    buttons["undo"] = Button((pad + btn_w3 + SIDEBAR_BTN_GAP, y, btn_w3, SIDEBAR_BTN_H), "撤销", "undo")
-    buttons["home"] = Button((pad + (btn_w3 + SIDEBAR_BTN_GAP) * 2, y, btn_w3, SIDEBAR_BTN_H), "返回", "home")
+    # 顶栏：保存 / 撤销 / 刷新 / 返回 + 布局工具折叠
+    tools_label = "+ 展开布局工具" if not sidebar_tools_expanded else "- 收起布局工具"
+    btn_w4 = (w - SIDEBAR_BTN_GAP * 3) // 4
+    buttons["save"] = Button((pad, y, btn_w4, SIDEBAR_BTN_H), "保存", "save")
+    buttons["undo"] = Button((pad + btn_w4 + SIDEBAR_BTN_GAP, y, btn_w4, SIDEBAR_BTN_H), "撤销", "undo")
+    buttons["refresh"] = Button((pad + (btn_w4 + SIDEBAR_BTN_GAP) * 2, y, btn_w4, SIDEBAR_BTN_H), "刷新", "refresh")
+    buttons["home"] = Button((pad + (btn_w4 + SIDEBAR_BTN_GAP) * 3, y, btn_w4, SIDEBAR_BTN_H), "返回", "home")
     y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
     buttons["tools_toggle"] = Button((pad, y, w, SIDEBAR_BTN_H - 2), tools_label, "tools_toggle", toggle=True)
     buttons["tools_toggle"].active = sidebar_tools_expanded
@@ -6283,10 +6293,10 @@ def build_sidebar_ui():
     # ── 核心：家具模板（占满剩余高度）──
     footer_h = (SIDEBAR_BTN_H + 4) + 8 + SIDEBAR_BTN_H + 16
     template_rows_bottom = SCREEN_HEIGHT - footer_h - 8
-    input_box = InputBox((pad, y, w, 34), placeholder="搜索家具模板... (Ctrl+F)")
-    input_box.text = search_text
+    input_box = InputBox((pad, y, w, 34), placeholder="搜索名称/系列/编号… (Ctrl+F)")
+    input_box.set_text(search_text)
     if search_box_active:
-        input_box.active = True
+        input_box.activate()
     y += 38
     dropdowns["family"] = Dropdown(
         (pad, y, w, 28),
@@ -6344,7 +6354,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     surface.blit(FONT_MARK.render(shop_hint, True, C_MUTED), (12, 50))
 
     core_keys = (
-        "save", "undo", "home", "tools_toggle",
+        "save", "undo", "refresh", "home", "tools_toggle",
         "week_prev", "week_next", "walls_lock",
         "add", "resize", "rename", "delete",
     )
@@ -6368,7 +6378,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     if "roi_overlap" in buttons:
         buttons["roi_overlap"].active = show_roi_overlap_mode
     if "tools_toggle" in buttons:
-        buttons["tools_toggle"].label = "展开 布局工具" if sidebar_tools_expanded else "收起 布局工具"
+        buttons["tools_toggle"].label = "+ 展开布局工具" if not sidebar_tools_expanded else "- 收起布局工具"
         buttons["tools_toggle"].active = sidebar_tools_expanded
     if "walls_lock" in buttons:
         buttons["walls_lock"].label = "墙体已锁定" if walls_locked else "锁定墙体"
@@ -6493,6 +6503,9 @@ def handle_toolbar_click(action, buttons, dropdowns=None):
         save_current_layout()
     elif action == "undo":
         undo_layout()
+    elif action == "refresh":
+        if refresh_editor_catalog():
+            return True
     elif action == "home":
         go_to_store_home()
     elif action == "rename_store":
@@ -6607,10 +6620,12 @@ def handle_sidebar_click(mx, my, buttons, input_box, dropdowns, template_rows_to
 
     if input_box.contains((mx, my)):
         search_box_active = True
-        input_box.active = True
+        input_box.activate()
+        input_box.refresh_text_input()
         return
-    search_box_active = False
-    input_box.active = False
+    if search_box_active:
+        search_box_active = False
+        input_box.deactivate()
 
     for btn in buttons.values():
         if btn.contains((mx, my)):
@@ -7155,7 +7170,7 @@ def main():
                         template_scroll_offset = 0
                     elif event.key == pygame.K_ESCAPE:
                         search_box_active = False
-                        input_box.active = False
+                        input_box.deactivate()
                 elif drawing_polygon:
                     if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                         finish_obstacle()
@@ -7171,7 +7186,8 @@ def main():
                     mods = pygame.key.get_mods()
                     if event.key == pygame.K_f and mods & pygame.KMOD_CTRL and input_box:
                         search_box_active = True
-                        input_box.active = True
+                        input_box.activate()
+                        input_box.refresh_text_input()
                         continue
                     if not search_box_active and not renaming_store and not editing_obstacle_dialog and not editing_marker_dialog:
                         if event.key == pygame.K_z and mods & pygame.KMOD_CTRL:
