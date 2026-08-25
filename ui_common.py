@@ -318,8 +318,18 @@ class Dropdown:
     def trigger_label(self) -> str:
         text = self.selected_label()
         if self.label:
-            return f"{self.label}  {text}  v"
-        return f"{text}  v"
+            return f"{self.label}  {text}"
+        return text
+
+    def _draw_chevron(self, surface, fg) -> None:
+        cx = self.rect.right - 14
+        cy = self.rect.centery
+        half = 4
+        if self.open:
+            pts = [(cx - half, cy + 2), (cx + half, cy + 2), (cx, cy - 3)]
+        else:
+            pts = [(cx - half, cy - 2), (cx + half, cy - 2), (cx, cy + 3)]
+        pygame.draw.polygon(surface, fg, pts)
 
     def menu_rect(self) -> pygame.Rect:
         count = min(len(self.options), self.max_visible)
@@ -364,10 +374,11 @@ class Dropdown:
         label_surf = FONT_SMALL.render(self.trigger_label(), True, fg)
         clip = label_surf.get_rect(centery=self.rect.centery)
         clip.x = self.rect.x + 8
-        clip.width = self.rect.width - 16
+        clip.width = self.rect.width - 28
         surface.set_clip(clip)
         surface.blit(label_surf, (self.rect.x + 8, self.rect.centery - label_surf.get_height() // 2))
         surface.set_clip(None)
+        self._draw_chevron(surface, fg)
 
         if draw_menu and self.open and self.options:
             self.draw_menu(surface, mouse_pos)
