@@ -6195,6 +6195,7 @@ def build_sidebar_ui():
     # 顶栏：保存 / 撤销 / 刷新 / 返回 + 布局工具折叠
     tools_label = "+ 展开布局工具" if not sidebar_tools_expanded else "- 收起布局工具"
     btn_w4 = (w - SIDEBAR_BTN_GAP * 3) // 4
+    btn_w3 = (w - SIDEBAR_BTN_GAP * 2) // 3
     buttons["save"] = Button((pad, y, btn_w4, SIDEBAR_BTN_H), "保存", "save")
     buttons["undo"] = Button((pad + btn_w4 + SIDEBAR_BTN_GAP, y, btn_w4, SIDEBAR_BTN_H), "撤销", "undo")
     buttons["refresh"] = Button((pad + (btn_w4 + SIDEBAR_BTN_GAP) * 2, y, btn_w4, SIDEBAR_BTN_H), "刷新", "refresh")
