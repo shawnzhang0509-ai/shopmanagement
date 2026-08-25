@@ -364,6 +364,7 @@ obstacle_edit_length_rect = None
 obstacle_edit_width_rect = None
 obstacle_edit_show_label = False
 obstacle_edit_show_label_rect = None
+obstacle_edit_size_enabled = True
 canvas_last_click_time = 0
 canvas_last_click_pos = None
 DOUBLE_CLICK_MS = 450
@@ -4437,6 +4438,7 @@ def _sync_obstacle_edit_ime():
 def cancel_obstacle_edit_dialog():
     global editing_obstacle_dialog, obstacle_edit_index, obstacle_edit_name, obstacle_edit_length
     global obstacle_edit_width, obstacle_edit_focus, obstacle_edit_composition, obstacle_edit_show_label
+    global obstacle_edit_size_enabled
     editing_obstacle_dialog = False
     obstacle_edit_index = None
     obstacle_edit_name = ""
@@ -4445,6 +4447,7 @@ def cancel_obstacle_edit_dialog():
     obstacle_edit_focus = "name"
     obstacle_edit_composition = ""
     obstacle_edit_show_label = False
+    obstacle_edit_size_enabled = True
     try:
         pygame.key.stop_text_input()
     except Exception:
@@ -4454,35 +4457,40 @@ def cancel_obstacle_edit_dialog():
 def start_edit_obstacle_dialog(index=None):
     global editing_obstacle_dialog, obstacle_edit_index, obstacle_edit_name, obstacle_edit_length
     global obstacle_edit_width, obstacle_edit_focus, obstacle_edit_composition, obstacle_edit_buttons
-    global obstacle_edit_show_label
+    global obstacle_edit_show_label, obstacle_edit_size_enabled
     if index is None:
         if len(selected_collisions) != 1:
-            show_toast("请单选一个长方形障碍或墙体")
+            show_toast("请单选一个障碍或墙体")
             return
         index = selected_collision
     if index < 0 or index >= len(collision_polygons):
         return
     metrics = obstacle_rect_metrics(collision_polygons[index]["points"])
-    if not metrics:
-        show_toast("仅支持长方形障碍/墙体（多边形请重新绘制）")
-        return
     cancel_rename_dialog()
     cancel_wall_size_edit()
     cancel_marker_edit_dialog()
     toggle_draw_obstacle(False)
-    _, _, length_mm, width_mm = metrics
+    obstacle_edit_size_enabled = metrics is not None
+    if metrics:
+        _, _, length_mm, width_mm = metrics
+        obstacle_edit_length = f"{length_mm / 1000:g}"
+        obstacle_edit_width = f"{width_mm / 1000:g}"
+    else:
+        obstacle_edit_length = ""
+        obstacle_edit_width = ""
     editing_obstacle_dialog = True
     obstacle_edit_index = index
     obstacle_edit_name = collision_polygons[index].get("name", "")
-    obstacle_edit_length = f"{length_mm / 1000:g}"
-    obstacle_edit_width = f"{width_mm / 1000:g}"
     obstacle_edit_focus = "name"
     obstacle_edit_composition = ""
     obstacle_edit_show_label = bool(collision_polygons[index].get("user_named"))
     obstacle_edit_buttons = build_obstacle_edit_dialog_buttons()
     set_obstacle_selection([index])
     _sync_obstacle_edit_ime()
-    show_toast("可修改名称与尺寸，Enter 确认")
+    if obstacle_edit_size_enabled:
+        show_toast("可修改名称与尺寸，Enter 确认")
+    else:
+        show_toast("不规则形状：可改名称；改尺寸请重新绘制或融合成长方形")
 
 
 def apply_obstacle_edit_dialog():
@@ -4498,24 +4506,27 @@ def apply_obstacle_edit_dialog():
         if i != obstacle_edit_index and col.get("name") == name:
             show_toast(f"名称「{name}」已被使用")
             return
-    try:
-        length_m = float(obstacle_edit_length.strip())
-        width_m = float(obstacle_edit_width.strip())
-    except ValueError:
-        show_toast("请输入有效的长宽数字（米）")
-        return
-    if length_m <= 0 or width_m <= 0:
-        show_toast("长宽必须大于 0")
-        return
     idx = obstacle_edit_index
     col = collision_polygons[idx]
     old_name = col.get("name", "")
-    metrics = obstacle_rect_metrics(col["points"])
-    old_length_m = metrics[2] / 1000 if metrics else 0
-    old_width_m = metrics[3] / 1000 if metrics else 0
     rename_changed = name != old_name
-    size_changed = abs(length_m - old_length_m) > 0.001 or abs(width_m - old_width_m) > 0.001
     label_changed = bool(col.get("user_named")) != obstacle_edit_show_label
+    size_changed = False
+    length_m = width_m = 0.0
+    if obstacle_edit_size_enabled:
+        try:
+            length_m = float(obstacle_edit_length.strip())
+            width_m = float(obstacle_edit_width.strip())
+        except ValueError:
+            show_toast("请输入有效的长宽数字（米）")
+            return
+        if length_m <= 0 or width_m <= 0:
+            show_toast("长宽必须大于 0")
+            return
+        metrics = obstacle_rect_metrics(col["points"])
+        old_length_m = metrics[2] / 1000 if metrics else 0
+        old_width_m = metrics[3] / 1000 if metrics else 0
+        size_changed = abs(length_m - old_length_m) > 0.001 or abs(width_m - old_width_m) > 0.001
     if not rename_changed and not size_changed and not label_changed:
         cancel_obstacle_edit_dialog()
         return
@@ -4569,12 +4580,14 @@ def handle_obstacle_edit_dialog_click(mx, my):
         _sync_obstacle_edit_ime()
         return True
     if obstacle_edit_length_rect and obstacle_edit_length_rect.collidepoint(mx, my):
-        obstacle_edit_focus = "length"
-        _sync_obstacle_edit_ime()
+        if obstacle_edit_size_enabled:
+            obstacle_edit_focus = "length"
+            _sync_obstacle_edit_ime()
         return True
     if obstacle_edit_width_rect and obstacle_edit_width_rect.collidepoint(mx, my):
-        obstacle_edit_focus = "width"
-        _sync_obstacle_edit_ime()
+        if obstacle_edit_size_enabled:
+            obstacle_edit_focus = "width"
+            _sync_obstacle_edit_ime()
         return True
     for btn in obstacle_edit_buttons.values():
         if btn.contains((mx, my)):
@@ -4658,9 +4671,12 @@ def handle_obstacle_edit_dialog_key(event):
     elif event.key == pygame.K_ESCAPE:
         cancel_obstacle_edit_dialog()
     elif event.key == pygame.K_TAB:
-        order = ("name", "length", "width")
-        i = (order.index(obstacle_edit_focus) + 1) % len(order)
-        obstacle_edit_focus = order[i]
+        if obstacle_edit_size_enabled:
+            order = ("name", "length", "width")
+            i = (order.index(obstacle_edit_focus) + 1) % len(order)
+            obstacle_edit_focus = order[i]
+        else:
+            obstacle_edit_focus = "name"
         _sync_obstacle_edit_ime()
     elif event.key == pygame.K_BACKSPACE:
         _note_backspace_pressed()
@@ -4668,6 +4684,8 @@ def handle_obstacle_edit_dialog_key(event):
     elif event.unicode:
         ch = event.unicode
         if obstacle_edit_focus == "name":
+            return
+        if not obstacle_edit_size_enabled:
             return
         field = obstacle_edit_length if obstacle_edit_focus == "length" else obstacle_edit_width
         if ch.isdigit() and len(field) < 6:
@@ -5000,19 +5018,27 @@ def draw_obstacle_edit_dialog(surface):
     if obstacle_edit_focus == "name":
         name_text += "|"
     surface.blit(FONT_BODY.render(name_text, True, C_TEXT), (obstacle_edit_name_rect.x + 10, obstacle_edit_name_rect.y + 8))
-    surface.blit(FONT_SMALL.render("长 (m)", True, C_TEXT), (box.x + 20, box.y + 138))
-    obstacle_edit_length_rect = pygame.Rect(box.x + 20, box.y + 158, 180, 36)
-    surface.blit(FONT_SMALL.render("宽 (m)", True, C_TEXT), (box.x + 220, box.y + 138))
-    obstacle_edit_width_rect = pygame.Rect(box.x + 220, box.y + 158, 180, 36)
-    for rect, text, focused in (
-        (obstacle_edit_length_rect, obstacle_edit_length, obstacle_edit_focus == "length"),
-        (obstacle_edit_width_rect, obstacle_edit_width, obstacle_edit_focus == "width"),
-    ):
-        pygame.draw.rect(surface, (248, 250, 252), rect, border_radius=8)
-        pygame.draw.rect(surface, C_ACCENT if focused else C_BORDER, rect, 2 if focused else 1, border_radius=8)
-        surface.blit(FONT_BODY.render(text + ("|" if focused else ""), True, C_TEXT), (rect.x + 10, rect.y + 8))
+    if obstacle_edit_size_enabled:
+        surface.blit(FONT_SMALL.render("长 (m)", True, C_TEXT), (box.x + 20, box.y + 138))
+        obstacle_edit_length_rect = pygame.Rect(box.x + 20, box.y + 158, 180, 36)
+        surface.blit(FONT_SMALL.render("宽 (m)", True, C_TEXT), (box.x + 220, box.y + 138))
+        obstacle_edit_width_rect = pygame.Rect(box.x + 220, box.y + 158, 180, 36)
+        for rect, text, focused in (
+            (obstacle_edit_length_rect, obstacle_edit_length, obstacle_edit_focus == "length"),
+            (obstacle_edit_width_rect, obstacle_edit_width, obstacle_edit_focus == "width"),
+        ):
+            pygame.draw.rect(surface, (248, 250, 252), rect, border_radius=8)
+            pygame.draw.rect(surface, C_ACCENT if focused else C_BORDER, rect, 2 if focused else 1, border_radius=8)
+            surface.blit(FONT_BODY.render(text + ("|" if focused else ""), True, C_TEXT), (rect.x + 10, rect.y + 8))
+        label_y = box.y + 206
+    else:
+        obstacle_edit_length_rect = None
+        obstacle_edit_width_rect = None
+        hint = "L 形/多边形障碍：此处仅可改名称；改尺寸请重新绘制"
+        surface.blit(FONT_SMALL.render(hint, True, C_MUTED), (box.x + 20, box.y + 142))
+        label_y = box.y + 178
     label_text = "在画布显示名称"
-    obstacle_edit_show_label_rect = pygame.Rect(box.x + 20, box.y + 206, 22, 22)
+    obstacle_edit_show_label_rect = pygame.Rect(box.x + 20, label_y, 22, 22)
     draw_inline_checkbox(surface, obstacle_edit_show_label_rect, obstacle_edit_show_label, label_text)
     for btn in obstacle_edit_buttons.values():
         btn.draw(surface)
