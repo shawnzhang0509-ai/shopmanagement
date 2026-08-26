@@ -35,6 +35,13 @@ if not exist "furniture_templates.json" (
     exit /b 1
 )
 
+if not exist "data" mkdir data
+if not exist "data\product_stock_price.xlsx" (
+    echo [提示] 首次缺少仓库库存/价格数据，正在抓取（独立于 Display）...
+    python scripts\grab_stock_price.py
+    echo.
+)
+
 echo 正在启动 layout.py ...
 echo.
 python layout.py

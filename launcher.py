@@ -76,7 +76,7 @@ class LauncherApp:
             cards,
             0,
             "① 数据抓取",
-            "Display 库存 · 周销量 · ROI 同步",
+            "Display 库存 · 周销量 · 仓库库存/价格 · ROI 同步",
             ACCENT,
             self.show_data_menu,
         )
@@ -107,12 +107,15 @@ class LauncherApp:
         ttk.Button(row, text="周销量抓取", command=lambda: self.launch_script("scripts/grab_sales.py", "周销量")).pack(
             side="left", padx=(0, 8)
         )
+        ttk.Button(row, text="仓库库存/价格", command=lambda: self.launch_script("scripts/grab_stock_price.py", "库存价格")).pack(
+            side="left", padx=(0, 8)
+        )
         ttk.Button(row, text="同步 ROI 到模板", command=lambda: self.launch_script("scripts/update_roi.py", "ROI")).pack(
             side="left", padx=(0, 8)
         )
         tk.Label(
             data_frame,
-            text="Display 抓取默认同时导出周销量；ROI 同步可在抓取工具里勾选，或点「同步 ROI 到模板」",
+            text="Display 抓取默认同时导出周销量；仓库库存/价格用 grab_stock_price.bat 单独抓取；ROI 可在抓取工具勾选或点「同步 ROI」",
             font=("Microsoft YaHei UI", 9),
             fg=MUTED,
         ).pack(anchor="w", pady=(8, 0))
@@ -216,7 +219,7 @@ class LauncherApp:
         if not os.path.isfile(path):
             messagebox.showerror("找不到文件", path, parent=self.root)
             return
-        if "grab_sales" in rel_path or "grab_display" in rel_path or "update_roi" in rel_path:
+        if "grab_sales" in rel_path or "grab_display" in rel_path or "grab_stock_price" in rel_path or "update_roi" in rel_path:
             if not self._require_deps(["pymssql", "sqlalchemy", "pandas", "openpyxl"]):
                 return
         cmd = [sys.executable, path]
