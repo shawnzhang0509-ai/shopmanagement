@@ -137,6 +137,14 @@ def lookup_stock_price(sku_or_name: str) -> StockPriceRow | None:
     return None
 
 
+def format_stock_badge(sku_or_name: str) -> str:
+    """画布标签用：北6 南1"""
+    row = lookup_stock_price(sku_or_name)
+    if not row:
+        return ""
+    return row.stock_label(compact=True)
+
+
 def format_stock_price_hint(sku_or_name: str, *, compact: bool = True) -> str:
     row = lookup_stock_price(sku_or_name)
     if not row:

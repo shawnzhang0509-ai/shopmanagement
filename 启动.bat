@@ -17,6 +17,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if not exist "data" mkdir data
+if not exist "data\product_stock_price.xlsx" (
+    echo [提示] 首次缺少仓库库存/价格，正在后台抓取（可单独运行 grab_stock_price.bat）...
+    python scripts\grab_stock_price.py
+    echo.
+)
+
 python launcher.py
 if errorlevel 1 (
     echo.

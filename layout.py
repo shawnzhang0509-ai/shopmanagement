@@ -51,7 +51,7 @@ from heatmap_metrics import (
     sales_data_ready,
     week_period_display,
 )
-from stock_price_lookup import format_stock_price_hint, reload_stock_prices
+from stock_price_lookup import format_stock_badge, format_stock_price_hint, reload_stock_prices
 from ui_common import Dropdown, InputBox, draw_fitted_text, sanitize_display_text
 
 pygame.init()
@@ -2435,7 +2435,11 @@ class Furniture:
             if not fast_view and span >= 24 and not blink_idle:
                 name = _truncate_label(self.name, FONT_TINY, max(20, int(span * 0.88)))
                 surf = FONT_TINY.render(name, True, C_TEXT)
-                surface.blit(surf, surf.get_rect(center=(int(cx), int(cy))))
+                surface.blit(surf, surf.get_rect(center=(int(cx), int(cy - 6))))
+                badge = format_stock_badge(self.name)
+                if badge and span >= 36:
+                    bsurf = FONT_TINY.render(badge, True, C_MUTED)
+                    surface.blit(bsurf, bsurf.get_rect(center=(int(cx), int(cy + 8))))
             self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, max(16, int(span * 0.5)), 16)
             return
 
@@ -2484,6 +2488,7 @@ class Furniture:
                 selected=selected,
                 span_px=span,
                 is_discontinued=self.is_discontinued,
+                stock_badge=format_stock_badge(self.name),
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
@@ -5839,8 +5844,9 @@ def draw_furniture_metric_tag(
     selected: bool = False,
     span_px: float = FURNITURE_LABEL_REF_SPAN_PX,
     is_discontinued: bool = False,
+    stock_badge: str = "",
 ) -> pygame.Rect:
-    """底部标签：SKU + Product Family + 周均坪效；停产产品加红色标识。"""
+    """底部标签：SKU + Product Family + 周均坪效 + 仓库库存；停产产品加红色标识。"""
     scale = furniture_label_scale(span_px)
     pad_x = max(4, int(7 * scale))
     pad_y = max(3, int(5 * scale))
@@ -5864,6 +5870,9 @@ def draw_furniture_metric_tag(
         line_font = cached_label_font(max(10, int(11 * scale)), bold=selected)
         line_text = _truncate_label(line_text, line_font, max_inner)
         line_surfs = [line_font.render(line_text, True, C_TEXT if not is_discontinued else C_DISCONTINUED)]
+        if stock_badge:
+            stock_font = cached_label_font(max(9, int(10 * scale)), bold=False)
+            line_surfs.append(stock_font.render(stock_badge, True, C_MUTED))
     else:
         sku_text = _truncate_label(sku, sku_font, max_inner)
         sku_surf = sku_font.render(sku_text, True, C_TEXT)
@@ -5884,6 +5893,9 @@ def draw_furniture_metric_tag(
         if family_surf is not None:
             line_surfs.append(family_surf)
         line_surfs.append(metric_surf)
+        if stock_badge:
+            stock_font = cached_label_font(max(9, int(10 * scale)), bold=False)
+            line_surfs.append(stock_font.render(stock_badge, True, C_MUTED))
     inner_w = max(s.get_width() for s in line_surfs)
     inner_h = sum(s.get_height() for s in line_surfs) + line_gap * (len(line_surfs) - 1)
     pill_w = inner_w + pad_x * 2 + stripe_w + max(2, int(4 * scale))
