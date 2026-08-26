@@ -44,6 +44,11 @@ class StockPriceRow:
             f"北岛 {self.north_island_total} · GC {self.gerald_connolly_stock}"
         )
 
+    def price_badge_compact(self) -> str:
+        if self.on_promotion and self.sale_price < self.unit_price:
+            return f"${self.sale_price:,.0f}促"
+        return f"${self.sale_price:,.0f}"
+
 
 def _norm_key(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
@@ -138,11 +143,11 @@ def lookup_stock_price(sku_or_name: str) -> StockPriceRow | None:
 
 
 def format_stock_badge(sku_or_name: str) -> str:
-    """画布标签用：北6 南1"""
+    """画布标签用：北6 南1 · $608"""
     row = lookup_stock_price(sku_or_name)
     if not row:
         return ""
-    return row.stock_label(compact=True)
+    return f"{row.stock_label(compact=True)} · {row.price_badge_compact()}"
 
 
 def format_stock_price_hint(sku_or_name: str, *, compact: bool = True) -> str:

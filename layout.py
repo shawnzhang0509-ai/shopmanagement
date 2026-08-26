@@ -5827,6 +5827,15 @@ def display_family_label(family: str, sku: str) -> str:
     return fam
 
 
+def family_tag_label(family: str, sku: str) -> tuple[str, bool]:
+    """画布标签系列行：(显示文字, 是否未分配)。"""
+    fam = sanitize_display_text(family, "")
+    sku_clean = sanitize_display_text(sku, "")
+    if not fam or fam == sku_clean or fam in ("未分类", "unnamed"):
+        return "未分配", True
+    return fam, False
+
+
 def obstacle_display_name(raw: str) -> str:
     name = sanitize_display_text(raw, "")
     return re.sub(r"_copy\d*$", "", name, flags=re.I)
@@ -5877,12 +5886,11 @@ def draw_furniture_metric_tag(
         sku_text = _truncate_label(sku, sku_font, max_inner)
         sku_surf = sku_font.render(sku_text, True, C_TEXT)
 
-        family_text = display_family_label(product_family, sku)
-        family_surf = None
-        if family_text:
-            family_font = cached_label_font(family_px, bold=False)
-            family_text = _truncate_label(family_text, family_font, max_inner)
-            family_surf = family_font.render(family_text, True, C_FAMILY)
+        family_text, family_unassigned = family_tag_label(product_family, sku)
+        family_font = cached_label_font(family_px, bold=family_unassigned)
+        family_text = _truncate_label(family_text, family_font, max_inner)
+        family_color = C_DISCONTINUED if family_unassigned else C_FAMILY
+        family_surf = family_font.render(family_text, True, family_color)
 
         metric_surf = metric_font.render(metric, True, metric_rgb)
 
@@ -5890,8 +5898,7 @@ def draw_furniture_metric_tag(
         if is_discontinued:
             dc_font = cached_label_font(max(10, int(11 * scale)), bold=True)
             line_surfs.append(dc_font.render("停产", True, C_DISCONTINUED))
-        if family_surf is not None:
-            line_surfs.append(family_surf)
+        line_surfs.append(family_surf)
         line_surfs.append(metric_surf)
         if stock_badge:
             stock_font = cached_label_font(max(9, int(10 * scale)), bold=False)
