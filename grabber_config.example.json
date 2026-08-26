@@ -8,6 +8,8 @@
   "output_json": "data/display_cache.json",
   "sales_sql_file": "sql/weekly_sales.sql",
   "sales_output_excel": "data/weekly_sales.xlsx",
+  "stock_price_sql_file": "sql/product_stock_price.sql",
+  "stock_price_output_excel": "data/product_stock_price.xlsx",
   "blacklist_file": "data/display_blacklist.csv",
   "image_base_url": "https://ierpapi.ifurniture.co.nz/",
   "schedule_interval": 30,

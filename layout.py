@@ -51,6 +51,7 @@ from heatmap_metrics import (
     sales_data_ready,
     week_period_display,
 )
+from stock_price_lookup import format_stock_price_hint, reload_stock_prices
 from ui_common import Dropdown, InputBox, draw_fitted_text, sanitize_display_text
 
 pygame.init()
@@ -3565,6 +3566,11 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
     except Exception:
         pass
 
+    try:
+        reload_stock_prices()
+    except Exception:
+        pass
+
     template_scroll_offset = 0
     if selected_template_index >= len(furniture_templates):
         selected_template_index = max(0, len(furniture_templates) - 1)
@@ -6473,6 +6479,9 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         name_text = _truncate_label(tpl.name, FONT_BODY, row.width - TEMPLATE_THUMB - 16)
         surface.blit(FONT_BODY.render(name_text, True, C_TEXT), (tx, row.y + 6))
         meta = f"{family}  ·  {format_revenue_per_sqm(rps)}"
+        stock_hint = format_stock_price_hint(tpl.name, compact=True)
+        if stock_hint:
+            meta = f"{stock_hint}"
         if discontinued:
             meta = f"停产  ·  {meta}"
         surface.blit(
@@ -6494,7 +6503,11 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         if len(selected_furnitures) > 1:
             status_extra = f"家具×{len(selected_furnitures)} · "
         else:
-            status_extra = f"{selected_feature.name} · "
+            hint = format_stock_price_hint(selected_feature.name, compact=True)
+            status_extra = f"{selected_feature.name}"
+            if hint:
+                status_extra += f" · {hint}"
+            status_extra += " · "
     elif selected_collisions:
         if len(selected_collisions) == 1:
             name = collision_polygons[selected_collision]["name"]
@@ -6874,6 +6887,11 @@ def main():
         raise SystemExit(1) from e
 
     ensure_layouts_dir()
+    try:
+        reload_stock_prices()
+    except Exception:
+        pass
+
     init_display()
     print("坪效布局编辑器已启动。")
     refresh_catalog_cache_async()
