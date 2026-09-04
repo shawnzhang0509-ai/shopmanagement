@@ -2584,7 +2584,7 @@ class Furniture:
                 cx,
                 max_y - 2,
                 border_rgb,
-                product_family=self.product_family,
+                product_family=effective_product_family(self.name, self.product_family),
                 selected=selected,
                 span_px=span,
                 is_discontinued=self.is_discontinued,
@@ -3444,8 +3444,19 @@ def reload_display_items_cache():
     return _display_items_cache
 
 
+def family_is_placeholder(family: str, sku: str) -> bool:
+    """系列名未分配：空、未分类、或与 SKU 相同（测绘占位）。"""
+    fam = sanitize_display_text(family, "")
+    sku_clean = sanitize_display_text(sku, "")
+    if not fam:
+        return True
+    if fam in ("未分类", "unnamed"):
+        return True
+    return fam == sku_clean
+
+
 def resolve_template_product_family(item: dict, display_items=None) -> str:
-    """模板系列：Display 大库优先，其次 JSON，再 sales 映射。"""
+    """模板系列：Display 大库优先，其次 JSON（跳过 SKU 占位），再 sales 映射。"""
     tpl_id = sanitize_display_text(item.get("id"), "")
     stored = sanitize_display_text(item.get("product_family"), "")
     if display_items is None:
@@ -3460,28 +3471,38 @@ def resolve_template_product_family(item: dict, display_items=None) -> str:
                 return fam
     except Exception:
         pass
-    if stored:
+    if stored and not family_is_placeholder(stored, tpl_id):
         return stored
     fallback = tpl_id or "unnamed"
     try:
         from sales_lookup import resolve_product_family
 
-        return resolve_product_family(fallback) or fallback
+        resolved = resolve_product_family(fallback) or fallback
+        if not family_is_placeholder(resolved, tpl_id):
+            return resolved
     except Exception:
-        return fallback
+        pass
+    return stored or fallback
+
+
+def effective_product_family(name: str, stored: str = "") -> str:
+    """画布/模板用的系列名（自动跳过 SKU 占位，回读 Display）。"""
+    return resolve_template_product_family(
+        {
+            "id": name,
+            "display_key": name,
+            "product_family": stored,
+            "source": "display",
+        }
+    )
 
 
 def sync_placed_furniture_families() -> int:
     """已摆场家具同步 Display / 销量系列名（刷新后无需重开）。"""
-    items = _load_display_items_cache()
+    _load_display_items_cache()
     updated = 0
     for furn in placed_furnitures:
-        tpl_item = {
-            "id": furn.name,
-            "display_key": furn.name,
-            "source": "display",
-        }
-        new_family = resolve_template_product_family(tpl_item, items)
+        new_family = effective_product_family(furn.name, furn.product_family)
         if new_family and new_family != furn.product_family:
             furn.product_family = new_family
             updated += 1
@@ -4118,7 +4139,8 @@ def load_layout(filepath, *, keep_undo=False):
     placed_furnitures = []
     for f in data.get("furnitures", []):
         name = f.get("name", "")
-        family = sanitize_display_text(f.get("product_family", ""), "") or name
+        stored_family = sanitize_display_text(f.get("product_family", ""), "")
+        family = effective_product_family(name, stored_family)
         roi = float(f.get("roi") or 0)
         furniture = Furniture(
             name,
@@ -6003,7 +6025,7 @@ def family_tag_label(family: str, sku: str) -> tuple[str, bool]:
     """画布标签系列行：(显示文字, 是否未分配)。"""
     fam = sanitize_display_text(family, "")
     sku_clean = sanitize_display_text(sku, "")
-    if not fam or fam == sku_clean or fam in ("未分类", "unnamed"):
+    if family_is_placeholder(fam, sku_clean):
         return "未分配", True
     return fam, False
 

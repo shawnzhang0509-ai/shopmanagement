@@ -1763,6 +1763,7 @@ def save_to_list():
         editing_mode = "edit"
         editing_template = saved
         toast.show(f"已添加: {name}")
+    write_templates_file(quiet=True)
 
 
 def write_templates_file(*, quiet: bool = False):
