@@ -1708,6 +1708,7 @@ def rename_template():
         })
         editing_template = copy.deepcopy(tpl)
         toast.show(f"已更新 Family: {family}，ROI={roi:.1f}")
+        write_templates_file(quiet=True)
         return
 
     if _duplicate_id(editing_template["id"]):
@@ -1764,13 +1765,15 @@ def save_to_list():
         toast.show(f"已添加: {name}")
 
 
-def write_templates_file():
+def write_templates_file(*, quiet: bool = False):
     if not furniture_templates:
-        toast.show("列表为空，请先保存模板")
+        if not quiet:
+            toast.show("列表为空，请先保存模板")
         return
     with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
         json.dump(furniture_templates, f, ensure_ascii=False, indent=2)
-    toast.show(f"已写入 {TEMPLATES_FILE}")
+    if not quiet:
+        toast.show(f"已写入 {TEMPLATES_FILE}")
 
 
 def load_templates_file(path=TEMPLATES_FILE):

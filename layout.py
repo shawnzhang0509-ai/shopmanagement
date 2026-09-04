@@ -3431,6 +3431,63 @@ def _load_display_items_cache():
     return _display_items_cache
 
 
+def reload_display_items_cache():
+    """强制重读 Display 大库（Excel/JSON 缓存），供布局编辑器「刷新」使用。"""
+    global _display_items_cache
+    _display_items_cache = None
+    try:
+        from display_lookup import reload_display_items
+
+        _display_items_cache = reload_display_items(prefer_db=False)
+    except Exception:
+        _display_items_cache = []
+    return _display_items_cache
+
+
+def resolve_template_product_family(item: dict, display_items=None) -> str:
+    """模板系列：Display 大库优先，其次 JSON，再 sales 映射。"""
+    tpl_id = sanitize_display_text(item.get("id"), "")
+    stored = sanitize_display_text(item.get("product_family"), "")
+    if display_items is None:
+        display_items = _load_display_items_cache()
+    try:
+        from display_lookup import find_display_item_for_template
+
+        display_item = find_display_item_for_template(item, display_items)
+        if display_item:
+            fam = sanitize_display_text(display_item.product_family, "")
+            if fam and fam not in ("未分类",):
+                return fam
+    except Exception:
+        pass
+    if stored:
+        return stored
+    fallback = tpl_id or "unnamed"
+    try:
+        from sales_lookup import resolve_product_family
+
+        return resolve_product_family(fallback) or fallback
+    except Exception:
+        return fallback
+
+
+def sync_placed_furniture_families() -> int:
+    """已摆场家具同步 Display / 销量系列名（刷新后无需重开）。"""
+    items = _load_display_items_cache()
+    updated = 0
+    for furn in placed_furnitures:
+        tpl_item = {
+            "id": furn.name,
+            "display_key": furn.name,
+            "source": "display",
+        }
+        new_family = resolve_template_product_family(tpl_item, items)
+        if new_family and new_family != furn.product_family:
+            furn.product_family = new_family
+            updated += 1
+    return updated
+
+
 def _resolve_furniture_discontinued(name: str, stored=None) -> bool:
     try:
         from display_lookup import resolve_is_discontinued
@@ -3612,19 +3669,11 @@ def load_furniture_templates(json_path):
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     templates = []
+    display_items = _load_display_items_cache()
     for item in data:
         points = shape_to_points(item)
         if points:
-            family = sanitize_display_text(item.get("product_family"), "")
-            if not family:
-                family = sanitize_display_text(item.get("id", ""), "unnamed")
-            if not sanitize_display_text(item.get("product_family"), ""):
-                try:
-                    from sales_lookup import resolve_product_family
-
-                    family = resolve_product_family(family) or family
-                except Exception:
-                    pass
+            family = resolve_template_product_family(item, display_items)
             if "roi" in item:
                 roi = float(item.get("roi") or 0)
             else:
@@ -3652,18 +3701,32 @@ furniture_templates = []
 def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
     """测绘/模板更新后热刷新，无需关闭重开布局编辑器。"""
     global furniture_templates, _display_items_cache, template_scroll_offset, selected_template_index
+    global _cached_family_dropdown_options, _cached_family_dropdown_key
+
+    if reload_display:
+        reload_display_items_cache()
+    else:
+        _display_items_cache = None
+        _load_display_items_cache()
+
+    try:
+        from sales_lookup import reload_weekly_sales
+
+        reload_weekly_sales()
+    except Exception:
+        pass
+
+    _sidebar_metric_cache.clear()
+    _cached_family_dropdown_key = ()
+    _cached_family_dropdown_options = None
+
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
     except Exception as exc:
         show_toast(f"模板刷新失败: {exc}")
         return False
 
-    if reload_display:
-        _display_items_cache = None
-        try:
-            _load_display_items_cache()
-        except Exception:
-            pass
+    placed_synced = sync_placed_furniture_families()
 
     clear_furniture_display_cache()
     invalidate_overlap_groups_cache()
@@ -3686,7 +3749,10 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
     if selected_template_index >= len(furniture_templates):
         selected_template_index = max(0, len(furniture_templates) - 1)
 
-    show_toast(f"已刷新 {len(furniture_templates)} 个家具模板（测绘/Display 已同步）")
+    msg = f"已刷新 {len(furniture_templates)} 个家具模板（Display/测绘已同步）"
+    if placed_synced:
+        msg += f"，{placed_synced} 件已摆场系列已更新"
+    show_toast(msg)
     return True
 
 
