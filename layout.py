@@ -173,6 +173,9 @@ MARKER_COLORS = {
     "fire_exit": (22, 163, 74),
 }
 WALL_ENDPOINT_HIT_PX = 14
+ROTATION_HANDLE_OFFSET_MM = 350
+ROTATION_HANDLE_RADIUS_PX = 8
+ROTATION_HANDLE_HIT_PX = 16
 WALL_MIN_LENGTH_MM = 200
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 
@@ -313,6 +316,7 @@ CANVAS_MODE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
     ("full", "画布 · 完整坪效"),
 )
 ROTATE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("free", "旋转 · 自由拖拽"),
     ("fine", "旋转 · 微调15°"),
     ("90", "旋转 · 90°翻转"),
 )
@@ -325,7 +329,7 @@ sidebar_week_caption_y = 0
 TEMPLATE_ROW_H = 56
 TEMPLATE_THUMB = 40
 rename_composition = ""
-rotation_mode = "fine"  # "fine" = 15°, "90" = 90°
+rotation_mode = "free"  # "free" = 拖拽手柄, "fine" = 15°, "90" = 90°
 toast_message = ""
 toast_until = 0
 mouse_pos = (0, 0)
@@ -405,6 +409,10 @@ marker_edit_length_rect = None
 marker_edit_width_rect = None
 dragging_wall_endpoint = None
 wall_endpoint_snapshot = None
+dragging_rotation = False
+rotation_snapshots: dict[int, list] = {}
+rotation_pivot = (0.0, 0.0)
+rotation_start_pointer_angle = 0.0
 _furniture_display_cache: dict[tuple[str, str, int, int], object] = {}
 _furniture_aspect_cache: dict[tuple[str, str], float] = {}
 _last_furniture_prefetch_ms = 0
@@ -1516,6 +1524,98 @@ def draw_wall_endpoint_handles(surface):
         pygame.draw.rect(surface, (255, 255, 255), rect, 2, border_radius=3)
 
 
+def rotation_handle_available() -> bool:
+    if len(selected_collisions) != 1:
+        return False
+    col = collision_polygons[selected_collision]
+    if walls_locked and obstacle_is_wall(col):
+        return False
+    return True
+
+
+def obstacle_rotation_pivot(points):
+    cx = sum(p[0] for p in points) / len(points)
+    cy = sum(p[1] for p in points) / len(points)
+    return cx, cy
+
+
+def rotation_handle_geometry(points):
+    pivot = obstacle_rotation_pivot(points)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    cx_bbox = (min(xs) + max(xs)) / 2
+    handle = (cx_bbox, min(ys) - ROTATION_HANDLE_OFFSET_MM)
+    return handle, pivot
+
+
+def rotation_handle_hit_test(mx, my) -> bool:
+    if not rotation_handle_available():
+        return False
+    points = collision_polygons[selected_collision]["points"]
+    handle, _ = rotation_handle_geometry(points)
+    sx, sy = world_to_screen(*handle)
+    hit_r = max(ROTATION_HANDLE_HIT_PX, ROTATION_HANDLE_RADIUS_PX + 6)
+    return (mx - sx) ** 2 + (my - sy) ** 2 <= hit_r * hit_r
+
+
+def pointer_angle_deg(pivot, wx, wy):
+    return math.degrees(math.atan2(wy - pivot[1], wx - pivot[0]))
+
+
+def apply_rotation_drag(angle_delta_deg):
+    for i, snap in rotation_snapshots.items():
+        rotated = rotate_polygon_points(snap, angle_delta_deg, rotation_pivot)
+        collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in rotated]
+
+
+def validate_rotated_obstacles(indices, snapshots) -> str | None:
+    for i in indices:
+        pts = collision_polygons[i]["points"]
+        snap = snapshots[i]
+        if polygon_fully_inside_store(snap) and not polygon_fully_inside_store(pts):
+            return "旋转后会移出门店画布"
+        if obstacle_is_zone(collision_polygons[i]):
+            overlap, name = zone_overlaps_any(pts, i)
+            if overlap:
+                return f"与 {name} 区域重叠"
+    return None
+
+
+def finish_rotation_drag():
+    global dragging_rotation, rotation_snapshots, rotation_pivot, rotation_start_pointer_angle
+    if not dragging_rotation or not rotation_snapshots:
+        dragging_rotation = False
+        rotation_snapshots = {}
+        return
+    indices = list(rotation_snapshots.keys())
+    err = validate_rotated_obstacles(indices, rotation_snapshots)
+    if err:
+        for i, snap in rotation_snapshots.items():
+            collision_polygons[i]["points"] = [list(p) for p in snap]
+        show_toast(err)
+    elif len(indices) == 1:
+        show_toast(f"已旋转 {collision_polygons[indices[0]].get('name', '障碍物')}（自由角度）")
+    dragging_rotation = False
+    rotation_snapshots = {}
+    rotation_pivot = (0.0, 0.0)
+    rotation_start_pointer_angle = 0.0
+
+
+def draw_rotation_handle(surface):
+    if not rotation_handle_available():
+        return
+    points = collision_polygons[selected_collision]["points"]
+    handle, pivot = rotation_handle_geometry(points)
+    psx, psy = world_to_screen(*pivot)
+    hsx, hsy = world_to_screen(*handle)
+    pygame.draw.line(surface, C_ACCENT, (int(psx), int(psy)), (int(hsx), int(hsy)), 2)
+    r = ROTATION_HANDLE_RADIUS_PX
+    pygame.draw.circle(surface, (255, 255, 255), (int(hsx), int(hsy)), r + 2)
+    pygame.draw.circle(surface, C_ACCENT, (int(hsx), int(hsy)), r)
+    arc_rect = pygame.Rect(int(hsx - r + 2), int(hsy - r + 2), (r - 2) * 2, (r - 2) * 2)
+    pygame.draw.arc(surface, (255, 255, 255), arc_rect, math.radians(30), math.radians(300), 2)
+
+
 def snap_world_mm(value):
     return round(value / OBSTACLE_SNAP_MM) * OBSTACLE_SNAP_MM
 
@@ -2114,7 +2214,7 @@ def apply_family_dropdown(value: str, buttons=None, dropdowns=None) -> None:
 
 def apply_rotate_mode_dropdown(value: str, dropdowns=None) -> None:
     global rotation_mode
-    rotation_mode = value if value in ("fine", "90") else "fine"
+    rotation_mode = value if value in ("free", "fine", "90") else "free"
     sync_dropdowns(dropdowns)
     show_toast(f"旋转模式: {rotation_mode_label()}")
 
@@ -3196,12 +3296,18 @@ def rotation_step_degrees():
 
 
 def rotation_mode_label():
-    return "90°翻转" if rotation_mode == "90" else f"微调{ROTATE_FINE_DEG}°"
+    if rotation_mode == "90":
+        return "90°翻转"
+    if rotation_mode == "free":
+        return "自由拖拽"
+    return f"微调{ROTATE_FINE_DEG}°"
 
 
 def toggle_rotation_mode():
     global rotation_mode
-    rotation_mode = "90" if rotation_mode == "fine" else "fine"
+    order = ("free", "fine", "90")
+    idx = order.index(rotation_mode) if rotation_mode in order else 0
+    rotation_mode = order[(idx + 1) % len(order)]
     show_toast(f"旋转模式: {rotation_mode_label()}")
 
 
@@ -6021,6 +6127,7 @@ def draw_furniture_multi_selection_overlay(surface):
 
 
 def draw_selection_overlay(surface):
+    draw_rotation_handle(surface)
     draw_wall_endpoint_handles(surface)
     if len(selected_collisions) < 2:
         return
@@ -6739,6 +6846,7 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
     global dragging_furniture, dragging_collision, collision_drag_offset, collision_drag_snapshot, multi_drag_snapshots
     global current_polygon, preview_point, dragging_marker, marker_drag_offset
     global dragging_wall_endpoint, wall_endpoint_snapshot, furniture_drag_snapshot, pending_bind_child
+    global dragging_rotation, rotation_snapshots, rotation_pivot, rotation_start_pointer_angle
 
     wx, wy = screen_to_world(mx, my)
 
@@ -6800,6 +6908,17 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
             marker = layout_markers[i]
             marker_drag_offset = (marker["x_mm"] - wx, marker["y_mm"] - wy)
             return
+
+    if rotation_handle_hit_test(mx, my):
+        idx = selected_collision
+        push_undo()
+        rotation_snapshots = {
+            idx: [tuple(p) for p in collision_polygons[idx]["points"]],
+        }
+        rotation_pivot = obstacle_rotation_pivot(collision_polygons[idx]["points"])
+        rotation_start_pointer_angle = pointer_angle_deg(rotation_pivot, wx, wy)
+        dragging_rotation = True
+        return
 
     for i in reversed(range(len(collision_polygons))):
         if walls_locked:
@@ -6898,6 +7017,7 @@ def main():
     global editing_marker_dialog, marker_edit_name, marker_edit_focus
     global marker_edit_length, marker_edit_width
     global dragging_wall_endpoint, wall_endpoint_snapshot, furniture_drag_snapshot
+    global dragging_rotation, rotation_snapshots, rotation_pivot, rotation_start_pointer_angle
 
     try:
         furniture_templates = load_furniture_templates("furniture_templates.json")
@@ -7152,6 +7272,8 @@ def main():
                             show_toast("墙段长度无效或超出画布")
                         dragging_wall_endpoint = None
                         wall_endpoint_snapshot = None
+                    if dragging_rotation:
+                        finish_rotation_drag()
                     if selected_collisions and not drawing_polygon and dragging_collision and multi_drag_snapshots:
                         reverted = False
                         for i in selected_collisions:
@@ -7205,6 +7327,9 @@ def main():
                     idx, end_idx = dragging_wall_endpoint
                     collision_polygons[idx]["points"] = [list(p) for p in wall_endpoint_snapshot]
                     resize_wall_by_endpoint(idx, end_idx, wx, wy)
+                elif dragging_rotation and rotation_snapshots:
+                    delta = pointer_angle_deg(rotation_pivot, wx, wy) - rotation_start_pointer_angle
+                    apply_rotation_drag(delta)
                 elif dragging_collision and selected_collisions:
                     all_pts = []
                     for i in selected_collisions:
