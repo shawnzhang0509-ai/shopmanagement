@@ -4,7 +4,8 @@
 -- 图片逻辑与库存 stock SQL 一致：ProductDocuments + Documents → RelativeFilePath
 -- ProductFamily 直接读 Products 表字段（无 ProductFamilies 查找表）
 -- Display 库存含 Normal + Clearance（清仓 Demo 仍在门店 Display 上）
--- 停产（IsDiscontinued=1）照常抓取：该列仅标记，WHERE 中不过滤
+-- ⚠ 切勿加 AND p.IsDiscontinued = 0 — 停产产品 Demo 仍在门店，需进 Display 大库并标「停产」
+-- IsDiscontinued 列仅作标记导出，不在 WHERE 中过滤
 
 SELECT
     w.Name AS WarehouseName,
