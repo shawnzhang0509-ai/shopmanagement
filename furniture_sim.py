@@ -938,11 +938,13 @@ def _display_items_for_validation():
 
 
 def _bind_template_to_display(tpl: dict, item) -> dict:
+    from display_lookup import effective_family_from_display_item
+
     tpl_id = item.product_code or item.product_name
-    family = item.product_family if item.product_family and item.product_family != "未分类" else tpl_id
+    family = effective_family_from_display_item(item)
     tpl["id"] = tpl_id
     tpl["product_family"] = family
-    tpl["roi"] = lookup_roi(family)
+    tpl["roi"] = lookup_roi(family or tpl_id)
     tpl["display_key"] = item.key
     tpl["source"] = "display"
     tpl["is_discontinued"] = bool(getattr(item, "is_discontinued", False))
@@ -1745,6 +1747,7 @@ def save_to_list():
         editing_mode = "edit"
         editing_template = saved
         toast.show(f"已添加新模板: {name}")
+        write_templates_file(quiet=True)
         return
 
     if selected_index >= 0:
@@ -1783,13 +1786,28 @@ def load_templates_file(path=TEMPLATES_FILE):
         return
     with open(path, "r", encoding="utf-8") as f:
         furniture_templates = json.load(f)
+    items = _display_items_for_validation()
     for tpl in furniture_templates:
-        family = tpl.get("product_family") or tpl.get("id", "")
+        sku = str(tpl.get("id", "") or "").strip()
+        stored = str(tpl.get("product_family", "") or "").strip()
+        from display_lookup import (
+            effective_family_from_display_item,
+            family_is_sku_placeholder,
+            find_display_item_for_template,
+        )
+
+        family = ""
+        if items:
+            item = find_display_item_for_template(tpl, items)
+            if item:
+                family = effective_family_from_display_item(item)
+        if not family and stored and not family_is_sku_placeholder(stored, sku):
+            family = stored
         tpl["product_family"] = family
         if "roi" in tpl:
             tpl["roi"] = float(tpl.get("roi") or 0)
         else:
-            tpl["roi"] = lookup_roi(family)
+            tpl["roi"] = lookup_roi(family or sku)
         tpl["is_discontinued"] = resolve_is_discontinued(
             tpl.get("id", ""),
             tpl.get("is_discontinued"),

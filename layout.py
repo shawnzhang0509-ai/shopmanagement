@@ -286,6 +286,8 @@ collision_drag_snapshot = None
 _obstacle_clipboard = None
 _undo_stack: list[dict] = []
 _display_items_cache = None
+_templates_json_cache: dict[str, dict] | None = None
+_templates_json_mtime: float = 0.0
 search_text = ""
 search_box_active = False
 template_family_filter = ""
@@ -769,7 +771,7 @@ def _furniture_snapshot(furnitures):
             "rotation": f.rotation,
             "instance_id": getattr(f, "instance_id", "") or "",
             "attach_to": getattr(f, "attach_to", "") or "",
-            "product_family": getattr(f, "product_family", "") or "",
+            "product_family": _persist_product_family(f.name, getattr(f, "product_family", "") or ""),
             "is_discontinued": bool(getattr(f, "is_discontinued", False)),
         }
         for f in furnitures
@@ -2577,6 +2579,9 @@ class Furniture:
 
         if not fast_view and (span >= FURNITURE_LABEL_MIN_SPAN_PX or selected) and not blink_idle:
             metric = format_revenue_per_sqm(self.revenue_per_sqm)
+            label_family = effective_product_family(self.name, self.product_family)
+            if label_family != self.product_family and not family_is_placeholder(label_family, self.name):
+                self.product_family = label_family
             tag_rect = draw_furniture_metric_tag(
                 surface,
                 self.name,
@@ -2584,7 +2589,7 @@ class Furniture:
                 cx,
                 max_y - 2,
                 border_rgb,
-                product_family=effective_product_family(self.name, self.product_family),
+                product_family=label_family,
                 selected=selected,
                 span_px=span,
                 is_discontinued=self.is_discontinued,
@@ -3446,31 +3451,91 @@ def reload_display_items_cache():
 
 def family_is_placeholder(family: str, sku: str) -> bool:
     """系列名未分配：空、未分类、或与 SKU 相同（测绘占位）。"""
-    fam = sanitize_display_text(family, "")
-    sku_clean = sanitize_display_text(sku, "")
-    if not fam:
-        return True
-    if fam in ("未分类", "unnamed"):
-        return True
-    return fam == sku_clean
+    from display_lookup import family_is_sku_placeholder
+
+    return family_is_sku_placeholder(family, sku)
+
+
+def _infer_family_from_product_name(product_name: str, sku: str) -> str:
+    from display_lookup import infer_family_from_product_name
+
+    return infer_family_from_product_name(product_name, sku)
+
+
+def _family_from_display_item(item, sku: str) -> str:
+    from display_lookup import effective_family_from_display_item
+
+    return effective_family_from_display_item(item)
+
+
+def _furniture_templates_json_by_id(json_path="furniture_templates.json") -> dict[str, dict]:
+    global _templates_json_cache, _templates_json_mtime
+    try:
+        mtime = os.path.getmtime(json_path)
+    except OSError:
+        return {}
+    if _templates_json_cache is not None and mtime == _templates_json_mtime:
+        return _templates_json_cache
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _templates_json_cache = {
+            sanitize_display_text(item.get("id"), ""): item
+            for item in data
+            if sanitize_display_text(item.get("id"), "")
+        }
+        _templates_json_mtime = mtime
+    except Exception:
+        _templates_json_cache = {}
+    return _templates_json_cache
+
+
+def _lookup_display_item_for_sku(name: str, display_items=None):
+    from display_lookup import find_display_item_for_template, lookup_display_item
+
+    sku = sanitize_display_text(name, "")
+    if not sku:
+        return None
+    items = display_items if display_items is not None else _load_display_items_cache()
+    tpl = {"id": sku, "display_key": sku, "source": "display"}
+    item = find_display_item_for_template(tpl, items)
+    if item is not None:
+        return item
+    return lookup_display_item(sku)
+
+
+def _family_from_furniture_templates(name: str) -> str:
+    sku = sanitize_display_text(name, "")
+    tpl_dict = _furniture_templates_json_by_id().get(sku)
+    if tpl_dict:
+        fam = sanitize_display_text(tpl_dict.get("product_family"), "")
+        if not family_is_placeholder(fam, sku):
+            return fam
+    for tpl in furniture_templates:
+        if sanitize_display_text(getattr(tpl, "name", ""), "") == sku:
+            fam = sanitize_display_text(getattr(tpl, "product_family", ""), "")
+            if not family_is_placeholder(fam, sku):
+                return fam
+    return ""
 
 
 def resolve_template_product_family(item: dict, display_items=None) -> str:
-    """模板系列：Display 大库优先，其次 JSON（跳过 SKU 占位），再 sales 映射。"""
+    """模板系列：Display 大库 → 产品名推断 → JSON → 销量映射。"""
     tpl_id = sanitize_display_text(item.get("id"), "")
     stored = sanitize_display_text(item.get("product_family"), "")
     if display_items is None:
         display_items = _load_display_items_cache()
     try:
-        from display_lookup import find_display_item_for_template
-
-        display_item = find_display_item_for_template(item, display_items)
+        display_item = _lookup_display_item_for_sku(tpl_id, display_items)
         if display_item:
-            fam = sanitize_display_text(display_item.product_family, "")
-            if fam and fam not in ("未分类",):
+            fam = _family_from_display_item(display_item, tpl_id)
+            if fam:
                 return fam
     except Exception:
         pass
+    tpl_fam = _family_from_furniture_templates(tpl_id)
+    if tpl_fam:
+        return tpl_fam
     if stored and not family_is_placeholder(stored, tpl_id):
         return stored
     fallback = tpl_id or "unnamed"
@@ -3486,15 +3551,19 @@ def resolve_template_product_family(item: dict, display_items=None) -> str:
 
 
 def effective_product_family(name: str, stored: str = "") -> str:
-    """画布/模板用的系列名（自动跳过 SKU 占位，回读 Display）。"""
-    return resolve_template_product_family(
+    """画布/模板用的系列名（Display / 模板 / 销量，跳过 SKU 占位）。"""
+    sku = sanitize_display_text(name, "")
+    fam = resolve_template_product_family(
         {
-            "id": name,
-            "display_key": name,
+            "id": sku,
+            "display_key": sku,
             "product_family": stored,
             "source": "display",
         }
     )
+    if not family_is_placeholder(fam, sku):
+        return fam
+    return fam
 
 
 def sync_placed_furniture_families() -> int:
@@ -3503,10 +3572,21 @@ def sync_placed_furniture_families() -> int:
     updated = 0
     for furn in placed_furnitures:
         new_family = effective_product_family(furn.name, furn.product_family)
-        if new_family and new_family != furn.product_family:
+        if (
+            not family_is_placeholder(new_family, furn.name)
+            and new_family != furn.product_family
+        ):
             furn.product_family = new_family
             updated += 1
     return updated
+
+
+def _persist_product_family(name: str, stored: str = "") -> str:
+    """保存布局时写入已解析的系列名（跳过 SKU 占位）。"""
+    resolved = effective_product_family(name, stored)
+    if not family_is_placeholder(resolved, name):
+        return resolved
+    return sanitize_display_text(stored, "")
 
 
 def _resolve_furniture_discontinued(name: str, stored=None) -> bool:
@@ -3723,6 +3803,10 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
     """测绘/模板更新后热刷新，无需关闭重开布局编辑器。"""
     global furniture_templates, _display_items_cache, template_scroll_offset, selected_template_index
     global _cached_family_dropdown_options, _cached_family_dropdown_key
+    global _templates_json_cache, _templates_json_mtime
+
+    _templates_json_cache = None
+    _templates_json_mtime = 0.0
 
     if reload_display:
         reload_display_items_cache()
@@ -3772,7 +3856,7 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
 
     msg = f"已刷新 {len(furniture_templates)} 个家具模板（Display/测绘已同步）"
     if placed_synced:
-        msg += f"，{placed_synced} 件已摆场系列已更新"
+        msg += f"，{placed_synced} 件已摆场系列已更新（请保存布局）"
     show_toast(msg)
     return True
 
@@ -3997,7 +4081,7 @@ def build_layout_data(filepath):
                 "points": f.points,
                 "instance_id": getattr(f, "instance_id", "") or "",
                 "attach_to": getattr(f, "attach_to", "") or "",
-                "product_family": getattr(f, "product_family", "") or "",
+                "product_family": _persist_product_family(f.name, getattr(f, "product_family", "") or ""),
                 "is_discontinued": bool(getattr(f, "is_discontinued", False)),
             }
             for f in placed_furnitures

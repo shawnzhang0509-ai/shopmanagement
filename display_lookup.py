@@ -217,6 +217,47 @@ def _resolve_sub_family_name(sub_family: str, name: str, code: str) -> str:
     return name or code or "未分类"
 
 
+def family_is_sku_placeholder(family: str, sku: str) -> bool:
+    """系列名视为未分配：空、未分类、或与 SKU 相同（测绘占位）。"""
+    fam = _cell_value(family)
+    sku_clean = _cell_value(sku)
+    if not fam:
+        return True
+    if fam in ("未分类", "unnamed"):
+        return True
+    return fam == sku_clean
+
+
+def infer_family_from_product_name(product_name: str, sku: str = "") -> str:
+    """Display 无 ProductFamily 时，从产品名首词推断（如 Heyfield Queen ...）。"""
+    pn = _cell_value(product_name)
+    if not pn:
+        return ""
+    first = pn.split()[0]
+    if len(first) < 3 or re.match(r"^\d", first):
+        return ""
+    if first.lower() in ("not", "display", "clearance", "discontinued", "the"):
+        return ""
+    if family_is_sku_placeholder(first, sku):
+        return ""
+    return first
+
+
+def effective_family_from_display_item(item: DisplayItem) -> str:
+    """从 Display 项解析可用系列名（列值 → 产品名推断 → 子系列）。"""
+    sku = _cell_value(item.product_code or item.product_name)
+    fam = _cell_value(item.product_family)
+    if fam and fam not in ("未分类",) and not family_is_sku_placeholder(fam, sku):
+        return fam
+    inferred = infer_family_from_product_name(item.product_name, sku)
+    if inferred:
+        return inferred
+    sub = _cell_value(item.sub_product_family)
+    if sub and not family_is_sku_placeholder(sub, sku):
+        return sub
+    return ""
+
+
 def _family_data_score(items: list[DisplayItem]) -> int:
     """优先选用真正带有 ProductFamily 数据的 Excel。"""
     score = 0
