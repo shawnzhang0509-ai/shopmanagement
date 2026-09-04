@@ -16,7 +16,10 @@ JOIN Warehouses w ON s.WarehouseId = w.Id
 JOIN Products p ON s.ProductId = p.Id
 WHERE w.Name LIKE '%Display%'
   AND s.StockStatus IN ('Normal', 'Clearance')
-  AND s.StockOnHoldStatus IS NULL
+  AND (
+      s.StockOnHoldStatus IS NULL
+      OR LTRIM(RTRIM(s.StockOnHoldStatus)) = ''
+  )
 GROUP BY w.Name, p.Sku, p.Name, p.IsDiscontinued, s.StockStatus
 HAVING SUM(s.Quantity) > 0
 ORDER BY w.Name, DisplayQty DESC;

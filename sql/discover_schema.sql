@@ -1,5 +1,5 @@
 -- 在 SSMS 连接 nz_ierp_live 后运行，找出 Product Family / 图片 的正确表名和列名
--- 把结果发给我们，或据此修改 sql/display.sql
+-- 若某 SKU 进不了 Display，另运行 sql/discover_display_stock.sql（改 @Sku）
 
 -- 1) Products 表上跟 family / image 相关的列
 SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH

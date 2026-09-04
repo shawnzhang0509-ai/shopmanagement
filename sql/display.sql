@@ -48,7 +48,10 @@ LEFT JOIN (
 INNER JOIN [dbo].[Stocks] s
     ON s.ProductId = p.Id
     AND s.StockStatus IN ('Normal', 'Clearance')
-    AND s.StockOnHoldStatus IS NULL
+    AND (
+        s.StockOnHoldStatus IS NULL
+        OR LTRIM(RTRIM(s.StockOnHoldStatus)) = ''
+    )
 
 INNER JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id
