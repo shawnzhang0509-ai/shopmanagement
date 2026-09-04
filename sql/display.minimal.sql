@@ -1,5 +1,5 @@
--- 兜底 SQL：不含 ImageUrl / ProductFamily 列（当 Products 表没有图片字段时使用）
--- grabber 会在 display.sql 报「Invalid object/column name」时自动尝试本文件。
+-- 【自动兜底，勿改】主文件 sql/display.sql 报列/表不存在时程序才会尝试本文件。
+-- 日常只维护 display.sql（含 ImageUrl，与 product_stock_price.sql 同源）。
 
 SELECT
     w.Name AS WarehouseName,

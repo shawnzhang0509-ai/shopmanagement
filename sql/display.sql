@@ -1,11 +1,15 @@
--- Display 库：各门店 Display 库存
--- 由 grab_display.bat / grab_display_gui.py 自动执行
+-- ═══════════════════════════════════════════════════════════════
+-- Display 大库 · 唯一维护文件
+-- grabber_config.json → "sql_file": "sql/display.sql" → data/display.xlsx
 --
--- 图片逻辑与库存 stock SQL 一致：ProductDocuments + Documents → RelativeFilePath
--- ProductFamily 直接读 Products 表字段（无 ProductFamilies 查找表）
--- Display 库存含 Normal + Clearance（清仓 Demo 仍在门店 Display 上）
--- ⚠ 切勿加 AND p.IsDiscontinued = 0 — 停产产品 Demo 仍在门店，需进 Display 大库并标「停产」
--- IsDiscontinued 列仅作标记导出，不在 WHERE 中过滤
+-- ImageUrl / ProductFamily / IsDiscontinued 与 product_stock_price.sql 同源：
+--   图片 = ProductDocuments + Documents（默认图优先）
+--   系列 = Products.ProductFamily
+--   停产 = 仅导出标记，WHERE 中不过滤（勿加 IsDiscontinued = 0）
+--
+-- 其它 display*.sql 为程序自动兜底，日常只改本文件。
+-- Display 库存：仓库名含 Display，StockStatus Normal/Clearance
+-- ═══════════════════════════════════════════════════════════════
 
 SELECT
     w.Name AS WarehouseName,
@@ -13,7 +17,7 @@ SELECT
     p.Name AS ProductName,
     ISNULL(p.ProductFamily, '') AS ProductFamily,
     p.Name AS SubProductFamily,
-    MAX(CASE WHEN ISNULL(p.IsDiscontinued, 0) = 1 THEN 1 ELSE 0 END) AS IsDiscontinued,
+    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
     s.StockStatus AS StockStatus,
     MAX(
         CASE
@@ -25,7 +29,7 @@ SELECT
     SUM(s.Quantity) AS DisplayQty
 FROM [dbo].[Products] p
 
--- 产品默认图：优先 IsDefaultProductPicture=1，否则取最新上传图
+-- ↓ 与 sql/product_stock_price.sql 中 img 子查询保持同步 ↓
 LEFT JOIN (
     SELECT ProductId, RelativeFilePath
     FROM (
@@ -65,6 +69,7 @@ GROUP BY
     p.Sku,
     p.Name,
     p.ProductFamily,
+    p.IsDiscontinued,
     s.StockStatus
 
 HAVING SUM(s.Quantity) > 0

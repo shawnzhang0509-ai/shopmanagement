@@ -1,11 +1,5 @@
--- 可选：数据库有 ProductFamilies / ProductSubFamilies 查找表时使用
--- 在 grabber_config.json 里设置 "sql_file": "sql/display.with_families.sql"
---
--- 修复说明（相对旧版）：
---   1. ProductFamily = 查找表 Name，否则回退 Products.ProductFamily 字符串
---   2. ImageUrl 走 ProductDocuments（与 display.sql 一致），不用 Products.ImageUrl
---   3. StockOnHoldStatus 允许 NULL 或空字符串
--- 停产（IsDiscontinued=1）照常抓取：该列仅标记，WHERE 中不过滤
+-- 【可选，一般不用】仅当库里有 ProductFamilies 查找表且 display.sql 不够用时，
+-- 在 grabber_config.json 改 sql_file 指向本文件。默认请用 sql/display.sql。
 
 SELECT
     w.Name AS WarehouseName,
