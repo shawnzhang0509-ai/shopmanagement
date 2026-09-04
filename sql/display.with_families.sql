@@ -5,6 +5,7 @@
 --   1. ProductFamily = 查找表 Name，否则回退 Products.ProductFamily 字符串
 --   2. ImageUrl 走 ProductDocuments（与 display.sql 一致），不用 Products.ImageUrl
 --   3. StockOnHoldStatus 允许 NULL 或空字符串
+-- 停产（IsDiscontinued=1）照常抓取：该列仅标记，WHERE 中不过滤
 
 SELECT
     w.Name AS WarehouseName,
@@ -19,7 +20,7 @@ SELECT
         NULLIF(LTRIM(RTRIM(psf.Name)), N''),
         p.Name
     ) AS SubProductFamily,
-    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    MAX(CASE WHEN ISNULL(p.IsDiscontinued, 0) = 1 THEN 1 ELSE 0 END) AS IsDiscontinued,
     s.StockStatus AS StockStatus,
     MAX(
         CASE
@@ -77,7 +78,6 @@ GROUP BY
     pf.Name,
     psf.Name,
     p.ProductFamily,
-    p.IsDiscontinued,
     s.StockStatus
 
 HAVING SUM(s.Quantity) > 0

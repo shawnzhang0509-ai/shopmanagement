@@ -7,7 +7,7 @@ SELECT
     p.Name AS ProductName,
     CAST('' AS NVARCHAR(200)) AS ProductFamily,
     p.Name AS SubProductFamily,
-    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    MAX(CASE WHEN ISNULL(p.IsDiscontinued, 0) = 1 THEN 1 ELSE 0 END) AS IsDiscontinued,
     s.StockStatus AS StockStatus,
     CAST('' AS NVARCHAR(500)) AS ImageUrl,
     SUM(s.Quantity) AS DisplayQty
@@ -20,6 +20,6 @@ WHERE w.Name LIKE '%Display%'
       s.StockOnHoldStatus IS NULL
       OR LTRIM(RTRIM(s.StockOnHoldStatus)) = ''
   )
-GROUP BY w.Name, p.Sku, p.Name, p.IsDiscontinued, s.StockStatus
+GROUP BY w.Name, p.Sku, p.Name, s.StockStatus
 HAVING SUM(s.Quantity) > 0
 ORDER BY w.Name, DisplayQty DESC;

@@ -15,7 +15,7 @@ SELECT
         NULLIF(LTRIM(RTRIM(psf.Name)), N''),
         p.Name
     ) AS SubProductFamily,
-    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    MAX(CASE WHEN ISNULL(p.IsDiscontinued, 0) = 1 THEN 1 ELSE 0 END) AS IsDiscontinued,
     s.StockStatus AS StockStatus,
     ISNULL(CAST(s.StockOnHoldStatus AS NVARCHAR(64)), N'') AS StockOnHoldStatus,
     MAX(
@@ -70,7 +70,6 @@ GROUP BY
     pf.Name,
     psf.Name,
     p.ProductFamily,
-    p.IsDiscontinued,
     s.StockStatus,
     s.StockOnHoldStatus
 

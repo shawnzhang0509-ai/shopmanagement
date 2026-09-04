@@ -4,6 +4,7 @@
 -- 图片逻辑与库存 stock SQL 一致：ProductDocuments + Documents → RelativeFilePath
 -- ProductFamily 直接读 Products 表字段（无 ProductFamilies 查找表）
 -- Display 库存含 Normal + Clearance（清仓 Demo 仍在门店 Display 上）
+-- 停产（IsDiscontinued=1）照常抓取：该列仅标记，WHERE 中不过滤
 
 SELECT
     w.Name AS WarehouseName,
@@ -11,7 +12,7 @@ SELECT
     p.Name AS ProductName,
     ISNULL(p.ProductFamily, '') AS ProductFamily,
     p.Name AS SubProductFamily,
-    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    MAX(CASE WHEN ISNULL(p.IsDiscontinued, 0) = 1 THEN 1 ELSE 0 END) AS IsDiscontinued,
     s.StockStatus AS StockStatus,
     MAX(
         CASE
@@ -63,7 +64,6 @@ GROUP BY
     p.Sku,
     p.Name,
     p.ProductFamily,
-    p.IsDiscontinued,
     s.StockStatus
 
 HAVING SUM(s.Quantity) > 0

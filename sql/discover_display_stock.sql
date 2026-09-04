@@ -38,13 +38,14 @@ WHERE LTRIM(RTRIM(p.Sku)) = @Sku
   AND s.Quantity > 0
 ORDER BY w.Name;
 
--- 4) 加上抓取 SQL 的全部过滤条件
+-- 4) 加上抓取 SQL 的全部过滤条件（注意：不含 IsDiscontinued 过滤，停产 Demo 也应出现）
 SELECT
     p.Sku,
     w.Name AS WarehouseName,
     s.Quantity,
     s.StockStatus,
-    s.StockOnHoldStatus
+    s.StockOnHoldStatus,
+    p.IsDiscontinued
 FROM dbo.Stocks s
 JOIN dbo.Products p ON s.ProductId = p.Id
 JOIN dbo.Warehouses w ON s.WarehouseId = w.Id
