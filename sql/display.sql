@@ -1,9 +1,15 @@
--- Display 库：各门店 Display 库存
--- 由 grab_display.bat / grab_display_gui.py 自动执行
+-- ═══════════════════════════════════════════════════════════════
+-- Display 大库 · 唯一维护文件
+-- grabber_config.json → "sql_file": "sql/display.sql" → data/display.xlsx
 --
--- 图片逻辑与库存 stock SQL 一致：ProductDocuments + Documents → RelativeFilePath
--- ProductFamily 直接读 Products 表字段（无 ProductFamilies 查找表）
--- Display 库存含 Normal + Clearance（清仓 Demo 仍在门店 Display 上）
+-- ImageUrl / ProductFamily / IsDiscontinued 与 product_stock_price.sql 同源：
+--   图片 = ProductDocuments + Documents（默认图优先）
+--   系列 = Products.ProductFamily
+--   停产 = 仅导出标记，WHERE 中不过滤（勿加 IsDiscontinued = 0）
+--
+-- 其它 display*.sql 为程序自动兜底，日常只改本文件。
+-- Display 库存：仓库名含 Display，StockStatus Normal/Clearance
+-- ═══════════════════════════════════════════════════════════════
 
 SELECT
     w.Name AS WarehouseName,
@@ -23,7 +29,7 @@ SELECT
     SUM(s.Quantity) AS DisplayQty
 FROM [dbo].[Products] p
 
--- 产品默认图：优先 IsDefaultProductPicture=1，否则取最新上传图
+-- ↓ 与 sql/product_stock_price.sql 中 img 子查询保持同步 ↓
 LEFT JOIN (
     SELECT ProductId, RelativeFilePath
     FROM (
@@ -48,7 +54,10 @@ LEFT JOIN (
 INNER JOIN [dbo].[Stocks] s
     ON s.ProductId = p.Id
     AND s.StockStatus IN ('Normal', 'Clearance')
-    AND s.StockOnHoldStatus IS NULL
+    AND (
+        s.StockOnHoldStatus IS NULL
+        OR LTRIM(RTRIM(s.StockOnHoldStatus)) = ''
+    )
 
 INNER JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id

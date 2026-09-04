@@ -1,5 +1,6 @@
--- 【可选，一般不用】仅当库里有 ProductFamilies 查找表且 display.sql 不够用时，
--- 在 grabber_config.json 改 sql_file 指向本文件。默认请用 sql/display.sql。
+-- 诊断/兜底：含 On Hold 的 Display 库存（Demo Prepared 可能被 StockOnHoldStatus 挡住时用）
+-- 在 grabber_config.json 临时改 "sql_file": "sql/display.include_on_hold.sql" 测试
+-- 确认 918-072 能出现后，请在 SSMS 运行 sql/discover_display_stock.sql 看 StockOnHoldStatus 实际值
 
 SELECT
     w.Name AS WarehouseName,
@@ -16,6 +17,7 @@ SELECT
     ) AS SubProductFamily,
     MAX(CASE WHEN ISNULL(p.IsDiscontinued, 0) = 1 THEN 1 ELSE 0 END) AS IsDiscontinued,
     s.StockStatus AS StockStatus,
+    ISNULL(CAST(s.StockOnHoldStatus AS NVARCHAR(64)), N'') AS StockOnHoldStatus,
     MAX(
         CASE
             WHEN img.RelativeFilePath IS NOT NULL
@@ -55,10 +57,6 @@ LEFT JOIN (
 INNER JOIN [dbo].[Stocks] s
     ON s.ProductId = p.Id
     AND s.StockStatus IN (N'Normal', N'Clearance')
-    AND (
-        s.StockOnHoldStatus IS NULL
-        OR LTRIM(RTRIM(s.StockOnHoldStatus)) = N''
-    )
 
 INNER JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id
@@ -72,7 +70,8 @@ GROUP BY
     pf.Name,
     psf.Name,
     p.ProductFamily,
-    s.StockStatus
+    s.StockStatus,
+    s.StockOnHoldStatus
 
 HAVING SUM(s.Quantity) > 0
 

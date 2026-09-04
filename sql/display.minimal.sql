@@ -1,5 +1,5 @@
--- 兜底 SQL：不含 ImageUrl / ProductFamily 列（当 Products 表没有图片字段时使用）
--- grabber 会在 display.sql 报「Invalid object/column name」时自动尝试本文件。
+-- 【自动兜底，勿改】主文件 sql/display.sql 报列/表不存在时程序才会尝试本文件。
+-- 日常只维护 display.sql（含 ImageUrl，与 product_stock_price.sql 同源）。
 
 SELECT
     w.Name AS WarehouseName,
@@ -7,7 +7,7 @@ SELECT
     p.Name AS ProductName,
     CAST('' AS NVARCHAR(200)) AS ProductFamily,
     p.Name AS SubProductFamily,
-    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    MAX(CASE WHEN ISNULL(p.IsDiscontinued, 0) = 1 THEN 1 ELSE 0 END) AS IsDiscontinued,
     s.StockStatus AS StockStatus,
     CAST('' AS NVARCHAR(500)) AS ImageUrl,
     SUM(s.Quantity) AS DisplayQty
@@ -16,7 +16,10 @@ JOIN Warehouses w ON s.WarehouseId = w.Id
 JOIN Products p ON s.ProductId = p.Id
 WHERE w.Name LIKE '%Display%'
   AND s.StockStatus IN ('Normal', 'Clearance')
-  AND s.StockOnHoldStatus IS NULL
-GROUP BY w.Name, p.Sku, p.Name, p.IsDiscontinued, s.StockStatus
+  AND (
+      s.StockOnHoldStatus IS NULL
+      OR LTRIM(RTRIM(s.StockOnHoldStatus)) = ''
+  )
+GROUP BY w.Name, p.Sku, p.Name, s.StockStatus
 HAVING SUM(s.Quantity) > 0
 ORDER BY w.Name, DisplayQty DESC;
