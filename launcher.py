@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import traceback
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, ttk
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
@@ -21,7 +23,7 @@ from deps_check import (
 )
 
 APP_TITLE = "坪效管理工具"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
 BG = "#f4f6f8"
 CARD = "#ffffff"
@@ -31,6 +33,171 @@ ACCENT = "#3498db"
 ACCENT_DARK = "#2980b9"
 OK = "#27ae60"
 WARN = "#e67e22"
+
+
+class DataGrabDialog(tk.Toplevel):
+    """勾选要抓取的数据类型，一次执行。"""
+
+    def __init__(self, parent: tk.Misc, *, on_status=None) -> None:
+        super().__init__(parent)
+        self.title("数据抓取 — 选择要更新的内容")
+        self.geometry("560x480")
+        self.minsize(480, 420)
+        self.configure(bg=BG)
+        self.transient(parent)
+        self.grab_set()
+        self._on_status = on_status
+        self._running = False
+
+        from display_lookup import build_runtime_config, load_grabber_config
+
+        cfg = load_grabber_config()
+        runtime = build_runtime_config(cfg)
+
+        intro = tk.Label(
+            self,
+            text="勾选需要的 Excel，点「开始抓取」。Display 与周销量可分开，避免周销量超时拖垮 Display。",
+            font=("Microsoft YaHei UI", 10),
+            bg=BG,
+            fg=TEXT,
+            wraplength=520,
+            justify="left",
+        )
+        intro.pack(anchor="w", padx=16, pady=(14, 8))
+
+        opts = ttk.LabelFrame(self, text="抓取内容", padding=12)
+        opts.pack(fill="x", padx=16, pady=6)
+
+        self.var_display = tk.BooleanVar(value=True)
+        self.var_sales = tk.BooleanVar(value=bool(cfg.get("grab_sales_with_display", False)))
+        self.var_stock = tk.BooleanVar(value=False)
+        self.var_roi = tk.BooleanVar(value=bool(cfg.get("sync_roi_after_grab", False)))
+
+        ttk.Checkbutton(
+            opts,
+            text="Display 大库 → data/display.xlsx（含 ImageUrl、停产 Demo）",
+            variable=self.var_display,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            opts,
+            text="周销量 → data/weekly_sales.xlsx（较慢，可单独勾选）",
+            variable=self.var_sales,
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Checkbutton(
+            opts,
+            text="仓库库存/价格 → data/product_stock_price.xlsx",
+            variable=self.var_stock,
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Checkbutton(
+            opts,
+            text="同步 ROI 到 furniture_templates.json 与门店布局",
+            variable=self.var_roi,
+        ).pack(anchor="w", pady=(6, 0))
+
+        sql_label = os.path.relpath(runtime["sql_file"], SCRIPT_DIR)
+        tk.Label(
+            opts,
+            text=f"Display SQL: {sql_label}",
+            font=("Microsoft YaHei UI", 9),
+            fg=MUTED,
+        ).pack(anchor="w", pady=(10, 0))
+
+        log_frame = ttk.LabelFrame(self, text="执行日志", padding=8)
+        log_frame.pack(fill="both", expand=True, padx=16, pady=6)
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame, height=10, bg="#111827", fg="#e5e7eb", font=("Consolas", 9)
+        )
+        self.log_text.pack(fill="both", expand=True)
+
+        btn_row = tk.Frame(self, bg=BG)
+        btn_row.pack(fill="x", padx=16, pady=(0, 14))
+        self.run_btn = ttk.Button(btn_row, text="开始抓取", command=self._start_grab)
+        self.run_btn.pack(side="left")
+        ttk.Button(btn_row, text="关闭", command=self.destroy).pack(side="right")
+
+    def _log(self, msg: str) -> None:
+        self.log_text.insert("end", msg + "\n")
+        self.log_text.see("end")
+        if self._on_status:
+            self._on_status.set(msg)
+
+    def _start_grab(self) -> None:
+        if self._running:
+            return
+        if not any(
+            (
+                self.var_display.get(),
+                self.var_sales.get(),
+                self.var_stock.get(),
+                self.var_roi.get(),
+            )
+        ):
+            messagebox.showwarning("未选择", "请至少勾选一项。", parent=self)
+            return
+        self._running = True
+        self.run_btn.config(state="disabled")
+        self.log_text.delete("1.0", "end")
+        threading.Thread(target=self._grab_worker, daemon=True).start()
+
+    def _grab_worker(self) -> None:
+        ok = True
+        try:
+            from display_lookup import (
+                build_runtime_config,
+                grab_sql_to_excel,
+                last_sql_file,
+                load_grabber_config,
+                run_grab_pipeline,
+            )
+            from stock_price_lookup import DEFAULT_EXCEL, STOCK_PRICE_SQL, reload_stock_prices
+
+            cfg = load_grabber_config()
+
+            if self.var_display.get() or self.var_sales.get() or self.var_roi.get():
+                self._log("── 开始 Display / 周销量 / ROI ──")
+                results = run_grab_pipeline(
+                    cfg,
+                    display=self.var_display.get(),
+                    sales=self.var_sales.get(),
+                    sync_roi=self.var_roi.get(),
+                    log=self._log,
+                )
+                if self.var_display.get():
+                    disp = results.get("display", {})
+                    self._log(f"Display: {disp.get('count', 0)} 款")
+                    sql_used = last_sql_file()
+                    if sql_used:
+                        self._log(f"实际 SQL: {os.path.basename(sql_used)}")
+                if self.var_sales.get() and "sales" not in results:
+                    ok = False
+
+            if self.var_stock.get():
+                self._log("── 开始仓库库存/价格 ──")
+                runtime = build_runtime_config(cfg)
+                stock_cfg = {
+                    **cfg,
+                    "sql_file": cfg.get("stock_price_sql_file") or STOCK_PRICE_SQL,
+                    "output_excel": cfg.get("stock_price_output_excel") or DEFAULT_EXCEL,
+                }
+                rows, excel_path = grab_sql_to_excel(stock_cfg)
+                cache = reload_stock_prices(excel_path)
+                self._log(f"库存/价格: {len(rows)} 行 · {len(cache)} SKU → {excel_path}")
+
+            self._log("── 全部完成 ──")
+        except Exception as exc:
+            ok = False
+            self._log(f"失败: {exc}")
+            self._log(traceback.format_exc())
+
+        def finish() -> None:
+            self._running = False
+            self.run_btn.config(state="normal")
+            if ok:
+                messagebox.showinfo("抓取完成", "所选数据已更新，详见日志。", parent=self)
+            else:
+                messagebox.showerror("抓取失败", "部分任务失败，请查看日志。", parent=self)
+
+        self.after(0, finish)
 
 
 class LauncherApp:
@@ -101,21 +268,15 @@ class LauncherApp:
         data_frame.pack(fill="x", padx=20, pady=(0, 12))
         row = tk.Frame(data_frame)
         row.pack(fill="x")
-        ttk.Button(row, text="Display 数据抓取", command=lambda: self.launch("grab_display_gui.py", "Display")).pack(
+        ttk.Button(row, text="选择抓取内容…", command=self.show_grab_wizard).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="Display 高级/定时", command=lambda: self.launch("grab_display_gui.py", "Display 抓取工具", gui=True)).pack(
             side="left", padx=(0, 8)
         )
-        ttk.Button(row, text="周销量抓取", command=lambda: self.launch_script("scripts/grab_sales.py", "周销量")).pack(
-            side="left", padx=(0, 8)
-        )
-        ttk.Button(row, text="仓库库存/价格", command=lambda: self.launch_script("scripts/grab_stock_price.py", "库存价格")).pack(
-            side="left", padx=(0, 8)
-        )
-        ttk.Button(row, text="同步 ROI 到模板", command=lambda: self.launch_script("scripts/update_roi.py", "ROI")).pack(
-            side="left", padx=(0, 8)
-        )
+        ttk.Button(row, text="仅周销量", command=lambda: self._quick_grab(sales_only=True)).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="仅库存/价格", command=lambda: self._quick_grab(stock_only=True)).pack(side="left", padx=(0, 8))
         tk.Label(
             data_frame,
-            text="Display 抓取默认同时导出周销量；仓库库存/价格用 grab_stock_price.bat 单独抓取；ROI 可在抓取工具勾选或点「同步 ROI」",
+            text="推荐点「选择抓取内容」勾选 Display / 周销量 / 库存价格 / ROI；周销量较慢时可只勾 Display。",
             font=("Microsoft YaHei UI", 9),
             fg=MUTED,
         ).pack(anchor="w", pady=(8, 0))
@@ -195,7 +356,7 @@ class LauncherApp:
                 return not check_dependencies()
         return False
 
-    def launch(self, filename: str, label: str) -> None:
+    def launch(self, filename: str, label: str, *, gui: bool = False) -> None:
         path = os.path.join(SCRIPT_DIR, filename)
         if not os.path.isfile(path):
             messagebox.showerror("找不到文件", path, parent=self.root)
@@ -212,7 +373,7 @@ class LauncherApp:
                 parent=self.root,
             )
             return
-        self._spawn([sys.executable, path], label)
+        self._spawn([sys.executable, path], label, new_console=not gui)
 
     def launch_script(self, rel_path: str, label: str, *, wait: bool = False) -> None:
         path = os.path.join(SCRIPT_DIR, rel_path)
@@ -229,22 +390,32 @@ class LauncherApp:
         else:
             self._spawn(cmd, label)
 
-    def _spawn(self, cmd: list[str], label: str) -> None:
+    def _spawn(self, cmd: list[str], label: str, *, new_console: bool = True) -> None:
         try:
-            if sys.platform == "win32":
-                subprocess.Popen(
-                    cmd,
-                    cwd=SCRIPT_DIR,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
-                )
-            else:
-                subprocess.Popen(cmd, cwd=SCRIPT_DIR)
+            kwargs: dict = {"cwd": SCRIPT_DIR}
+            if sys.platform == "win32" and new_console:
+                kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+            subprocess.Popen(cmd, **kwargs)
             self.status_var.set(f"已启动: {label}")
         except Exception as exc:
             messagebox.showerror("启动失败", str(exc), parent=self.root)
 
+    def show_grab_wizard(self) -> None:
+        if not self._require_deps(["pymssql", "sqlalchemy", "pandas", "openpyxl"]):
+            return
+        DataGrabDialog(self.root, on_status=self.status_var.set)
+
+    def _quick_grab(self, *, sales_only: bool = False, stock_only: bool = False) -> None:
+        if not self._require_deps(["pymssql", "sqlalchemy", "pandas", "openpyxl"]):
+            return
+        dlg = DataGrabDialog(self.root, on_status=self.status_var.set)
+        dlg.var_display.set(False)
+        dlg.var_sales.set(sales_only)
+        dlg.var_stock.set(stock_only)
+        dlg.var_roi.set(False)
+
     def show_data_menu(self) -> None:
-        self.launch("grab_display_gui.py", "Display 数据抓取")
+        self.show_grab_wizard()
 
     def run(self) -> None:
         self.root.mainloop()
