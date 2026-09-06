@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.getcwd())
@@ -25,7 +26,6 @@ from ui_common import (
     C_ACCENT,
     C_BG,
     C_BORDER,
-    C_CANVAS,
     C_MUTED,
     C_SIDEBAR,
     C_SIDEBAR_DARK,
@@ -99,9 +99,6 @@ class StoreDashboard:
         from store_dashboard_data import unique_shop_ids_from_entries
 
         return unique_shop_ids_from_entries(self.selected_slugs)
-
-    def _active_stores(self) -> list[dict]:
-        return [e for e in entries_for_ui() if e["slug"] in self.selected_slugs]
 
     def refresh_data(self) -> None:
         if not sales_data_available():
@@ -292,7 +289,6 @@ class StoreDashboard:
             self.screen.blit(self.font_body.render(msg, True, C_MUTED), (area.x, area.y))
             return
 
-        # 图例（按 sales shop_id，基督城两布局店合并为一个 chch）
         lx = area.x
         ly = area.y
         for i, ov in enumerate(self.overviews):
@@ -339,28 +335,29 @@ class StoreDashboard:
         self.screen.blit(axis, (area.x, area.bottom - 18))
 
 
+def _show_fatal_error(detail: str) -> None:
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("多店对比启动失败", detail[:2000])
+        root.destroy()
+    except Exception:
+        print(detail, file=sys.stderr)
+        try:
+            input("按 Enter 关闭…")
+        except EOFError:
+            pass
+
+
 def main() -> None:
     try:
         StoreDashboard().run()
-    except Exception as exc:
-        import traceback
-
-        detail = traceback.format_exc()
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror("多店对比启动失败", f"{exc}\n\n{detail[:1200]}")
-            root.destroy()
-        except Exception:
-            print(detail)
-            try:
-                input("按 Enter 关闭…")
-            except EOFError:
-                pass
-        raise SystemExit(1) from exc
+    except Exception:
+        _show_fatal_error(traceback.format_exc())
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

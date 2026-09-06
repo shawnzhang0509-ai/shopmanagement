@@ -159,6 +159,19 @@ def _normalize_paste(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0]
 
 
+def load_font(size: int, bold: bool = False) -> pygame.font.Font:
+    """Load a UI font by family candidates (call after pygame.init())."""
+    if not pygame.get_init():
+        pygame.init()
+    if not pygame.font.get_init():
+        pygame.font.init()
+    for name in FONT_CANDIDATES:
+        path = pygame.font.match_font(name, bold=bold)
+        if path:
+            return pygame.font.Font(path, size)
+    return pygame.font.SysFont(None, size, bold=bold)
+
+
 def init_fonts():
     """Load fonts after pygame.init(). Safe to call multiple times."""
     global FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_LABEL, FONT_MARK
@@ -169,13 +182,6 @@ def init_fonts():
         pygame.init()
     if not pygame.font.get_init():
         pygame.font.init()
-
-    def load_font(size: int, bold: bool = False) -> pygame.font.Font:
-        for name in FONT_CANDIDATES:
-            path = pygame.font.match_font(name, bold=bold)
-            if path:
-                return pygame.font.Font(path, size)
-        return pygame.font.SysFont(None, size, bold=bold)
 
     FONT_TITLE = load_font(22, bold=True)
     FONT_BODY = load_font(16)
