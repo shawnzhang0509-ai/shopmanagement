@@ -55,8 +55,16 @@ def resolve_placed_family(name: str, stored: str = "") -> str:
     except Exception:
         pass
     try:
-        from sales_lookup import resolve_product_family
+        from sales_lookup import aggregate_by_sku, resolve_product_family
+        from sales_lookup import _normalize_key
 
+        sku_key = _normalize_key(sku)
+        sku_totals = aggregate_by_sku()
+        row = sku_totals.get(sku_key)
+        if row:
+            fam = sanitize_display_text(row.get("product_family", ""), "")
+            if fam and not _is_placeholder_family(fam, sku):
+                return fam
         fam = resolve_product_family(sku)
         if fam and not _is_placeholder_family(fam, sku):
             return fam
