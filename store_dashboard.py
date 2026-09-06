@@ -340,7 +340,27 @@ class StoreDashboard:
 
 
 def main() -> None:
-    StoreDashboard().run()
+    try:
+        StoreDashboard().run()
+    except Exception as exc:
+        import traceback
+
+        detail = traceback.format_exc()
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("多店对比启动失败", f"{exc}\n\n{detail[:1200]}")
+            root.destroy()
+        except Exception:
+            print(detail)
+            try:
+                input("按 Enter 关闭…")
+            except EOFError:
+                pass
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":
