@@ -602,6 +602,55 @@ def furniture_multi_selection_screen_rect() -> pygame.Rect | None:
     return pygame.Rect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
 
 
+def furniture_world_bbox(furn) -> tuple[float, float, float, float]:
+    pts = furn.get_rotated_points()
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def align_selected_furniture(mode: str) -> None:
+    """多选家具对齐：left / right / top / bottom。"""
+    if len(selected_furnitures) < 2:
+        show_toast("请框选或 Shift 选中至少 2 件家具")
+        return
+    labels = {
+        "left": "左对齐",
+        "right": "右对齐",
+        "top": "上对齐",
+        "bottom": "下对齐",
+    }
+    if mode not in labels:
+        return
+    push_undo()
+    bboxes = {id(furn): furniture_world_bbox(furn) for furn in selected_furnitures}
+    all_xmin = min(b[0] for b in bboxes.values())
+    all_ymin = min(b[1] for b in bboxes.values())
+    all_xmax = max(b[2] for b in bboxes.values())
+    all_ymax = max(b[3] for b in bboxes.values())
+    moved = 0
+    for furn in selected_furnitures:
+        xmin, ymin, xmax, ymax = bboxes[id(furn)]
+        dx = dy = 0.0
+        if mode == "left":
+            dx = all_xmin - xmin
+        elif mode == "right":
+            dx = all_xmax - xmax
+        elif mode == "top":
+            dy = all_ymin - ymin
+        elif mode == "bottom":
+            dy = all_ymax - ymax
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            continue
+        furn.x += dx
+        furn.y += dy
+        moved += 1
+    if moved:
+        show_toast(f"已{labels[mode]}（{moved} 件）")
+    else:
+        show_toast("已在同一条对齐线上")
+
+
 def build_furniture_drag_snapshot(primary) -> list[tuple[object, float, float]]:
     sync_furniture_instance_ids()
     return [(item, item.x, item.y) for item in collect_furniture_drag_pack(primary)]
@@ -6612,6 +6661,11 @@ def build_sidebar_ui():
         buttons["bind_parent"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "绑定父件", "bind_parent")
         buttons["unbind"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "解绑", "unbind")
         y += SIDEBAR_BTN_H
+        buttons["align_left"] = Button((pad, y, bw4, SIDEBAR_BTN_H - 2), "左对齐", "align_left")
+        buttons["align_right"] = Button((pad + bw4 + SIDEBAR_BTN_GAP, y, bw4, SIDEBAR_BTN_H - 2), "右对齐", "align_right")
+        buttons["align_top"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 2, y, bw4, SIDEBAR_BTN_H - 2), "上对齐", "align_top")
+        buttons["align_bottom"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 3, y, bw4, SIDEBAR_BTN_H - 2), "下对齐", "align_bottom")
+        y += SIDEBAR_BTN_H
         buttons["rename_store"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "重命名", "rename_store")
         buttons["store"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "画布", "store")
         y += SIDEBAR_BTN_H
@@ -6941,6 +6995,14 @@ def handle_toolbar_click(action, buttons, dropdowns=None):
         start_bind_to_parent()
     elif action == "unbind":
         unbind_furniture()
+    elif action == "align_left":
+        align_selected_furniture("left")
+    elif action == "align_right":
+        align_selected_furniture("right")
+    elif action == "align_top":
+        align_selected_furniture("top")
+    elif action == "align_bottom":
+        align_selected_furniture("bottom")
     elif action == "roi_overlap":
         apply_roi_dropdown("on" if not show_roi_overlap_mode else "off", buttons, dropdowns)
     elif action == "week_prev":

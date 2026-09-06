@@ -23,7 +23,7 @@ from deps_check import (
 )
 
 APP_TITLE = "坪效管理工具"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 
 BG = "#f4f6f8"
 CARD = "#ffffff"
@@ -369,7 +369,8 @@ class LauncherApp:
         if not os.path.isfile(path):
             messagebox.showerror("找不到文件", path, parent=self.root)
             return
-        need = ["pygame"] if filename in ("layout.py", "furniture_sim.py") else []
+        pygame_apps = ("layout.py", "furniture_sim.py", "store_dashboard.py")
+        need = ["pygame"] if filename in pygame_apps else []
         if filename == "grab_display_gui.py":
             need = ["pymssql", "sqlalchemy", "pandas", "openpyxl"]
         if need and not self._require_deps(need):
