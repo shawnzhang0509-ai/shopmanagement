@@ -2,13 +2,13 @@
 """多店汇总 · 系列横向对比 — 一屏看多店，可选 4/8/12 周。"""
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 import os
 import subprocess
 import sys
 import traceback
+
+from layout_preview_render import render_layout_preview
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.getcwd())
@@ -28,7 +28,7 @@ from store_dashboard_data import (
     slug_to_entry,
     week_range_label,
 )
-from layout_family_lookup import families_in_layouts, layout_file_exists, load_layout_snapshot
+from layout_family_lookup import families_in_layout, families_in_layouts, layout_file_exists, load_layout_snapshot
 from sales_lookup import sales_data_available
 from ui_common import (
     C_ACCENT,
@@ -90,7 +90,7 @@ class StoreDashboard:
         self.font_small = load_font(12)
         self.font_tiny = load_font(11)
 
-        self.view = VIEW_COMPARE
+        self.view = VIEW_LAYOUTS
         self.family_filter = FILTER_LAYOUT
         self.num_weeks = 8
         self.week_keys: list[str] = []
@@ -407,65 +407,32 @@ class StoreDashboard:
         name = slug_to_entry().get(slug, {}).get("name", slug)
         self.status = f"已打开布局编辑器: {name}"
 
-    @staticmethod
-    def _furn_color(name: str) -> tuple[int, int, int]:
-        h = int(hashlib.md5(name.encode()).hexdigest()[:6], 16)
-        return (90 + h % 100, 90 + (h >> 8) % 100, 90 + (h >> 16) % 100)
-
-    @staticmethod
-    def _rotated_world_points(furn: dict) -> list[tuple[float, float]]:
-        points = furn.get("points") or []
-        if len(points) < 3:
-            return []
-        x, y = float(furn.get("x", 0)), float(furn.get("y", 0))
-        rot = float(furn.get("rotation", 0))
-        cx = sum(p[0] for p in points) / len(points)
-        cy = sum(p[1] for p in points) / len(points)
-        rad = math.radians(rot)
-        cos_a, sin_a = math.cos(rad), math.sin(rad)
-        out = []
-        for px, py in points:
-            rx, ry = px - cx, py - cy
-            out.append((rx * cos_a - ry * sin_a + cx + x, rx * sin_a + ry * cos_a + cy + y))
-        return out
-
     def _draw_layout_mini(self, surface, rect: pygame.Rect, slug: str, accent, title: str) -> None:
         pygame.draw.rect(surface, (255, 255, 255), rect, border_radius=10)
         pygame.draw.rect(surface, C_BORDER, rect, 1, border_radius=10)
         pygame.draw.rect(surface, accent, (rect.x, rect.y, 5, rect.height), border_radius=10)
-        surface.blit(self.font_body.render(title, True, C_TEXT), (rect.x + 12, rect.y + 8))
 
-        inner = pygame.Rect(rect.x + 10, rect.y + 32, rect.width - 20, rect.height - 52)
         data = load_layout_snapshot(slug)
+        store = (data or {}).get("store") or {}
+        sw = float(store.get("width_mm", 0)) / 1000
+        sh = float(store.get("height_mm", 0)) / 1000
+        meta = f"{sw:g}×{sh:g} m" if sw and sh else ""
+        surface.blit(self.font_body.render(title, True, C_TEXT), (rect.x + 12, rect.y + 8))
+        if meta:
+            surface.blit(self.font_tiny.render(meta, True, C_MUTED), (rect.x + 12, rect.y + 28))
+
+        preview = pygame.Rect(rect.x + 8, rect.y + 44, rect.width - 16, rect.height - 68)
         if not data:
             msg = "无布局文件" if not layout_file_exists(slug) else "读取失败"
-            surface.blit(self.font_small.render(msg, True, C_MUTED), (inner.x, inner.centery))
+            surface.blit(self.font_small.render(msg, True, C_MUTED), (preview.centerx - 40, preview.centery))
             return
 
-        store = data.get("store") or {}
-        sw = max(1.0, float(store.get("width_mm", 20000)))
-        sh = max(1.0, float(store.get("height_mm", 15000)))
-        pygame.draw.rect(surface, (248, 250, 252), inner, border_radius=6)
-        scale = min(inner.width / sw, inner.height / sh) * 0.9
-        ox = inner.x + (inner.width - sw * scale) / 2
-        oy = inner.y + (inner.height - sh * scale) / 2
-        floor = pygame.Rect(int(ox), int(oy), max(1, int(sw * scale)), max(1, int(sh * scale)))
-        pygame.draw.rect(surface, (255, 255, 255), floor)
-        pygame.draw.rect(surface, (200, 210, 220), floor, 1)
-
-        for furn in data.get("furnitures", []):
-            pts = self._rotated_world_points(furn)
-            if len(pts) < 3:
-                continue
-            screen_pts = [(ox + p[0] * scale, oy + p[1] * scale) for p in pts]
-            color = self._furn_color(str(furn.get("name", "")))
-            pygame.draw.polygon(surface, color, screen_pts)
-            pygame.draw.polygon(surface, (255, 255, 255), screen_pts, 1)
-
-        n = len(data.get("furnitures", []))
+        stats = render_layout_preview(surface, preview, data)
+        fam_n = len(families_in_layout(slug))
+        footer = f"{stats['furniture_count']} 件 · {stats['obstacle_count']} 障碍 · {fam_n} 系列 · 点击打开编辑器"
         surface.blit(
-            self.font_tiny.render(f"{n} 件 · 点击打开编辑器", True, C_MUTED),
-            (rect.x + 12, rect.bottom - 20),
+            self.font_tiny.render(_truncate(self.font_tiny, footer, rect.width - 24), True, C_MUTED),
+            (rect.x + 12, rect.bottom - 18),
         )
 
     def _draw_layouts(self, w: int, h: int) -> None:
@@ -476,10 +443,11 @@ class StoreDashboard:
             self.screen.blit(self.font_body.render("请至少选一个门店", True, C_MUTED), (area.x, area.y))
             return
 
-        cols = 2 if len(entries) <= 4 else 3
-        gap = 14
+        cols = 1 if len(entries) <= 2 else 2
+        gap = 16
+        rows = (len(entries) + cols - 1) // cols
+        card_h = max(280, (area.height - gap * (rows - 1)) // max(1, rows))
         card_w = (area.width - gap * (cols - 1)) // cols
-        card_h = min(360, max(240, (area.height - gap) // ((len(entries) + cols - 1) // cols)))
 
         for i, entry in enumerate(entries):
             col = i % cols
@@ -494,7 +462,11 @@ class StoreDashboard:
                 self.screen, card, entry["slug"], STORE_COLORS[i % len(STORE_COLORS)], entry["name"]
             )
 
-        tip = self.font_tiny.render("一屏预览各店平面图 · 点击卡片打开该店布局编辑器", True, C_MUTED)
+        tip = self.font_tiny.render(
+            "预览自动缩放到家具+墙体区域（与 layout 一致）· 点击卡片打开该店编辑器",
+            True,
+            C_MUTED,
+        )
         self.screen.blit(tip, (area.x, area.bottom - 18))
 
 
