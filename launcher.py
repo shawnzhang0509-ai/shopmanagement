@@ -23,7 +23,7 @@ from deps_check import (
 )
 
 APP_TITLE = "坪效管理工具"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 
 BG = "#f4f6f8"
 CARD = "#ffffff"
@@ -219,7 +219,7 @@ class LauncherApp:
         )
         tk.Label(
             header,
-            text="一个入口 · 数据抓取 · 家具测绘 · 门店坪效布局",
+            text="一个入口 · 数据抓取 · 家具测绘 · 门店坪效 · 多店对比",
             font=("Microsoft YaHei UI", 11),
             bg=BG,
             fg=MUTED,
@@ -236,7 +236,7 @@ class LauncherApp:
 
         cards = tk.Frame(self.root, bg=BG)
         cards.pack(fill="both", expand=True, padx=20, pady=8)
-        for col in range(3):
+        for col in range(4):
             cards.columnconfigure(col, weight=1)
 
         self._card(
@@ -262,6 +262,14 @@ class LauncherApp:
             "门店平面图 · 家具摆放 · 坪效热力图",
             "#16a085",
             lambda: self.launch("layout.py", "坪效布局"),
+        )
+        self._card(
+            cards,
+            3,
+            "④ 多店对比",
+            "多店一屏 · 系列横向柱图 · 4/8/12 周",
+            "#e67e22",
+            lambda: self.launch("store_dashboard.py", "多店对比"),
         )
 
         data_frame = ttk.LabelFrame(self.root, text="数据抓取（常用）", padding=12)
