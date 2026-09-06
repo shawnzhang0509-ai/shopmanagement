@@ -3547,7 +3547,10 @@ def resolve_template_product_family(item: dict, display_items=None) -> str:
             return resolved
     except Exception:
         pass
-    return stored or fallback
+    result = stored or fallback
+    if family_is_placeholder(result, tpl_id):
+        return ""
+    return result
 
 
 def effective_product_family(name: str, stored: str = "") -> str:
@@ -3796,6 +3799,41 @@ def load_furniture_templates(json_path):
     return templates
 
 
+def repair_furniture_templates_json(json_path="furniture_templates.json") -> int:
+    """把 JSON 里 SKU 占位的 product_family 修正为 Display/推断系列名并写回文件。"""
+    if not os.path.isfile(json_path):
+        return 0
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return 0
+    if not isinstance(data, list):
+        return 0
+
+    display_items = _load_display_items_cache()
+    fixed = 0
+    for item in data:
+        tpl_id = sanitize_display_text(item.get("id"), "")
+        if not tpl_id:
+            continue
+        stored = sanitize_display_text(item.get("product_family"), "")
+        if stored and not family_is_placeholder(stored, tpl_id):
+            continue
+        resolved = resolve_template_product_family(item, display_items)
+        if resolved and not family_is_placeholder(resolved, tpl_id):
+            item["product_family"] = resolved
+            fixed += 1
+
+    if fixed:
+        global _templates_json_cache, _templates_json_mtime
+        _templates_json_cache = None
+        _templates_json_mtime = 0.0
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    return fixed
+
+
 furniture_templates = []
 
 
@@ -3826,6 +3864,7 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
     _cached_family_dropdown_options = None
 
     try:
+        templates_repaired = repair_furniture_templates_json("furniture_templates.json")
         furniture_templates = load_furniture_templates("furniture_templates.json")
     except Exception as exc:
         show_toast(f"模板刷新失败: {exc}")
@@ -3855,6 +3894,8 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
         selected_template_index = max(0, len(furniture_templates) - 1)
 
     msg = f"已刷新 {len(furniture_templates)} 个家具模板（Display/测绘已同步）"
+    if templates_repaired:
+        msg += f"，修正 {templates_repaired} 个模板系列名"
     if placed_synced:
         msg += f"，{placed_synced} 件已摆场系列已更新（请保存布局）"
     show_toast(msg)
