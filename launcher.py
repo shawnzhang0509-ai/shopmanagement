@@ -367,7 +367,7 @@ class LauncherApp:
         ttk.Button(row, text="仅库存/价格", command=lambda: self._quick_grab(stock_only=True)).pack(side="left", padx=(0, 8))
         tk.Label(
             data_frame,
-            text="推荐点「选择抓取内容」勾选 Display / 周销量 / 库存价格 / ROI；周销量较慢时可只勾 Display。",
+            text="推荐点「选择抓取内容」：可多选 NZ/AU/CA 地区，勾选 Display / 周销量 / 库存 / ROI 后点「开始抓取」。",
             font=("Microsoft YaHei UI", 9),
             fg=MUTED,
         ).pack(anchor="w", pady=(8, 0))
