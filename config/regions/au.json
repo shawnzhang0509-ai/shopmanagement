@@ -1,6 +1,7 @@
 {
   "id": "au",
   "label": "澳洲",
+  "default_sql_folder": "sql/au",
   "default_output_folder": "data/au",
   "image_base_url": "https://ierpapi.ifurniture.com.au/",
   "shops": [

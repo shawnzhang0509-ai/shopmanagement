@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Display 数据自动抓取工具 — GUI（类似库存 main_gui）。"""
+"""Display / 周销量 多区域抓取工具 — GUI（参考供应链自动出数据界面）。"""
 from __future__ import annotations
 
-import json
 import os
+import subprocess
 import sys
 import threading
 import traceback
@@ -22,13 +22,18 @@ from display_lookup import (
     last_sql_file,
     load_grabber_config,
     reload_shops,
-    resolve_database_url,
     run_grab_pipeline,
     save_grabber_config,
     shop_stats,
     test_database_connection,
 )
-from region_config import merge_region_config, region_database_url, region_labels
+from region_config import (
+    SUPPORTED_REGIONS,
+    config_for_region,
+    merge_region_config,
+    region_database_url,
+    region_labels,
+)
 
 ACCENT = "#3498db"
 ACCENT_HOVER = "#2980b9"
@@ -37,12 +42,31 @@ TEXT = "#2c3e50"
 MUTED = "#7f8c8d"
 
 
+def _region_combo_label(region_id: str) -> str:
+    for rid, label in region_labels():
+        if rid == region_id:
+            return f"{rid.upper()} {label}"
+    return region_id.upper()
+
+
+def _open_folder(path: str) -> None:
+    folder = os.path.abspath(path)
+    if not os.path.isdir(folder):
+        os.makedirs(folder, exist_ok=True)
+    if sys.platform == "win32":
+        os.startfile(folder)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.run(["open", folder], check=False)
+    else:
+        subprocess.run(["xdg-open", folder], check=False)
+
+
 class DisplayGrabberApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
-        self.root.title("Display 数据自动抓取工具")
-        self.root.geometry("820x640")
-        self.root.minsize(720, 560)
+        self.root.title("Display / 周销量 — 多区域抓取")
+        self.root.geometry("860x720")
+        self.root.minsize(760, 640)
         self.root.configure(bg=BG)
 
         self._running = False
@@ -50,9 +74,15 @@ class DisplayGrabberApp:
         self._schedule_after_id: str | None = None
         self._next_run: datetime | None = None
 
+        self._run_vars: dict[str, tk.BooleanVar] = {
+            rid: tk.BooleanVar(value=(rid == "nz")) for rid in SUPPORTED_REGIONS
+        }
+        self._edit_region_var = tk.StringVar(value="nz")
+        self._region_fields: dict[str, dict[str, str]] = {}
+
         self._build_ui()
         self._load_fields()
-        self.log("应用程序已启动。点击「立即执行一次」手动运行，或设置频率后点击「开始自动调度」。")
+        self._log_region_paths()
 
     def _build_ui(self) -> None:
         pad = {"padx": 10, "pady": 6}
@@ -64,25 +94,36 @@ class DisplayGrabberApp:
         style.configure("Accent.TButton", foreground="white", background=ACCENT)
         style.map("Accent.TButton", background=[("active", ACCENT_HOVER)])
 
-        # ── 基本配置 ──
-        cfg_frame = ttk.LabelFrame(self.root, text="基本配置", padding=10)
-        cfg_frame.pack(fill="x", padx=12, pady=(12, 6))
+        run_frame = ttk.LabelFrame(
+            self.root,
+            text="本次要跑的地区（可多选，一次执行）",
+            padding=10,
+        )
+        run_frame.pack(fill="x", padx=12, pady=(12, 6))
+        row = ttk.Frame(run_frame)
+        row.pack(anchor="w")
+        for rid, label in region_labels():
+            ttk.Checkbutton(row, text=label, variable=self._run_vars[rid]).pack(
+                side="left", padx=(0, 18)
+            )
 
-        ttk.Label(cfg_frame, text="国家/区域").grid(row=0, column=0, sticky="w", **pad)
-        self.region_var = tk.StringVar(value="nz")
-        region_combo = ttk.Combobox(
+        cfg_frame = ttk.LabelFrame(
+            self.root,
+            text="地区配置（每个地区独立连接串 / SQL 模板目录 / 输出目录）",
+            padding=10,
+        )
+        cfg_frame.pack(fill="x", padx=12, pady=(0, 6))
+
+        ttk.Label(cfg_frame, text="正在编辑").grid(row=0, column=0, sticky="w", **pad)
+        edit_values = [_region_combo_label(rid) for rid in SUPPORTED_REGIONS]
+        self._edit_combo = ttk.Combobox(
             cfg_frame,
-            textvariable=self.region_var,
-            values=[rid for rid, _ in region_labels()],
+            values=edit_values,
             state="readonly",
-            width=12,
+            width=18,
         )
-        region_combo.grid(row=0, column=1, sticky="w", padx=8, pady=6)
-        region_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_region_changed())
-        self.region_label_var = tk.StringVar(value="新西兰")
-        ttk.Label(cfg_frame, textvariable=self.region_label_var, foreground=MUTED).grid(
-            row=0, column=2, sticky="w", padx=4
-        )
+        self._edit_combo.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        self._edit_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_edit_region_changed())
 
         ttk.Label(cfg_frame, text="数据库连接").grid(row=1, column=0, sticky="nw", **pad)
         db_row = ttk.Frame(cfg_frame)
@@ -91,29 +132,39 @@ class DisplayGrabberApp:
         self.db_entry.pack(fill="x", expand=True)
         ttk.Button(db_row, text="测试连接", command=self.test_connection).pack(anchor="e", pady=(6, 0))
 
-        ttk.Label(cfg_frame, text="SQL 文件夹").grid(row=2, column=0, sticky="w", **pad)
-        self.sql_folder_var = tk.StringVar(value="sql")
+        ttk.Label(cfg_frame, text="SQL 模板目录").grid(row=2, column=0, sticky="w", **pad)
+        self.sql_folder_var = tk.StringVar(value="sql/nz")
         ttk.Entry(cfg_frame, textvariable=self.sql_folder_var, width=60).grid(
             row=2, column=1, sticky="ew", padx=8, pady=6
         )
         ttk.Button(cfg_frame, text="浏览...", command=self._browse_sql).grid(row=2, column=2, padx=4)
 
         ttk.Label(cfg_frame, text="输出文件夹").grid(row=3, column=0, sticky="w", **pad)
-        self.output_folder_var = tk.StringVar(value="data")
+        self.output_folder_var = tk.StringVar(value="data/nz")
         ttk.Entry(cfg_frame, textvariable=self.output_folder_var, width=60).grid(
             row=3, column=1, sticky="ew", padx=8, pady=6
         )
-        ttk.Button(cfg_frame, text="浏览...", command=self._browse_output).grid(row=3, column=2, padx=4)
+        out_btns = ttk.Frame(cfg_frame)
+        out_btns.grid(row=3, column=2, padx=4)
+        ttk.Button(out_btns, text="浏览...", command=self._browse_output).pack(side="left")
+        ttk.Button(out_btns, text="打开", command=self._open_output).pack(side="left", padx=(4, 0))
+
+        hint = (
+            "结构示例：sql/nz/display.sql → data/nz/display.xlsx；"
+            "布局在 data/nz/layouts/。旧版 data/display.xlsx 仍可读取。"
+        )
+        ttk.Label(cfg_frame, text=hint, foreground=MUTED, wraplength=760).grid(
+            row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4)
+        )
         cfg_frame.columnconfigure(1, weight=1)
 
         grab_opts = ttk.LabelFrame(self.root, text="抓取选项", padding=10)
         grab_opts.pack(fill="x", padx=12, pady=(0, 6))
         self.grab_sales_var = tk.BooleanVar(value=True)
         self.sync_roi_var = tk.BooleanVar(value=False)
-        self.sales_path_hint = tk.StringVar(value="周销量 → data/weekly_sales.xlsx")
         ttk.Checkbutton(
             grab_opts,
-            textvariable=self.sales_path_hint,
+            text="同时抓取周销量（weekly_sales.xlsx）",
             variable=self.grab_sales_var,
         ).pack(anchor="w")
         ttk.Checkbutton(
@@ -122,7 +173,6 @@ class DisplayGrabberApp:
             variable=self.sync_roi_var,
         ).pack(anchor="w", pady=(4, 0))
 
-        # ── 自动调度 ──
         sched_frame = ttk.LabelFrame(self.root, text="自动调度设置", padding=10)
         sched_frame.pack(fill="x", padx=12, pady=6)
 
@@ -149,7 +199,6 @@ class DisplayGrabberApp:
             row=0, column=4, sticky="e", padx=8
         )
 
-        # ── 控制按钮 ──
         btn_frame = ttk.Frame(self.root, padding=(12, 4))
         btn_frame.pack(fill="x")
         ttk.Button(btn_frame, text="立即执行一次", style="Accent.TButton", command=self.run_once).pack(
@@ -164,7 +213,6 @@ class DisplayGrabberApp:
         self.tray_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(btn_frame, text="关闭时最小化到托盘", variable=self.tray_var).pack(side="right", padx=8)
 
-        # ── 进度 ──
         prog_frame = ttk.Frame(self.root, padding=(12, 4))
         prog_frame.pack(fill="x")
         ttk.Label(prog_frame, text="总进度").pack(anchor="w")
@@ -173,11 +221,10 @@ class DisplayGrabberApp:
         self.sku_var = tk.StringVar(value="Display: -")
         ttk.Label(prog_frame, textvariable=self.sku_var, foreground=MUTED).pack(anchor="w")
 
-        # ── 日志 ──
         log_frame = ttk.LabelFrame(self.root, text="执行日志", padding=8)
         log_frame.pack(fill="both", expand=True, padx=12, pady=(6, 12))
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=14, bg="#111827", fg="#e5e7eb", insertbackground="white", font=("Consolas", 10)
+            log_frame, height=12, bg="#111827", fg="#e5e7eb", insertbackground="white", font=("Consolas", 10)
         )
         self.log_text.pack(fill="both", expand=True)
         log_btns = ttk.Frame(log_frame)
@@ -197,92 +244,154 @@ class DisplayGrabberApp:
 
         self.root.after(0, append)
 
-    def _region_label_for(self, region_id: str) -> str:
-        for rid, label in region_labels():
-            if rid == region_id:
-                return label
-        return region_id
+    def _edit_region_id(self) -> str:
+        text = self._edit_combo.get().strip()
+        if not text:
+            return "nz"
+        return text.split()[0].lower()
 
-    def _apply_region_fields(self, cfg: dict) -> None:
-        runtime = merge_region_config(cfg)
-        region_id = runtime.get("active_region", "nz")
-        self.region_var.set(region_id)
-        self.region_label_var.set(runtime.get("_region_label") or self._region_label_for(region_id))
+    def _set_edit_region(self, region_id: str) -> None:
+        self._edit_combo.set(_region_combo_label(region_id))
+        self._edit_region_var.set(region_id)
+
+    def _flush_editor(self) -> None:
+        rid = self._edit_region_id()
+        self._region_fields[rid] = {
+            "database_url": self.db_entry.get("1.0", "end").strip(),
+            "sql_folder": self.sql_folder_var.get().strip(),
+            "output_folder": self.output_folder_var.get().strip(),
+        }
+
+    def _load_editor(self, region_id: str) -> None:
+        fields = self._region_fields.get(region_id, {})
+        runtime = merge_region_config(
+            {"regions": {region_id: fields}, "active_region": region_id},
+            region_id,
+        )
         self.db_entry.delete("1.0", "end")
-        self.db_entry.insert("1.0", region_database_url(cfg, region_id) or resolve_database_url(runtime))
-        self.output_folder_var.set(runtime.get("output_folder") or "data")
-        out = runtime.get("output_folder") or "data"
-        self.sales_path_hint.set(f"同时抓取周销量 → {out}/weekly_sales.xlsx")
+        db = fields.get("database_url") or region_database_url(
+            {"regions": {region_id: fields}}, region_id
+        )
+        self.db_entry.insert("1.0", db)
+        self.sql_folder_var.set(fields.get("sql_folder") or runtime.get("sql_folder") or f"sql/{region_id}")
+        self.output_folder_var.set(
+            fields.get("output_folder") or runtime.get("output_folder") or f"data/{region_id}"
+        )
 
-    def _on_region_changed(self) -> None:
-        cfg = self._collect_config(persist_region_only=True)
-        self._apply_region_fields(cfg)
+    def _on_edit_region_changed(self) -> None:
+        self._flush_editor()
+        rid = self._edit_region_id()
+        self._set_edit_region(rid)
+        self._load_editor(rid)
+
+    def _load_region_fields_from_cfg(self, cfg: dict) -> None:
+        regions = cfg.get("regions") or {}
+        active = get_active_from_cfg(cfg)
+        for rid in SUPPORTED_REGIONS:
+            section = dict(regions.get(rid) or {})
+            runtime = merge_region_config({**cfg, "active_region": rid}, rid)
+            db_url = section.get("database_url") or ""
+            if not db_url and rid == active:
+                db_url = cfg.get("database_url", "")
+            self._region_fields[rid] = {
+                "database_url": db_url,
+                "sql_folder": section.get("sql_folder") or runtime.get("sql_folder", f"sql/{rid}"),
+                "output_folder": section.get("output_folder") or runtime.get("output_folder", f"data/{rid}"),
+            }
+
+        run_list = cfg.get("run_regions") or [get_active_from_cfg(cfg)]
+        for rid in SUPPORTED_REGIONS:
+            self._run_vars[rid].set(rid in run_list)
 
     def _load_fields(self) -> None:
         cfg = load_grabber_config()
-        self._apply_region_fields(cfg)
-        self.sql_folder_var.set(cfg.get("sql_folder", "sql"))
+        self._load_region_fields_from_cfg(cfg)
+        edit_rid = get_active_from_cfg(cfg)
+        self._set_edit_region(edit_rid)
+        self._load_editor(edit_rid)
         self.interval_var.set(int(cfg.get("schedule_interval", 30)))
         self.unit_var.set(cfg.get("schedule_unit", "分钟"))
         self.tray_var.set(bool(cfg.get("minimize_to_tray", False)))
         self.grab_sales_var.set(bool(cfg.get("grab_sales_with_display", True)))
         self.sync_roi_var.set(bool(cfg.get("sync_roi_after_grab", False)))
+        self.log("应用程序已启动。勾选地区后点「立即执行一次」，或设置频率后「开始自动调度」。")
 
-    def _collect_config(self, *, persist_region_only: bool = False) -> dict:
+    def _log_region_paths(self) -> None:
+        cfg = self._collect_config(save_editor=False)
+        for rid, label in region_labels():
+            rt = merge_region_config(config_for_region(cfg, rid), rid)
+            sql_dir = os.path.abspath(os.path.join(SCRIPT_DIR, rt.get("sql_folder", f"sql/{rid}")))
+            out_dir = os.path.abspath(os.path.join(SCRIPT_DIR, rt.get("output_folder", f"data/{rid}")))
+            self.log(f"{label} SQL 模板: {sql_dir}")
+            self.log(f"{label} 输出目录: {out_dir}")
+
+    def _selected_regions(self) -> list[str]:
+        return [rid for rid in SUPPORTED_REGIONS if self._run_vars[rid].get()]
+
+    def _collect_config(self, *, save_editor: bool = True) -> dict:
+        if save_editor:
+            self._flush_editor()
         cfg = load_grabber_config()
-        region_id = self.region_var.get().strip() or "nz"
+        regions: dict[str, dict] = dict(cfg.get("regions") or {})
+        for rid in SUPPORTED_REGIONS:
+            fields = self._region_fields.get(rid, {})
+            section = dict(regions.get(rid) or {})
+            for key in ("database_url", "sql_folder", "output_folder"):
+                if fields.get(key):
+                    section[key] = fields[key]
+            regions[rid] = section
+
+        active = self._edit_region_id()
         collected = {
-            "active_region": region_id,
-            "database_url": self.db_entry.get("1.0", "end").strip(),
-            "sql_folder": self.sql_folder_var.get().strip() or "sql",
-            "output_folder": self.output_folder_var.get().strip() or "data",
+            **cfg,
+            "active_region": active,
+            "run_regions": self._selected_regions() or [active],
+            "regions": regions,
             "schedule_interval": int(self.interval_var.get()),
             "schedule_unit": self.unit_var.get(),
             "minimize_to_tray": bool(self.tray_var.get()),
             "grab_sales_with_display": bool(self.grab_sales_var.get()),
             "sync_roi_after_grab": bool(self.sync_roi_var.get()),
         }
-        if persist_region_only:
-            return {**cfg, "active_region": region_id}
-        regions = dict(cfg.get("regions") or {})
-        section = dict(regions.get(region_id) or {})
-        if collected["database_url"]:
-            section["database_url"] = collected["database_url"]
-        section["output_folder"] = collected["output_folder"]
-        regions[region_id] = section
-        collected["regions"] = regions
+        section = regions.get(active, {})
+        if section.get("database_url"):
+            collected["database_url"] = section["database_url"]
+        if section.get("sql_folder"):
+            collected["sql_folder"] = section["sql_folder"]
+        if section.get("output_folder"):
+            collected["output_folder"] = section["output_folder"]
         reload_shops(collected)
         return collected
 
     def test_connection(self) -> None:
+        self._flush_editor()
+        rid = self._edit_region_id()
         cfg = self._collect_config()
-        self.log("正在测试数据库连接...")
-        threading.Thread(target=lambda: self._test_connection_job(cfg), daemon=True).start()
+        region_cfg = config_for_region(cfg, rid)
+        self.log(f"正在测试 {rid.upper()} 数据库连接...")
+        threading.Thread(
+            target=lambda: self._test_connection_job(region_cfg, rid),
+            daemon=True,
+        ).start()
 
-    def _test_connection_job(self, cfg: dict) -> None:
+    def _test_connection_job(self, cfg: dict, region_id: str) -> None:
         ok, msg = test_database_connection(cfg)
+        title = f"{region_id.upper()} 连接测试"
         if ok:
             self.log(msg)
-            self.root.after(0, lambda: messagebox.showinfo("连接测试", msg))
+            self.root.after(0, lambda: messagebox.showinfo(title, msg))
         else:
             self.log(f"连接失败: {msg}")
-            self.root.after(0, lambda: messagebox.showerror("连接测试", msg))
+            self.root.after(0, lambda: messagebox.showerror(title, msg))
 
     def save_config(self) -> None:
         cfg = self._collect_config()
-        runtime = build_runtime_config(cfg)
-        save_cfg = {
-            **cfg,
-            "sql_file": os.path.relpath(runtime["sql_file"], SCRIPT_DIR),
-            "output_excel": os.path.relpath(runtime["output_excel"], SCRIPT_DIR),
-            "output_json": os.path.relpath(runtime["output_json"], SCRIPT_DIR),
-        }
-        save_grabber_config(save_cfg)
+        save_grabber_config(cfg)
         self.log(f"配置已保存 → {GRABBER_CONFIG}")
-        messagebox.showinfo("保存成功", "配置已保存")
+        messagebox.showinfo("保存成功", "各地区连接串与目录已保存")
 
     def _browse_sql(self) -> None:
-        path = filedialog.askdirectory(initialdir=SCRIPT_DIR, title="选择 SQL 文件夹")
+        path = filedialog.askdirectory(initialdir=SCRIPT_DIR, title="选择 SQL 模板目录")
         if path:
             rel = os.path.relpath(path, SCRIPT_DIR)
             self.sql_folder_var.set(rel if not rel.startswith("..") else path)
@@ -293,9 +402,15 @@ class DisplayGrabberApp:
             rel = os.path.relpath(path, SCRIPT_DIR)
             self.output_folder_var.set(rel if not rel.startswith("..") else path)
 
-    def _set_status(self, text: str, color: str = "#27ae60") -> None:
-        self.status_var.set(text)
-        # ttk Label doesn't easily change color; ok for now
+    def _open_output(self) -> None:
+        folder = self.output_folder_var.get().strip()
+        if not folder:
+            return
+        path = folder if os.path.isabs(folder) else os.path.join(SCRIPT_DIR, folder)
+        try:
+            _open_folder(path)
+        except Exception as exc:
+            messagebox.showerror("打开失败", str(exc))
 
     def _interval_seconds(self) -> int:
         n = max(1, int(self.interval_var.get()))
@@ -307,72 +422,83 @@ class DisplayGrabberApp:
         if self._running:
             messagebox.showwarning("忙碌", "任务正在执行中")
             return
+        selected = self._selected_regions()
+        if not selected:
+            messagebox.showwarning("未选择", "请至少勾选一个地区。")
+            return
         self.save_config()
-        threading.Thread(target=self._run_job, daemon=True).start()
+        threading.Thread(target=self._run_job, args=(selected,), daemon=True).start()
 
-    def _run_job(self) -> None:
+    def _run_job(self, selected: list[str]) -> None:
         self._running = True
         self._stop_flag = False
         self.root.after(0, lambda: self.stop_btn.configure(state="normal"))
-        self.root.after(0, lambda: self._set_status("● 执行中", "#e67e22"))
-        self.root.after(0, lambda: self.progress.configure(value=10))
-        self.log("开始抓取数据...")
+        self.root.after(0, lambda: self.status_var.set("● 执行中"))
+        self.root.after(0, lambda: self.progress.configure(value=5))
+
+        cfg = self._collect_config()
+        total_regions = len(selected)
+        summary: list[str] = []
 
         try:
-            cfg = self._collect_config()
-            runtime = build_runtime_config(cfg)
-            self.log(f"Display SQL: {runtime['sql_file']}")
-            if cfg.get("grab_sales_with_display"):
-                from display_lookup import sales_runtime_config
+            for idx, region_id in enumerate(selected):
+                if self._stop_flag:
+                    raise InterruptedError("用户停止")
 
-                sales_rt = sales_runtime_config(cfg)
-                self.log(f"周销量 SQL: {sales_rt['sql_file']}")
-            self.root.after(0, lambda: self.progress.configure(value=35))
-            if self._stop_flag:
-                raise InterruptedError("用户停止")
+                region_cfg = config_for_region(cfg, region_id)
+                label = region_cfg.get("_region_label", region_id)
+                self.log(f"════ {label} ({region_id.upper()}) ════")
+                runtime = build_runtime_config(region_cfg)
+                self.log(f"SQL 目录: {runtime.get('sql_folder')}")
+                self.log(f"Display SQL: {runtime['sql_file']}")
+                if cfg.get("grab_sales_with_display"):
+                    self.log(f"周销量 SQL: {region_cfg.get('sales_sql_file')}")
+                self.log(f"输出目录: {runtime.get('output_folder')}")
 
-            results = run_grab_pipeline(
-                cfg,
-                display=True,
-                sales=bool(cfg.get("grab_sales_with_display")),
-                sync_roi=bool(cfg.get("sync_roi_after_grab")),
-                log=self.log,
-            )
-            display_result = results.get("display", {})
-            items = display_result.get("items") or []
-            excel_path = display_result.get("excel", runtime["output_excel"])
-            used_sql = last_sql_file() or runtime["sql_file"]
-            if used_sql != runtime["sql_file"]:
-                self.log(f"已自动改用: {used_sql}")
-            else:
+                base_progress = int(100 * idx / total_regions)
+                self.root.after(0, lambda v=base_progress + 10: self.progress.configure(value=v))
+
+                results = run_grab_pipeline(
+                    region_cfg,
+                    display=True,
+                    sales=bool(cfg.get("grab_sales_with_display")),
+                    sync_roi=bool(cfg.get("sync_roi_after_grab")) and idx == 0,
+                    log=self.log,
+                )
+
+                display_result = results.get("display", {})
+                items = display_result.get("items") or []
+                excel_path = display_result.get("excel", runtime["output_excel"])
+                used_sql = last_sql_file() or runtime["sql_file"]
                 self.log(f"使用 SQL: {os.path.basename(used_sql)}")
-            with_img = sum(1 for it in items if getattr(it, "image_url", ""))
-            if with_img:
-                self.log(f"其中 {with_img}/{len(items)} 款有 ImageUrl")
-            elif items:
-                self.log("警告: Excel 里没有 ImageUrl，画廊无法显示图片。请在 SSMS 运行 sql/discover_schema.sql 查列名。")
-            self.root.after(0, lambda: self.progress.configure(value=90))
-            stats = shop_stats(items, [])
-            total = stats.get("all", {}).get("total", len(items))
-            self.log(f"Display 完成: {total} 款 → {excel_path}")
-            sales_result = results.get("sales")
-            if sales_result:
-                self.log(f"周销量完成: {sales_result.get('count', 0)} 行 → {sales_result.get('excel')}")
-            if results.get("roi_sync"):
-                self.log("ROI 已同步到模板与布局")
-            status_parts = [f"Display: {total} 款"]
-            if sales_result:
-                status_parts.append(f"销量: {sales_result.get('count', 0)} 行")
-            self.root.after(0, lambda: self.sku_var.set(" · ".join(status_parts)))
+                stats = shop_stats(items, [])
+                total = stats.get("all", {}).get("total", len(items))
+                self.log(f"Display 完成: {total} 款 → {excel_path}")
+
+                sales_result = results.get("sales")
+                if sales_result:
+                    self.log(
+                        f"周销量完成: {sales_result.get('count', 0)} 行 → {sales_result.get('excel')}"
+                    )
+                    summary.append(f"{region_id.upper()} 销量 {sales_result.get('count', 0)} 行")
+                summary.insert(0, f"{region_id.upper()} Display {total} 款")
+
+                self.root.after(
+                    0,
+                    lambda v=int(100 * (idx + 1) / total_regions): self.progress.configure(value=v),
+                )
+
             self.root.after(0, lambda: self.progress.configure(value=100))
-            self.root.after(0, lambda: self._set_status("● 就绪"))
+            self.root.after(0, lambda: self.status_var.set("● 就绪"))
+            self.root.after(0, lambda: self.sku_var.set(" · ".join(summary)))
+            self.log("全部地区抓取完成。")
         except InterruptedError as exc:
             self.log(str(exc))
-            self.root.after(0, lambda: self._set_status("● 已停止"))
+            self.root.after(0, lambda: self.status_var.set("● 已停止"))
         except Exception as exc:
             self.log(f"失败: {exc}")
             self.log(traceback.format_exc())
-            self.root.after(0, lambda: self._set_status("● 失败", "#e74c3c"))
+            self.root.after(0, lambda: self.status_var.set("● 失败"))
             self.root.after(0, lambda: messagebox.showerror("抓取失败", str(exc)))
         finally:
             self._running = False
@@ -392,6 +518,9 @@ class DisplayGrabberApp:
         if self._schedule_after_id:
             messagebox.showinfo("提示", "自动调度已在运行")
             return
+        if not self._selected_regions():
+            messagebox.showwarning("未选择", "请至少勾选一个地区。")
+            return
         self.save_config()
         self._schedule_next()
         self.log(f"自动调度已启动，每 {self.interval_var.get()} {self.unit_var.get()}")
@@ -405,7 +534,9 @@ class DisplayGrabberApp:
     def _scheduled_tick(self) -> None:
         self._schedule_after_id = None
         if not self._running:
-            self.run_once()
+            selected = self._selected_regions()
+            if selected:
+                threading.Thread(target=self._run_job, args=(selected,), daemon=True).start()
         self._schedule_next()
 
     def clear_log(self) -> None:
@@ -432,6 +563,12 @@ class DisplayGrabberApp:
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+def get_active_from_cfg(cfg: dict) -> str:
+    from region_config import get_active_region
+
+    return get_active_region(cfg)
 
 
 def main() -> int:

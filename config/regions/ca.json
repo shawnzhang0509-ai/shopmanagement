@@ -1,6 +1,7 @@
 {
   "id": "ca",
   "label": "加拿大",
+  "default_sql_folder": "sql/ca",
   "default_output_folder": "data/ca",
   "image_base_url": "https://ierpapi.ifurniture.ca/",
   "shops": [
