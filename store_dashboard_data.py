@@ -5,17 +5,12 @@ import os
 
 from heatmap_metrics import _week_key
 from layout_family_lookup import families_in_layouts, layout_families_by_store
+from region_config import store_entries
 from sales_lookup import load_weekly_sales, sales_data_available
 from ui_common import sanitize_display_text
 
-# 与 layout.py STORE_CATALOG + LAYOUT_SLUG_TO_SALES_SHOP 对齐
-STORE_ENTRIES: tuple[dict[str, str], ...] = (
-    {"name": "Onehunga店", "slug": "onehunga", "shop_id": "onehunga"},
-    {"name": "Hamilton店", "slug": "hamilton", "shop_id": "hamilton"},
-    {"name": "Westgate店", "slug": "westgate", "shop_id": "westgate"},
-    {"name": "基督城 Colombo店", "slug": "christchurch_colombo", "shop_id": "chch"},
-    {"name": "基督城 Bleiham店", "slug": "christchurch_bleiham", "shop_id": "chch"},
-)
+# 与 config/regions/*.json + layout.py 对齐
+STORE_ENTRIES: tuple[dict[str, str], ...] = store_entries()
 
 WEEK_OPTIONS: tuple[tuple[str, int], ...] = (
     ("4 周", 4),

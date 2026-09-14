@@ -102,29 +102,22 @@ C_FAMILY = (59, 82, 118)
 
 DEFAULT_STORE_WIDTH_M = 20.0
 DEFAULT_STORE_HEIGHT_M = 15.0
-LAYOUTS_DIR = os.path.join(SCRIPT_DIR, "data", "layouts")
+from region_config import (
+    catalog_layout_specs,
+    layout_catalog,
+    layout_slug_to_sales_shop,
+    layouts_dir,
+)
+
+LAYOUTS_DIR = layouts_dir()
 LAYOUT_TEMPLATES_DIR = os.path.join(LAYOUTS_DIR, "_templates")
 LEGACY_LAYOUT_FILE = os.path.join(SCRIPT_DIR, "saved_layout.json")
 LAST_STORE_FILE = os.path.join(LAYOUTS_DIR, "_last.json")
-CATALOG_LAYOUT_SPECS = {
-    "onehunga": (43000, 76300),
-}
-# 布局 slug → weekly_sales 门店 id（与 display_lookup.SHOPS 一致）
-LAYOUT_SLUG_TO_SALES_SHOP = {
-    "onehunga": "onehunga",
-    "hamilton": "hamilton",
-    "westgate": "westgate",
-    "christchurch_colombo": "chch",
-    "christchurch_bleiham": "chch",
-}
+CATALOG_LAYOUT_SPECS = catalog_layout_specs()
+# 布局 slug → weekly_sales 门店 id（与 config/regions/*.json 一致）
+LAYOUT_SLUG_TO_SALES_SHOP = layout_slug_to_sales_shop()
 # 固定门店列表：(显示名称, 文件标识)
-STORE_CATALOG = [
-    ("Onehunga店", "onehunga"),
-    ("Hamilton店", "hamilton"),
-    ("Westgate店", "westgate"),
-    ("基督城 Colombo店", "christchurch_colombo"),
-    ("基督城 Bleiham店", "christchurch_bleiham"),
-]
+STORE_CATALOG = layout_catalog()
 STORE_PRESETS = [
     ("小型店 12×8 m", 12.0, 8.0),
     ("中型店 20×15 m", 20.0, 15.0),

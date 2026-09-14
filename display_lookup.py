@@ -25,16 +25,23 @@ DEFAULT_BLACKLIST = os.path.join(SCRIPT_DIR, "data", "display_blacklist.xlsx")
 DEFAULT_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.csv")
 EXAMPLE_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.example.csv")
 
-# 门店：按 Stock Details 里的 location 名称匹配
-SHOPS: list[dict[str, Any]] = [
-    {"id": "all", "label": "全部", "patterns": []},
-    {"id": "onehunga", "label": "Onehunga", "patterns": ["onehunga"]},
-    {"id": "westgate", "label": "Westgate", "patterns": ["westgate"]},
-    {"id": "hamilton", "label": "Hamilton", "patterns": ["hamilton"]},
-    {"id": "chch", "label": "Christchurch", "patterns": ["chch", "christchurch", "colombo"]},
-    {"id": "carbine", "label": "Carbine Rd", "patterns": ["carbine"]},
-    {"id": "other", "label": "其他", "patterns": []},
-]
+from region_config import (  # noqa: E402
+    display_excel_path,
+    get_active_region,
+    merge_region_config,
+    region_database_url,
+    shops_for_region,
+    weekly_sales_excel_path,
+)
+
+
+def reload_shops(cfg: dict | None = None) -> list[dict[str, Any]]:
+    """按 active_region 加载门店匹配规则（config/regions/*.json）。"""
+    return shops_for_region(get_active_region(cfg or load_grabber_config()), cfg)
+
+
+# 门店：按 Stock Details / Branch 名称匹配；切换区域后调用 reload_shops()
+SHOPS: list[dict[str, Any]] = []
 
 # Excel / SQL 列名别名（不区分大小写，空格会折叠）
 _COL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -318,7 +325,7 @@ def is_display_location(location: str) -> bool:
 
 def shop_id_for_location(location: str) -> str:
     low = location.lower()
-    for shop in SHOPS:
+    for shop in reload_shops():
         if shop["id"] in ("all", "other"):
             continue
         if any(p in low for p in shop["patterns"]):
@@ -327,7 +334,7 @@ def shop_id_for_location(location: str) -> str:
 
 
 def shop_label(shop_id: str) -> str:
-    for shop in SHOPS:
+    for shop in reload_shops():
         if shop["id"] == shop_id:
             return shop["label"]
     return shop_id
@@ -802,8 +809,21 @@ def save_grabber_config(cfg: dict) -> None:
         except (OSError, json.JSONDecodeError):
             existing = {}
     merged = {**existing, **cfg}
+    region_id = get_active_region(merged)
+    db_url = str(merged.get("database_url") or "").strip()
+    if db_url:
+        regions = dict(merged.get("regions") or existing.get("regions") or {})
+        section = dict(regions.get(region_id) or {})
+        section["database_url"] = db_url
+        if merged.get("output_folder"):
+            section["output_folder"] = merged["output_folder"]
+        if merged.get("image_base_url"):
+            section["image_base_url"] = merged["image_base_url"]
+        regions[region_id] = section
+        merged["regions"] = regions
     with open(path, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
+    reload_shops(merged)
 
 
 def _resolve_path(path: str) -> str:
@@ -813,8 +833,8 @@ def _resolve_path(path: str) -> str:
 
 
 def build_runtime_config(cfg: dict | None = None) -> dict:
-    """合并配置并解析 sql / 输出路径。"""
-    base = dict(cfg or load_grabber_config())
+    """合并配置并解析 sql / 输出路径（含 active_region）。"""
+    base = merge_region_config(cfg)
     sql_folder = base.get("sql_folder") or "sql"
     sql_folder_abs = _resolve_path(sql_folder)
     sql_file = base.get("sql_file")
@@ -840,8 +860,14 @@ def build_runtime_config(cfg: dict | None = None) -> dict:
 def resolve_display_excel_paths() -> list[str]:
     cfg = load_grabber_config()
     paths: list[str] = []
+    paths.append(display_excel_path(cfg))
+    runtime = build_runtime_config(cfg)
+    if runtime.get("output_excel") and runtime["output_excel"] not in paths:
+        paths.append(runtime["output_excel"])
     if cfg.get("output_excel"):
-        paths.append(os.path.join(SCRIPT_DIR, cfg["output_excel"]))
+        legacy_cfg_path = _resolve_path(cfg["output_excel"])
+        if legacy_cfg_path not in paths:
+            paths.append(legacy_cfg_path)
     paths.extend([DEFAULT_EXCEL, LEGACY_EXCEL])
     seen: set[str] = set()
     out: list[str] = []
@@ -937,12 +963,8 @@ def normalize_db_config(cfg: dict) -> dict:
 
 
 def build_database_url(cfg: dict) -> str | None:
-    """优先使用 database_url（与 main_gui 一致）；分项字段仅作备用。"""
-    env = os.environ.get("DISPLAY_DB_URL", "").strip()
-    if env:
-        return env
-
-    url = (cfg.get("database_url") or "").strip()
+    """优先使用区域环境变量 / database_url（与 main_gui 一致）；分项字段仅作备用。"""
+    url = region_database_url(cfg)
     if url:
         return url
 
@@ -1156,18 +1178,18 @@ def export_rows_to_excel(rows: list[dict], path: str) -> None:
 
 
 def sales_runtime_config(cfg: dict | None = None) -> dict:
-    """周销量抓取路径（与 Display 共用 database_url）。"""
+    """周销量抓取路径（与 Display 共用当前区域 database_url）。"""
     base = build_runtime_config(cfg)
     sql_file = base.get("sales_sql_file") or os.path.join(
         base.get("sql_folder") or "sql", "weekly_sales.sql"
     )
     if not os.path.isabs(sql_file):
         sql_file = os.path.join(SCRIPT_DIR, sql_file)
-    output_excel = base.get("sales_output_excel") or os.path.join(
-        base.get("output_folder") or "data", "weekly_sales.xlsx"
-    )
-    if not os.path.isabs(output_excel):
-        output_excel = os.path.join(SCRIPT_DIR, output_excel)
+    output_excel = base.get("sales_output_excel")
+    if output_excel:
+        output_excel = _resolve_path(output_excel)
+    else:
+        output_excel = weekly_sales_excel_path(cfg)
     return {**base, "sql_file": sql_file, "output_excel": output_excel}
 
 
@@ -1543,14 +1565,15 @@ def shop_stats(
     template_index: TemplateIndexCache | None = None,
 ) -> dict[str, dict[str, int]]:
     idx_cache = (template_index or _template_index_cache).for_templates(templates)
+    shops = reload_shops()
     stats: dict[str, dict[str, int]] = {
         shop["id"]: {"total": 0, "modeled": 0, "families": 0, "_fam_set": set()}
-        for shop in SHOPS
+        for shop in shops
     }
     for it in items:
         modeled = idx_cache.lookup(it) >= 0
         fam = it.product_family if it.product_family and it.product_family != "未分类" else None
-        for shop in SHOPS:
+        for shop in shops:
             sid = shop["id"]
             if sid != "all" and it.display_qty_for_shop(sid) <= 0:
                 continue
@@ -1592,7 +1615,7 @@ def shops_for_display_tabs(
     """门店 Tab：全部固定第一，其余按 Product Family 数量从高到低。"""
     stats = cached_shop_stats(items, templates)
     rows: list[tuple[dict[str, Any], dict[str, int]]] = []
-    for shop in SHOPS:
+    for shop in reload_shops():
         sid = shop["id"]
         if sid == "other":
             continue
@@ -1661,3 +1684,6 @@ def prune_orphan_templates(
         else:
             removed.append(str(tpl.get("id", "")))
     return kept, removed
+
+
+SHOPS = reload_shops()

@@ -1,0 +1,37 @@
+{
+  "id": "au",
+  "label": "澳洲",
+  "default_output_folder": "data/au",
+  "image_base_url": "https://ierpapi.ifurniture.com.au/",
+  "shops": [
+    {"id": "all", "label": "全部", "patterns": []},
+    {"id": "sydney", "label": "Sydney", "patterns": ["sydney", "parramatta"]},
+    {"id": "melbourne", "label": "Melbourne", "patterns": ["melbourne", "dandenong"]},
+    {"id": "brisbane", "label": "Brisbane", "patterns": ["brisbane", "gold coast", "goldcoast"]},
+    {"id": "perth", "label": "Perth", "patterns": ["perth"]},
+    {"id": "adelaide", "label": "Adelaide", "patterns": ["adelaide"]},
+    {"id": "other", "label": "其他", "patterns": []}
+  ],
+  "store_entries": [
+    {"name": "Sydney店", "slug": "sydney", "shop_id": "sydney"},
+    {"name": "Melbourne店", "slug": "melbourne", "shop_id": "melbourne"},
+    {"name": "Brisbane店", "slug": "brisbane", "shop_id": "brisbane"},
+    {"name": "Perth店", "slug": "perth", "shop_id": "perth"},
+    {"name": "Adelaide店", "slug": "adelaide", "shop_id": "adelaide"}
+  ],
+  "layout_stores": [
+    ["Sydney店", "sydney"],
+    ["Melbourne店", "melbourne"],
+    ["Brisbane店", "brisbane"],
+    ["Perth店", "perth"],
+    ["Adelaide店", "adelaide"]
+  ],
+  "layout_slug_to_sales_shop": {
+    "sydney": "sydney",
+    "melbourne": "melbourne",
+    "brisbane": "brisbane",
+    "perth": "perth",
+    "adelaide": "adelaide"
+  },
+  "catalog_layout_specs": {}
+}
