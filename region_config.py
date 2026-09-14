@@ -139,6 +139,10 @@ def merge_region_config(cfg: dict | None = None, region_id: str | None = None) -
             merged["output_folder"] = default_output_folder(region_id)
         elif not merged.get("output_folder"):
             merged["output_folder"] = default_output_folder(region_id)
+    elif has_regions_block:
+        out_norm = str(merged.get("output_folder") or "").replace("\\", "/").rstrip("/")
+        if out_norm == "data":
+            merged["output_folder"] = default_output_folder(region_id)
 
     if not merged.get("image_base_url"):
         merged["image_base_url"] = profile.get("image_base_url") or ""

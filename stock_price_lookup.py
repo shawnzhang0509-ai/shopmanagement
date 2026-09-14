@@ -104,6 +104,14 @@ def _parse_row(row: dict) -> StockPriceRow | None:
     )
 
 
+def invalidate_stock_prices_cache() -> None:
+    """仅清空缓存，不读 Excel。"""
+    global _cache, _loaded_path, _last_error
+    _cache = {}
+    _loaded_path = None
+    _last_error = None
+
+
 def reload_stock_prices(path: str | None = None) -> dict[str, StockPriceRow]:
     global _cache, _loaded_path, _last_error
     excel_path = path or DEFAULT_EXCEL
