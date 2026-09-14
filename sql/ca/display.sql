@@ -9,6 +9,7 @@
 --
 -- 其它 display*.sql 为程序自动兜底，日常只改本文件。
 -- Display 库存：仓库名含 Display，StockStatus Normal/Clearance
+-- 加拿大：图片域名由程序按 grabber_config / config/regions/ca.json 自动替换
 -- ═══════════════════════════════════════════════════════════════
 
 SELECT
@@ -22,7 +23,7 @@ SELECT
     MAX(
         CASE
             WHEN img.RelativeFilePath IS NOT NULL
-            THEN 'https://ierpapi.ifurniture.co.nz/' + REPLACE(img.RelativeFilePath, '\', '/')
+            THEN '{{IMAGE_BASE_URL}}' + REPLACE(img.RelativeFilePath, '\', '/')
             ELSE ''
         END
     ) AS ImageUrl,

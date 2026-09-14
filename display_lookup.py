@@ -892,6 +892,31 @@ def resolve_cache_path() -> str:
     return CACHE_FILE
 
 
+_IMAGE_URL_PREFIXES = (
+    "https://ierpapi.ifurniture.co.nz/",
+    "https://ierpapi.ifurniture.com.au/",
+    "https://ierpapi.ifurniture.ca/",
+)
+
+
+def _patch_sql_for_region(query: str, cfg: dict) -> str:
+    """把 SQL 里的图片域名换成当前区域的 image_base_url（支持 {{IMAGE_BASE_URL}}）。"""
+    merged = merge_region_config(cfg)
+    target = str(merged.get("image_base_url") or "").strip()
+    if not target:
+        profile = (merged.get("_region_profile") or {}) if isinstance(merged.get("_region_profile"), dict) else {}
+        target = str(profile.get("image_base_url") or "").strip()
+    if not target:
+        return query
+    if not target.endswith("/"):
+        target += "/"
+    out = query.replace("{{IMAGE_BASE_URL}}", target)
+    for prefix in _IMAGE_URL_PREFIXES:
+        if prefix != target:
+            out = out.replace(prefix, target)
+    return out
+
+
 def load_sql_query(cfg: dict | None = None, *, path: str | None = None) -> str:
     cfg = build_runtime_config(cfg)
     path = path or cfg["sql_file"]
@@ -902,7 +927,7 @@ def load_sql_query(cfg: dict | None = None, *, path: str | None = None) -> str:
     query = "\n".join(lines).strip()
     if not query:
         raise ValueError(f"SQL 文件为空: {path}")
-    return query
+    return _patch_sql_for_region(query, cfg)
 
 
 def _is_schema_sql_error(exc: Exception) -> bool:
@@ -915,20 +940,34 @@ def _is_schema_sql_error(exc: Exception) -> bool:
     )
 
 
-def _sql_fallback_paths(primary_path: str) -> list[str]:
+def _sql_fallback_paths(primary_path: str, cfg: dict | None = None) -> list[str]:
+    """按区域目录 → 其它区域 → 根 sql/ 顺序尝试（文件缺失时不报错，由调用方跳过）。"""
+    from region_config import SUPPORTED_REGIONS, default_sql_folder, get_active_region, normalize_region_id
+
+    filename = os.path.basename(primary_path) or "display.sql"
+    region_id = normalize_region_id(get_active_region(cfg or load_grabber_config()))
+    ordered: list[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in ordered:
+            ordered.append(path)
+
+    add(primary_path)
     folder = os.path.dirname(primary_path) or _resolve_path("sql")
-    ordered = [primary_path]
-    for name in ("display.sql", "display.minimal.sql"):
-        candidate = os.path.join(folder, name)
-        if candidate not in ordered and os.path.isfile(candidate):
-            ordered.append(candidate)
-    # 旧版扁平 sql/display.sql
-    legacy_root = os.path.join(SCRIPT_DIR, "sql", "display.sql")
-    if legacy_root not in ordered and os.path.isfile(legacy_root):
-        ordered.append(legacy_root)
-    legacy_min = os.path.join(SCRIPT_DIR, "sql", "display.minimal.sql")
-    if legacy_min not in ordered and os.path.isfile(legacy_min):
-        ordered.append(legacy_min)
+    for name in (filename, "display.sql", "display.minimal.sql"):
+        add(os.path.join(folder, name))
+
+    for rid in [region_id] + [r for r in SUPPORTED_REGIONS if r != region_id]:
+        reg_dir = _resolve_path(default_sql_folder(rid))
+        add(os.path.join(reg_dir, filename))
+        if filename not in ("display.sql", "display.minimal.sql"):
+            add(os.path.join(reg_dir, "display.sql"))
+        add(os.path.join(reg_dir, "display.minimal.sql"))
+
+    root_sql = os.path.join(SCRIPT_DIR, "sql")
+    add(os.path.join(root_sql, filename))
+    add(os.path.join(root_sql, "display.sql"))
+    add(os.path.join(root_sql, "display.minimal.sql"))
     return ordered
 
 
@@ -1079,16 +1118,32 @@ def _fetch_raw_rows(
 
     primary = cfg["sql_file"]
     last_exc: Exception | None = None
-    for path in _sql_fallback_paths(primary):
+    tried_missing: list[str] = []
+    for path in _sql_fallback_paths(primary, cfg):
+        if not os.path.isfile(path):
+            tried_missing.append(path)
+            continue
         try:
             rows = _execute(load_sql_query(cfg, path=path))
             _last_sql_file = path
+            if path != primary:
+                region = get_active_region(cfg)
+                print(f"提示: 使用备用 SQL {os.path.relpath(path, SCRIPT_DIR)}（{region}）")
             return rows
         except Exception as exc:
             if _is_schema_sql_error(exc):
                 last_exc = exc
                 continue
             raise RuntimeError(format_db_error(exc)) from exc
+
+    if tried_missing:
+        sample = "\n  ".join(tried_missing[:5])
+        bootstrap = os.path.join("tools", "bootstrap_region_sql.py")
+        raise RuntimeError(
+            f"找不到 SQL 文件（例如 {primary}）。\n"
+            f"已尝试:\n  {sample}\n"
+            f"请先 git pull，或运行: python {bootstrap}"
+        )
 
     hint = "请在 SSMS 运行 sql/discover_schema.sql，把 Products 表的图片列名发给我们。"
     if last_exc is not None:

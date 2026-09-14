@@ -1,4 +1,6 @@
 -- 产品库存 + 原价/促销价（按 SKU 一行）
+-- 加拿大：下方 CarbineStock / WallsStock 等列名为兼容 Excel 保留，请按 SSMS
+--   sql/discover_schema.sql 查 Warehouses 表后，把仓库名改成多伦多/温哥华等实际名称。
 -- 用法:
 --   SSMS: 改 @SkuFilter = '855' 只查某系列；留空 '' 查全部
 --   抓取: python scripts/grab_stock_price.py → data/product_stock_price.xlsx
@@ -32,7 +34,7 @@ SELECT
     MAX(
         CASE
             WHEN img.RelativeFilePath IS NOT NULL
-            THEN 'https://ierpapi.ifurniture.co.nz/' + REPLACE(img.RelativeFilePath, '\', '/')
+            THEN '{{IMAGE_BASE_URL}}' + REPLACE(img.RelativeFilePath, '\', '/')
             ELSE ''
         END
     ) AS ImageUrl,

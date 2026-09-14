@@ -132,6 +132,10 @@ def merge_region_config(cfg: dict | None = None, region_id: str | None = None) -
             merged["sql_folder"] = default_sql_folder(region_id)
         elif not merged.get("sql_folder"):
             merged["sql_folder"] = default_sql_folder(region_id)
+    elif has_regions_block:
+        sql_norm = str(merged.get("sql_folder") or "").replace("\\", "/").rstrip("/")
+        if sql_norm == "sql":
+            merged["sql_folder"] = default_sql_folder(region_id)
 
     if not section.get("output_folder"):
         root_out = str(merged.get("output_folder") or "").strip()
