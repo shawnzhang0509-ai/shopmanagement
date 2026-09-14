@@ -23,7 +23,7 @@ from deps_check import (
 )
 
 APP_TITLE = "坪效管理工具"
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 
 BG = "#f4f6f8"
 CARD = "#ffffff"
@@ -36,13 +36,13 @@ WARN = "#e67e22"
 
 
 class DataGrabDialog(tk.Toplevel):
-    """勾选要抓取的数据类型，一次执行。"""
+    """勾选地区 + 抓取内容，一次执行（布局：底部按钮固定可见）。"""
 
     def __init__(self, parent: tk.Misc, *, on_status=None) -> None:
         super().__init__(parent)
         self.title("数据抓取 — 选择要更新的内容")
-        self.geometry("560x480")
-        self.minsize(480, 420)
+        self.geometry("620x580")
+        self.minsize(560, 520)
         self.configure(bg=BG)
         self.transient(parent)
         self.grab_set()
@@ -50,50 +50,62 @@ class DataGrabDialog(tk.Toplevel):
         self._running = False
 
         from display_lookup import build_runtime_config, load_grabber_config
-        from region_config import merge_region_config, region_labels
+        from region_config import SUPPORTED_REGIONS, merge_region_config, region_labels
 
         cfg = load_grabber_config()
         self._base_cfg = cfg
-        runtime = build_runtime_config(cfg)
-        out_folder = runtime.get("output_folder") or "data"
-        region_label = runtime.get("_region_label") or runtime.get("active_region", "nz")
+        run_list = cfg.get("run_regions") or [cfg.get("active_region", "nz")]
+        self._run_vars: dict[str, tk.BooleanVar] = {
+            rid: tk.BooleanVar(value=(rid in run_list)) for rid in SUPPORTED_REGIONS
+        }
+
+        # 底部按钮先 pack，避免被日志区挤出屏幕外
+        btn_row = tk.Frame(self, bg=BG)
+        btn_row.pack(side="bottom", fill="x", padx=16, pady=(8, 14))
+        self.run_btn = tk.Button(
+            btn_row,
+            text="开始抓取",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            bg=ACCENT,
+            fg="white",
+            activebackground=ACCENT_DARK,
+            activeforeground="white",
+            relief="flat",
+            padx=20,
+            pady=8,
+            cursor="hand2",
+            command=self._start_grab,
+        )
+        self.run_btn.pack(side="left")
+        ttk.Button(btn_row, text="关闭", command=self.destroy).pack(side="right")
+
+        body = tk.Frame(self, bg=BG)
+        body.pack(side="top", fill="both", expand=True)
 
         intro = tk.Label(
-            self,
-            text="勾选需要的 Excel，点「开始抓取」。Display 与周销量可分开，避免周销量超时拖垮 Display。",
+            body,
+            text="勾选地区与 Excel 类型，点下方「开始抓取」。周销量较慢时可只勾 Display。",
             font=("Microsoft YaHei UI", 10),
             bg=BG,
             fg=TEXT,
-            wraplength=520,
+            wraplength=560,
             justify="left",
         )
         intro.pack(anchor="w", padx=16, pady=(14, 8))
 
-        region_row = tk.Frame(self, bg=BG)
-        region_row.pack(fill="x", padx=16, pady=(0, 6))
-        tk.Label(region_row, text="国家/区域", font=("Microsoft YaHei UI", 10), bg=BG, fg=TEXT).pack(
-            side="left"
-        )
-        self.region_var = tk.StringVar(value=runtime.get("active_region", "nz"))
-        region_combo = ttk.Combobox(
-            region_row,
-            textvariable=self.region_var,
-            values=[rid for rid, _ in region_labels()],
-            state="readonly",
-            width=10,
-        )
-        region_combo.pack(side="left", padx=(8, 4))
-        self.region_hint_var = tk.StringVar(value=f"{region_label} · 输出目录 {out_folder}/")
-        tk.Label(
-            region_row,
-            textvariable=self.region_hint_var,
-            font=("Microsoft YaHei UI", 9),
-            bg=BG,
-            fg=MUTED,
-        ).pack(side="left", padx=4)
-        region_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_region_changed())
+        region_frame = ttk.LabelFrame(body, text="本次要跑的地区（可多选）", padding=10)
+        region_frame.pack(fill="x", padx=16, pady=(0, 6))
+        region_checks = tk.Frame(region_frame)
+        region_checks.pack(anchor="w")
+        for rid, label in region_labels():
+            ttk.Checkbutton(
+                region_checks,
+                text=label,
+                variable=self._run_vars[rid],
+                command=self._refresh_path_hints,
+            ).pack(side="left", padx=(0, 16))
 
-        opts = ttk.LabelFrame(self, text="抓取内容", padding=12)
+        opts = ttk.LabelFrame(body, text="抓取内容", padding=12)
         opts.pack(fill="x", padx=16, pady=6)
 
         self.var_display = tk.BooleanVar(value=True)
@@ -101,11 +113,20 @@ class DataGrabDialog(tk.Toplevel):
         self.var_stock = tk.BooleanVar(value=False)
         self.var_roi = tk.BooleanVar(value=bool(cfg.get("sync_roi_after_grab", False)))
 
+        runtime = build_runtime_config(cfg)
+        out_folder = runtime.get("output_folder") or "data/nz"
         self.display_path_var = tk.StringVar(
-            value=f"Display 大库 → {out_folder}/display.xlsx（含 ImageUrl、停产 Demo）"
+            value=f"Display 大库 → {out_folder}/display.xlsx"
         )
-        self.sales_path_var = tk.StringVar(value=f"周销量 → {out_folder}/weekly_sales.xlsx（较慢，可单独勾选）")
-        self.stock_path_var = tk.StringVar(value=f"仓库库存/价格 → {out_folder}/product_stock_price.xlsx")
+        self.sales_path_var = tk.StringVar(
+            value=f"周销量 → {out_folder}/weekly_sales.xlsx（较慢）"
+        )
+        self.stock_path_var = tk.StringVar(
+            value=f"仓库库存/价格 → {out_folder}/product_stock_price.xlsx"
+        )
+        self.sql_hint_var = tk.StringVar(
+            value=f"SQL 目录: {runtime.get('sql_folder', 'sql/nz')}/"
+        )
 
         ttk.Checkbutton(opts, textvariable=self.display_path_var, variable=self.var_display).pack(anchor="w")
         ttk.Checkbutton(opts, textvariable=self.sales_path_var, variable=self.var_sales).pack(
@@ -119,42 +140,49 @@ class DataGrabDialog(tk.Toplevel):
             text="同步 ROI 到 furniture_templates.json 与门店布局",
             variable=self.var_roi,
         ).pack(anchor="w", pady=(6, 0))
-
-        sql_label = os.path.relpath(runtime["sql_file"], SCRIPT_DIR)
         tk.Label(
             opts,
-            text=f"Display SQL: {sql_label}",
+            textvariable=self.sql_hint_var,
             font=("Microsoft YaHei UI", 9),
             fg=MUTED,
-        ).pack(anchor="w", pady=(10, 0))
+        ).pack(anchor="w", pady=(8, 0))
 
-        log_frame = ttk.LabelFrame(self, text="执行日志", padding=8)
-        log_frame.pack(fill="both", expand=True, padx=16, pady=6)
+        log_frame = ttk.LabelFrame(body, text="执行日志", padding=8)
+        log_frame.pack(fill="both", expand=True, padx=16, pady=(6, 8))
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=10, bg="#111827", fg="#e5e7eb", font=("Consolas", 9)
+            log_frame, height=8, bg="#111827", fg="#e5e7eb", font=("Consolas", 9)
         )
         self.log_text.pack(fill="both", expand=True)
 
-        btn_row = tk.Frame(self, bg=BG)
-        btn_row.pack(fill="x", padx=16, pady=(0, 14))
-        self.run_btn = ttk.Button(btn_row, text="开始抓取", command=self._start_grab)
-        self.run_btn.pack(side="left")
-        ttk.Button(btn_row, text="关闭", command=self.destroy).pack(side="right")
+        self._refresh_path_hints()
 
-    def _on_region_changed(self) -> None:
+    def _selected_regions(self) -> list[str]:
+        from region_config import SUPPORTED_REGIONS
+
+        return [rid for rid in SUPPORTED_REGIONS if self._run_vars[rid].get()]
+
+    def _refresh_path_hints(self) -> None:
         from region_config import merge_region_config
 
-        cfg = {**self._base_cfg, "active_region": self.region_var.get().strip() or "nz"}
-        runtime = merge_region_config(cfg)
-        out_folder = runtime.get("output_folder") or "data"
-        label = runtime.get("_region_label") or cfg["active_region"]
-        self.region_hint_var.set(f"{label} · 输出目录 {out_folder}/")
-        self.display_path_var.set(f"Display 大库 → {out_folder}/display.xlsx（含 ImageUrl、停产 Demo）")
-        self.sales_path_var.set(f"周销量 → {out_folder}/weekly_sales.xlsx（较慢，可单独勾选）")
+        selected = self._selected_regions()
+        rid = selected[0] if selected else "nz"
+        runtime = merge_region_config({**self._base_cfg, "active_region": rid}, rid)
+        out_folder = runtime.get("output_folder") or f"data/{rid}"
+        label = runtime.get("_region_label") or rid
+        suffix = f"（当前预览: {label}）" if len(selected) <= 1 else f"（预览 {label}，已选 {len(selected)} 个地区）"
+        self.display_path_var.set(f"Display 大库 → {out_folder}/display.xlsx {suffix}")
+        self.sales_path_var.set(f"周销量 → {out_folder}/weekly_sales.xlsx（较慢）")
         self.stock_path_var.set(f"仓库库存/价格 → {out_folder}/product_stock_price.xlsx")
+        self.sql_hint_var.set(f"SQL 目录: {runtime.get('sql_folder', f'sql/{rid}')}/")
 
     def _grab_cfg(self) -> dict:
-        return {**self._base_cfg, "active_region": self.region_var.get().strip() or "nz"}
+        selected = self._selected_regions()
+        active = selected[0] if selected else "nz"
+        return {
+            **self._base_cfg,
+            "active_region": active,
+            "run_regions": selected or [active],
+        }
 
     def _log(self, msg: str) -> None:
         self.log_text.insert("end", msg + "\n")
@@ -165,6 +193,9 @@ class DataGrabDialog(tk.Toplevel):
     def _start_grab(self) -> None:
         if self._running:
             return
+        if not self._selected_regions():
+            messagebox.showwarning("未选择", "请至少勾选一个地区（新西兰/澳洲/加拿大）。", parent=self)
+            return
         if not any(
             (
                 self.var_display.get(),
@@ -173,7 +204,7 @@ class DataGrabDialog(tk.Toplevel):
                 self.var_roi.get(),
             )
         ):
-            messagebox.showwarning("未选择", "请至少勾选一项。", parent=self)
+            messagebox.showwarning("未选择", "请至少勾选一项抓取内容。", parent=self)
             return
         self._running = True
         self.run_btn.config(state="disabled")
@@ -187,47 +218,53 @@ class DataGrabDialog(tk.Toplevel):
                 build_runtime_config,
                 grab_sql_to_excel,
                 last_sql_file,
-                load_grabber_config,
                 run_grab_pipeline,
             )
-            from stock_price_lookup import DEFAULT_EXCEL, STOCK_PRICE_SQL, reload_stock_prices
+            from region_config import config_for_region
+            from stock_price_lookup import STOCK_PRICE_SQL, reload_stock_prices
 
-            cfg = self._grab_cfg()
-            region = cfg.get("active_region", "nz")
-            self._log(f"区域: {region}")
+            base_cfg = self._grab_cfg()
+            regions = self._selected_regions()
 
-            if self.var_display.get() or self.var_sales.get() or self.var_roi.get():
-                self._log("── 开始 Display / 周销量 / ROI ──")
-                results = run_grab_pipeline(
-                    cfg,
-                    display=self.var_display.get(),
-                    sales=self.var_sales.get(),
-                    sync_roi=self.var_roi.get(),
-                    log=self._log,
-                )
-                if self.var_display.get():
-                    disp = results.get("display", {})
-                    self._log(f"Display: {disp.get('count', 0)} 款")
-                    sql_used = last_sql_file()
-                    if sql_used:
-                        self._log(f"实际 SQL: {os.path.basename(sql_used)}")
-                if self.var_sales.get() and "sales" not in results:
-                    ok = False
-
-            if self.var_stock.get():
-                self._log("── 开始仓库库存/价格 ──")
+            for idx, region_id in enumerate(regions):
+                cfg = config_for_region(base_cfg, region_id)
+                label = cfg.get("_region_label", region_id)
+                self._log(f"════ {label} ({region_id.upper()}) ════")
                 runtime = build_runtime_config(cfg)
-                stock_out = cfg.get("stock_price_output_excel") or os.path.join(
-                    runtime.get("output_folder") or "data", "product_stock_price.xlsx"
-                )
-                stock_cfg = {
-                    **cfg,
-                    "sql_file": cfg.get("stock_price_sql_file") or STOCK_PRICE_SQL,
-                    "output_excel": stock_out,
-                }
-                rows, excel_path = grab_sql_to_excel(stock_cfg)
-                cache = reload_stock_prices(excel_path)
-                self._log(f"库存/价格: {len(rows)} 行 · {len(cache)} SKU → {excel_path}")
+                self._log(f"SQL: {runtime.get('sql_folder')} → 输出: {runtime.get('output_folder')}")
+
+                if self.var_display.get() or self.var_sales.get() or (self.var_roi.get() and idx == 0):
+                    self._log("── Display / 周销量 / ROI ──")
+                    results = run_grab_pipeline(
+                        cfg,
+                        display=self.var_display.get(),
+                        sales=self.var_sales.get(),
+                        sync_roi=self.var_roi.get() and idx == 0,
+                        log=self._log,
+                    )
+                    if self.var_display.get():
+                        disp = results.get("display", {})
+                        self._log(f"Display: {disp.get('count', 0)} 款")
+                        sql_used = last_sql_file()
+                        if sql_used:
+                            self._log(f"实际 SQL: {os.path.basename(sql_used)}")
+                    if self.var_sales.get() and "sales" not in results:
+                        ok = False
+
+                if self.var_stock.get():
+                    self._log("── 仓库库存/价格 ──")
+                    stock_out = cfg.get("stock_price_output_excel") or os.path.join(
+                        runtime.get("output_folder") or f"data/{region_id}",
+                        "product_stock_price.xlsx",
+                    )
+                    stock_cfg = {
+                        **cfg,
+                        "sql_file": cfg.get("stock_price_sql_file") or STOCK_PRICE_SQL,
+                        "output_excel": stock_out,
+                    }
+                    rows, excel_path = grab_sql_to_excel(stock_cfg)
+                    cache = reload_stock_prices(excel_path)
+                    self._log(f"库存/价格: {len(rows)} 行 · {len(cache)} SKU → {excel_path}")
 
             self._log("── 全部完成 ──")
         except Exception as exc:
