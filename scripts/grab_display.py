@@ -14,17 +14,35 @@ SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(SCRIPT_DIR)
 sys.path.insert(0, SCRIPT_DIR)
 
-from display_lookup import grab_and_save, last_load_error, shop_stats
+from display_lookup import grab_and_save, last_load_error, load_grabber_config, shop_stats
+from region_config import SUPPORTED_REGIONS, get_active_region, merge_region_config
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Display 数据抓取")
+    parser.add_argument(
+        "--region",
+        choices=list(SUPPORTED_REGIONS),
+        help="国家/区域：nz / au / ca（默认 grabber_config.json 的 active_region）",
+    )
+    args = parser.parse_args()
+
+    cfg = load_grabber_config()
+    if args.region:
+        cfg = {**cfg, "active_region": args.region}
+    runtime = merge_region_config(cfg)
+    region = get_active_region(cfg)
+
     print("=" * 50)
-    print("Display 数据抓取")
+    print(f"Display 数据抓取 — {runtime.get('_region_label', region)}")
     print("=" * 50)
-    print(f"目录: {os.getcwd()}\n")
+    print(f"目录: {os.getcwd()}")
+    print(f"区域: {region} → {runtime.get('output_folder')}\n")
 
     try:
-        items, excel_path = grab_and_save()
+        items, excel_path = grab_and_save(cfg)
     except Exception as exc:
         print(f"抓取失败: {exc}")
         if last_load_error():

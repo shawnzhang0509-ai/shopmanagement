@@ -12,22 +12,33 @@ SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(SCRIPT_DIR)
 sys.path.insert(0, SCRIPT_DIR)
 
-from display_lookup import grab_sql_to_excel, last_load_error, load_grabber_config
-from sales_lookup import DEFAULT_EXCEL, SALES_SQL, reload_weekly_sales
+from display_lookup import grab_sql_to_excel, last_load_error, load_grabber_config, sales_runtime_config
+from region_config import SUPPORTED_REGIONS, get_active_region
+from sales_lookup import reload_weekly_sales
 
 
 def main() -> int:
-    print("=" * 50)
-    print("周销量数据抓取（Branch + ProductFamily）")
-    print("=" * 50)
-    print(f"目录: {os.getcwd()}\n")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="周销量数据抓取")
+    parser.add_argument(
+        "--region",
+        choices=list(SUPPORTED_REGIONS),
+        help="国家/区域：nz / au / ca",
+    )
+    args = parser.parse_args()
 
     base = load_grabber_config()
-    cfg = {
-        **base,
-        "sql_file": base.get("sales_sql_file") or SALES_SQL,
-        "output_excel": base.get("sales_output_excel") or DEFAULT_EXCEL,
-    }
+    if args.region:
+        base = {**base, "active_region": args.region}
+    cfg = sales_runtime_config(base)
+    region = get_active_region(base)
+
+    print("=" * 50)
+    print(f"周销量数据抓取 — {cfg.get('_region_label', region)}")
+    print("=" * 50)
+    print(f"目录: {os.getcwd()}")
+    print(f"区域: {region} → {cfg.get('output_excel')}\n")
 
     try:
         rows, excel_path = grab_sql_to_excel(cfg)

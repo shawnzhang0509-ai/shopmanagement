@@ -11,9 +11,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from display_lookup import SCRIPT_DIR, shop_id_for_location
+from display_lookup import SCRIPT_DIR, load_grabber_config, shop_id_for_location
+from region_config import weekly_sales_excel_path
 
-DEFAULT_EXCEL = os.path.join(SCRIPT_DIR, "data", "weekly_sales.xlsx")
+DEFAULT_EXCEL = weekly_sales_excel_path()
+
+
+def resolve_weekly_sales_path(path: str | None = None) -> str:
+    return path or weekly_sales_excel_path(load_grabber_config())
 SALES_SQL = os.path.join(SCRIPT_DIR, "sql", "weekly_sales.sql")
 
 _sales_cache: list["WeeklySalesRow"] | None = None
@@ -159,7 +164,7 @@ def load_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
     if _sales_cache is not None and path is None:
         return _sales_cache
 
-    path = path or DEFAULT_EXCEL
+    path = resolve_weekly_sales_path(path)
     if not os.path.isfile(path):
         _sales_cache = []
         return _sales_cache
@@ -332,5 +337,5 @@ def lookup_sales_roi(product_family: str, shop_id: str | None = None) -> float:
 
 
 def sales_data_available(path: str | None = None) -> bool:
-    path = path or DEFAULT_EXCEL
+    path = resolve_weekly_sales_path(path)
     return os.path.isfile(path) and os.path.getsize(path) > 0

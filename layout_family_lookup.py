@@ -7,7 +7,10 @@ import os
 from ui_common import sanitize_display_text
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LAYOUTS_DIR = os.path.join(SCRIPT_DIR, "data", "layouts")
+
+from region_config import layouts_dir
+
+LAYOUTS_DIR = layouts_dir()
 
 
 def layout_path_for_slug(slug: str) -> str:

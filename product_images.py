@@ -40,7 +40,9 @@ def _load_image_bases() -> tuple[str, ...]:
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 cfg = json.load(f)
-            custom = (cfg.get("image_base_url") or "").strip()
+            from region_config import merge_region_config
+
+            custom = (merge_region_config(cfg).get("image_base_url") or "").strip()
             if custom:
                 bases.append(custom if custom.endswith("/") else f"{custom}/")
         except Exception:

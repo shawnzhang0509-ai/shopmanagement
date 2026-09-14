@@ -21,12 +21,14 @@ from display_lookup import (
     build_runtime_config,
     last_sql_file,
     load_grabber_config,
+    reload_shops,
     resolve_database_url,
     run_grab_pipeline,
     save_grabber_config,
     shop_stats,
     test_database_connection,
 )
+from region_config import merge_region_config, region_database_url, region_labels
 
 ACCENT = "#3498db"
 ACCENT_HOVER = "#2980b9"
@@ -66,35 +68,52 @@ class DisplayGrabberApp:
         cfg_frame = ttk.LabelFrame(self.root, text="基本配置", padding=10)
         cfg_frame.pack(fill="x", padx=12, pady=(12, 6))
 
-        ttk.Label(cfg_frame, text="数据库连接").grid(row=0, column=0, sticky="nw", **pad)
+        ttk.Label(cfg_frame, text="国家/区域").grid(row=0, column=0, sticky="w", **pad)
+        self.region_var = tk.StringVar(value="nz")
+        region_combo = ttk.Combobox(
+            cfg_frame,
+            textvariable=self.region_var,
+            values=[rid for rid, _ in region_labels()],
+            state="readonly",
+            width=12,
+        )
+        region_combo.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        region_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_region_changed())
+        self.region_label_var = tk.StringVar(value="新西兰")
+        ttk.Label(cfg_frame, textvariable=self.region_label_var, foreground=MUTED).grid(
+            row=0, column=2, sticky="w", padx=4
+        )
+
+        ttk.Label(cfg_frame, text="数据库连接").grid(row=1, column=0, sticky="nw", **pad)
         db_row = ttk.Frame(cfg_frame)
-        db_row.grid(row=0, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+        db_row.grid(row=1, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
         self.db_entry = tk.Text(db_row, height=2, width=80, wrap="word")
         self.db_entry.pack(fill="x", expand=True)
         ttk.Button(db_row, text="测试连接", command=self.test_connection).pack(anchor="e", pady=(6, 0))
 
-        ttk.Label(cfg_frame, text="SQL 文件夹").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Label(cfg_frame, text="SQL 文件夹").grid(row=2, column=0, sticky="w", **pad)
         self.sql_folder_var = tk.StringVar(value="sql")
         ttk.Entry(cfg_frame, textvariable=self.sql_folder_var, width=60).grid(
-            row=1, column=1, sticky="ew", padx=8, pady=6
-        )
-        ttk.Button(cfg_frame, text="浏览...", command=self._browse_sql).grid(row=1, column=2, padx=4)
-
-        ttk.Label(cfg_frame, text="输出文件夹").grid(row=2, column=0, sticky="w", **pad)
-        self.output_folder_var = tk.StringVar(value="data")
-        ttk.Entry(cfg_frame, textvariable=self.output_folder_var, width=60).grid(
             row=2, column=1, sticky="ew", padx=8, pady=6
         )
-        ttk.Button(cfg_frame, text="浏览...", command=self._browse_output).grid(row=2, column=2, padx=4)
+        ttk.Button(cfg_frame, text="浏览...", command=self._browse_sql).grid(row=2, column=2, padx=4)
+
+        ttk.Label(cfg_frame, text="输出文件夹").grid(row=3, column=0, sticky="w", **pad)
+        self.output_folder_var = tk.StringVar(value="data")
+        ttk.Entry(cfg_frame, textvariable=self.output_folder_var, width=60).grid(
+            row=3, column=1, sticky="ew", padx=8, pady=6
+        )
+        ttk.Button(cfg_frame, text="浏览...", command=self._browse_output).grid(row=3, column=2, padx=4)
         cfg_frame.columnconfigure(1, weight=1)
 
         grab_opts = ttk.LabelFrame(self.root, text="抓取选项", padding=10)
         grab_opts.pack(fill="x", padx=12, pady=(0, 6))
         self.grab_sales_var = tk.BooleanVar(value=True)
         self.sync_roi_var = tk.BooleanVar(value=False)
+        self.sales_path_hint = tk.StringVar(value="周销量 → data/weekly_sales.xlsx")
         ttk.Checkbutton(
             grab_opts,
-            text="同时抓取周销量 → data/weekly_sales.xlsx",
+            textvariable=self.sales_path_hint,
             variable=self.grab_sales_var,
         ).pack(anchor="w")
         ttk.Checkbutton(
@@ -178,20 +197,42 @@ class DisplayGrabberApp:
 
         self.root.after(0, append)
 
+    def _region_label_for(self, region_id: str) -> str:
+        for rid, label in region_labels():
+            if rid == region_id:
+                return label
+        return region_id
+
+    def _apply_region_fields(self, cfg: dict) -> None:
+        runtime = merge_region_config(cfg)
+        region_id = runtime.get("active_region", "nz")
+        self.region_var.set(region_id)
+        self.region_label_var.set(runtime.get("_region_label") or self._region_label_for(region_id))
+        self.db_entry.delete("1.0", "end")
+        self.db_entry.insert("1.0", region_database_url(cfg, region_id) or resolve_database_url(runtime))
+        self.output_folder_var.set(runtime.get("output_folder") or "data")
+        out = runtime.get("output_folder") or "data"
+        self.sales_path_hint.set(f"同时抓取周销量 → {out}/weekly_sales.xlsx")
+
+    def _on_region_changed(self) -> None:
+        cfg = self._collect_config(persist_region_only=True)
+        self._apply_region_fields(cfg)
+
     def _load_fields(self) -> None:
         cfg = load_grabber_config()
-        self.db_entry.delete("1.0", "end")
-        self.db_entry.insert("1.0", resolve_database_url(cfg))
+        self._apply_region_fields(cfg)
         self.sql_folder_var.set(cfg.get("sql_folder", "sql"))
-        self.output_folder_var.set(cfg.get("output_folder", "data"))
         self.interval_var.set(int(cfg.get("schedule_interval", 30)))
         self.unit_var.set(cfg.get("schedule_unit", "分钟"))
         self.tray_var.set(bool(cfg.get("minimize_to_tray", False)))
         self.grab_sales_var.set(bool(cfg.get("grab_sales_with_display", True)))
         self.sync_roi_var.set(bool(cfg.get("sync_roi_after_grab", False)))
 
-    def _collect_config(self) -> dict:
-        return {
+    def _collect_config(self, *, persist_region_only: bool = False) -> dict:
+        cfg = load_grabber_config()
+        region_id = self.region_var.get().strip() or "nz"
+        collected = {
+            "active_region": region_id,
             "database_url": self.db_entry.get("1.0", "end").strip(),
             "sql_folder": self.sql_folder_var.get().strip() or "sql",
             "output_folder": self.output_folder_var.get().strip() or "data",
@@ -201,6 +242,17 @@ class DisplayGrabberApp:
             "grab_sales_with_display": bool(self.grab_sales_var.get()),
             "sync_roi_after_grab": bool(self.sync_roi_var.get()),
         }
+        if persist_region_only:
+            return {**cfg, "active_region": region_id}
+        regions = dict(cfg.get("regions") or {})
+        section = dict(regions.get(region_id) or {})
+        if collected["database_url"]:
+            section["database_url"] = collected["database_url"]
+        section["output_folder"] = collected["output_folder"]
+        regions[region_id] = section
+        collected["regions"] = regions
+        reload_shops(collected)
+        return collected
 
     def test_connection(self) -> None:
         cfg = self._collect_config()

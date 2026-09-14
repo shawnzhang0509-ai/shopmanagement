@@ -50,9 +50,13 @@ class DataGrabDialog(tk.Toplevel):
         self._running = False
 
         from display_lookup import build_runtime_config, load_grabber_config
+        from region_config import merge_region_config, region_labels
 
         cfg = load_grabber_config()
+        self._base_cfg = cfg
         runtime = build_runtime_config(cfg)
+        out_folder = runtime.get("output_folder") or "data"
+        region_label = runtime.get("_region_label") or runtime.get("active_region", "nz")
 
         intro = tk.Label(
             self,
@@ -65,6 +69,30 @@ class DataGrabDialog(tk.Toplevel):
         )
         intro.pack(anchor="w", padx=16, pady=(14, 8))
 
+        region_row = tk.Frame(self, bg=BG)
+        region_row.pack(fill="x", padx=16, pady=(0, 6))
+        tk.Label(region_row, text="国家/区域", font=("Microsoft YaHei UI", 10), bg=BG, fg=TEXT).pack(
+            side="left"
+        )
+        self.region_var = tk.StringVar(value=runtime.get("active_region", "nz"))
+        region_combo = ttk.Combobox(
+            region_row,
+            textvariable=self.region_var,
+            values=[rid for rid, _ in region_labels()],
+            state="readonly",
+            width=10,
+        )
+        region_combo.pack(side="left", padx=(8, 4))
+        self.region_hint_var = tk.StringVar(value=f"{region_label} · 输出目录 {out_folder}/")
+        tk.Label(
+            region_row,
+            textvariable=self.region_hint_var,
+            font=("Microsoft YaHei UI", 9),
+            bg=BG,
+            fg=MUTED,
+        ).pack(side="left", padx=4)
+        region_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_region_changed())
+
         opts = ttk.LabelFrame(self, text="抓取内容", padding=12)
         opts.pack(fill="x", padx=16, pady=6)
 
@@ -73,21 +101,19 @@ class DataGrabDialog(tk.Toplevel):
         self.var_stock = tk.BooleanVar(value=False)
         self.var_roi = tk.BooleanVar(value=bool(cfg.get("sync_roi_after_grab", False)))
 
-        ttk.Checkbutton(
-            opts,
-            text="Display 大库 → data/display.xlsx（含 ImageUrl、停产 Demo）",
-            variable=self.var_display,
-        ).pack(anchor="w")
-        ttk.Checkbutton(
-            opts,
-            text="周销量 → data/weekly_sales.xlsx（较慢，可单独勾选）",
-            variable=self.var_sales,
-        ).pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(
-            opts,
-            text="仓库库存/价格 → data/product_stock_price.xlsx",
-            variable=self.var_stock,
-        ).pack(anchor="w", pady=(6, 0))
+        self.display_path_var = tk.StringVar(
+            value=f"Display 大库 → {out_folder}/display.xlsx（含 ImageUrl、停产 Demo）"
+        )
+        self.sales_path_var = tk.StringVar(value=f"周销量 → {out_folder}/weekly_sales.xlsx（较慢，可单独勾选）")
+        self.stock_path_var = tk.StringVar(value=f"仓库库存/价格 → {out_folder}/product_stock_price.xlsx")
+
+        ttk.Checkbutton(opts, textvariable=self.display_path_var, variable=self.var_display).pack(anchor="w")
+        ttk.Checkbutton(opts, textvariable=self.sales_path_var, variable=self.var_sales).pack(
+            anchor="w", pady=(6, 0)
+        )
+        ttk.Checkbutton(opts, textvariable=self.stock_path_var, variable=self.var_stock).pack(
+            anchor="w", pady=(6, 0)
+        )
         ttk.Checkbutton(
             opts,
             text="同步 ROI 到 furniture_templates.json 与门店布局",
@@ -114,6 +140,21 @@ class DataGrabDialog(tk.Toplevel):
         self.run_btn = ttk.Button(btn_row, text="开始抓取", command=self._start_grab)
         self.run_btn.pack(side="left")
         ttk.Button(btn_row, text="关闭", command=self.destroy).pack(side="right")
+
+    def _on_region_changed(self) -> None:
+        from region_config import merge_region_config
+
+        cfg = {**self._base_cfg, "active_region": self.region_var.get().strip() or "nz"}
+        runtime = merge_region_config(cfg)
+        out_folder = runtime.get("output_folder") or "data"
+        label = runtime.get("_region_label") or cfg["active_region"]
+        self.region_hint_var.set(f"{label} · 输出目录 {out_folder}/")
+        self.display_path_var.set(f"Display 大库 → {out_folder}/display.xlsx（含 ImageUrl、停产 Demo）")
+        self.sales_path_var.set(f"周销量 → {out_folder}/weekly_sales.xlsx（较慢，可单独勾选）")
+        self.stock_path_var.set(f"仓库库存/价格 → {out_folder}/product_stock_price.xlsx")
+
+    def _grab_cfg(self) -> dict:
+        return {**self._base_cfg, "active_region": self.region_var.get().strip() or "nz"}
 
     def _log(self, msg: str) -> None:
         self.log_text.insert("end", msg + "\n")
@@ -151,7 +192,9 @@ class DataGrabDialog(tk.Toplevel):
             )
             from stock_price_lookup import DEFAULT_EXCEL, STOCK_PRICE_SQL, reload_stock_prices
 
-            cfg = load_grabber_config()
+            cfg = self._grab_cfg()
+            region = cfg.get("active_region", "nz")
+            self._log(f"区域: {region}")
 
             if self.var_display.get() or self.var_sales.get() or self.var_roi.get():
                 self._log("── 开始 Display / 周销量 / ROI ──")
@@ -174,10 +217,13 @@ class DataGrabDialog(tk.Toplevel):
             if self.var_stock.get():
                 self._log("── 开始仓库库存/价格 ──")
                 runtime = build_runtime_config(cfg)
+                stock_out = cfg.get("stock_price_output_excel") or os.path.join(
+                    runtime.get("output_folder") or "data", "product_stock_price.xlsx"
+                )
                 stock_cfg = {
                     **cfg,
                     "sql_file": cfg.get("stock_price_sql_file") or STOCK_PRICE_SQL,
-                    "output_excel": cfg.get("stock_price_output_excel") or DEFAULT_EXCEL,
+                    "output_excel": stock_out,
                 }
                 rows, excel_path = grab_sql_to_excel(stock_cfg)
                 cache = reload_stock_prices(excel_path)
