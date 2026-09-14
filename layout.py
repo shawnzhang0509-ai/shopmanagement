@@ -124,7 +124,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -171,6 +171,9 @@ ROTATION_HANDLE_RADIUS_PX = 8
 ROTATION_HANDLE_HIT_PX = 16
 WALL_MIN_LENGTH_MM = 200
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
+EVENT_STORE_BOOT = pygame.USEREVENT + 2
+_boot_store_pending: str | None = None
+_heatmap_lazy_until_ms = 0
 
 # ── 字体 ────────────────────────────────────────────────────
 FONT_CANDIDATES = [
@@ -4276,6 +4279,50 @@ def refresh_catalog_cache_async():
     _catalog_refresh_thread.start()
 
 
+def _startup_preload_worker() -> None:
+    """后台预读库存/Display，不阻塞窗口弹出。"""
+    try:
+        reload_stock_prices()
+    except Exception:
+        pass
+    try:
+        _load_display_items_cache()
+    except Exception:
+        pass
+
+
+def _defer_heatmap_metrics() -> None:
+    global _heatmap_lazy_until_ms
+    _heatmap_lazy_until_ms = pygame.time.get_ticks() + 3000
+
+
+def _heatmap_metrics_allowed() -> bool:
+    return pygame.time.get_ticks() >= _heatmap_lazy_until_ms
+
+
+def _finish_boot_store_open(path: str) -> bool:
+    """主线程：打开上次门店并切到编辑器。"""
+    global startup_active, startup_buttons, editor_buttons, input_box
+    global sidebar_dropdowns, template_rows_top, template_rows_bottom, _boot_store_pending
+    try:
+        switch_store_layout(path)
+        startup_active = False
+        startup_buttons = None
+        editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (
+            build_sidebar_ui()
+        )
+        _defer_heatmap_metrics()
+        print(f"已打开上次门店: {store_name}")
+        return True
+    except Exception as exc:
+        print(f"打开上次门店失败: {exc}")
+        startup_active = True
+        startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
+        return False
+    finally:
+        _boot_store_pending = None
+
+
 def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
@@ -4307,7 +4354,11 @@ def load_layout(filepath, *, keep_undo=False):
     for f in data.get("furnitures", []):
         name = f.get("name", "")
         stored_family = sanitize_display_text(f.get("product_family", ""), "")
-        family = effective_product_family(name, stored_family)
+        # 启动时直接用 JSON 里已存的系列名，避免同步扫 Display/周销量大表（可点「刷新」再对齐）
+        if stored_family and not family_is_placeholder(stored_family, name):
+            family = stored_family
+        else:
+            family = stored_family or ""
         roi = float(f.get("roi") or 0)
         furniture = Furniture(
             name,
@@ -5599,14 +5650,20 @@ def build_startup_ui():
 
 def draw_startup_screen(surface, buttons):
     surface.fill(C_BG)
-    title = FONT_TITLE.render("选择门店", True, C_TEXT)
-    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 48)))
-    sub = FONT_SMALL.render("单击门店进入编辑  |  返回前已自动保存", True, C_MUTED)
-    surface.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 82)))
-    hint = FONT_BODY.render("单击门店名称进入", True, C_ACCENT)
-    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 108)))
-    for btn in buttons.values():
-        btn.draw(surface)
+    if _boot_store_pending:
+        title = FONT_TITLE.render("正在打开上次门店", True, C_TEXT)
+        surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 24)))
+        hint = FONT_BODY.render("布局文件加载中，请稍候…", True, C_ACCENT)
+        surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 16)))
+    else:
+        title = FONT_TITLE.render("选择门店", True, C_TEXT)
+        surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 48)))
+        sub = FONT_SMALL.render("单击门店进入编辑  |  返回前已自动保存", True, C_MUTED)
+        surface.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 82)))
+        hint = FONT_BODY.render("单击门店名称进入", True, C_ACCENT)
+        surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 108)))
+        for btn in buttons.values():
+            btn.draw(surface)
     ver = FONT_MARK.render(f"v{APP_VERSION}", True, C_MUTED)
     surface.blit(ver, (SCREEN_WIDTH - ver.get_width() - 12, SCREEN_HEIGHT - ver.get_height() - 8))
 
@@ -7294,34 +7351,29 @@ def main():
         raise SystemExit(1) from e
 
     ensure_layouts_dir()
-    try:
-        reload_stock_prices()
-    except Exception:
-        pass
-
     init_display()
     print("坪效布局编辑器已启动。")
     refresh_catalog_cache_async()
+    threading.Thread(target=_startup_preload_worker, daemon=True).start()
 
+    global _boot_store_pending
     last_path = load_last_store_path()
-    if last_path:
-        try:
-            switch_store_layout(last_path)
-            startup_active = False
-            print(f"已打开上次门店: {store_name}")
-        except Exception as e:
-            print(f"打开上次门店失败: {e}")
-            startup_active = True
+    if last_path and os.path.isfile(last_path):
+        _boot_store_pending = last_path
+        startup_active = True
+        print(f"将在窗口显示后打开: {os.path.basename(last_path)}")
     else:
+        _boot_store_pending = None
         startup_active = True
         print("请选择门店。")
 
     startup_buttons = build_store_catalog_ui(fast=True, cache_only=True) if startup_active else None
     store_picker_buttons = None
     editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (None, None, {}, 0, 0)
-    if not startup_active:
-        editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
     running = True
+
+    if _boot_store_pending:
+        pygame.event.post(pygame.event.Event(EVENT_STORE_BOOT))
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
@@ -7341,6 +7393,10 @@ def main():
 
             if event.type == EVENT_HOME_DEFERRED:
                 handle_home_deferred()
+                continue
+
+            if event.type == EVENT_STORE_BOOT and _boot_store_pending:
+                _finish_boot_store_open(_boot_store_pending)
                 continue
 
             if store_picker_active:
@@ -7700,7 +7756,7 @@ def main():
             draw_obstacles(screen)
             draw_layout_markers(screen)
             draw_alignment_guides(screen)
-            if sales_data_ready() and placed_furnitures:
+            if sales_data_ready() and placed_furnitures and _heatmap_metrics_allowed():
                 ensure_heatmap_metrics()
             draw_order = furniture_draw_order()
             selected_set = set(selected_furnitures)
