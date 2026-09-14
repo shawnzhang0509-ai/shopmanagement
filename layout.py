@@ -124,7 +124,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -171,6 +171,11 @@ ROTATION_HANDLE_RADIUS_PX = 8
 ROTATION_HANDLE_HIT_PX = 16
 WALL_MIN_LENGTH_MM = 200
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
+EVENT_STORE_BOOT = pygame.USEREVENT + 2
+_boot_store_pending: str | None = None
+_heatmap_lazy_until_ms = 0
+_active_layout_region: str = "nz"
+_region_tab_rects: dict[str, pygame.Rect] = {}
 
 # ── 字体 ────────────────────────────────────────────────────
 FONT_CANDIDATES = [
@@ -3945,6 +3950,65 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
 
 
 # ── 数据持久化 ──────────────────────────────────────────────
+def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
+    """切换国家/区域：布局目录、门店列表、Display/销量路径与 grabber_config 对齐。"""
+    global LAYOUTS_DIR, LAYOUT_TEMPLATES_DIR, LAST_STORE_FILE
+    global STORE_CATALOG, LAYOUT_SLUG_TO_SALES_SHOP, CATALOG_LAYOUT_SPECS
+    global _active_layout_region, _display_items_cache, _boot_store_pending
+
+    from display_lookup import load_grabber_config, reload_shops, save_grabber_config
+    from region_config import (
+        catalog_layout_specs,
+        layout_catalog,
+        layout_slug_to_sales_shop,
+        layouts_dir,
+        normalize_region_id,
+    )
+
+    region_id = normalize_region_id(region_id)
+    cfg = load_grabber_config()
+    if persist:
+        cfg = {**cfg, "active_region": region_id}
+        save_grabber_config(cfg)
+    else:
+        cfg = {**cfg, "active_region": region_id}
+
+    LAYOUTS_DIR = layouts_dir(cfg, region_id)
+    LAYOUT_TEMPLATES_DIR = os.path.join(LAYOUTS_DIR, "_templates")
+    LAST_STORE_FILE = os.path.join(LAYOUTS_DIR, "_last.json")
+    STORE_CATALOG = layout_catalog(region_id)
+    LAYOUT_SLUG_TO_SALES_SHOP = layout_slug_to_sales_shop(region_id)
+    CATALOG_LAYOUT_SPECS = catalog_layout_specs(region_id)
+    _active_layout_region = region_id
+    _display_items_cache = None
+    _boot_store_pending = None
+    reload_shops(cfg)
+    try:
+        from sales_lookup import reload_weekly_sales
+
+        reload_weekly_sales()
+    except Exception:
+        pass
+    try:
+        clear_heatmap_cache()
+        mark_heatmap_dirty()
+    except Exception:
+        pass
+    ensure_layouts_dir()
+
+
+def layout_data_folder_hint() -> str:
+    from display_lookup import load_grabber_config
+    from region_config import merge_region_config
+
+    merged = merge_region_config(load_grabber_config(), _active_layout_region)
+    return str(merged.get("output_folder") or f"data/{_active_layout_region}")
+
+
+def _legacy_layout_path(slug: str) -> str:
+    return os.path.join(SCRIPT_DIR, "data", "layouts", f"{slug}.json")
+
+
 def ensure_layouts_dir():
     os.makedirs(LAYOUTS_DIR, exist_ok=True)
     os.makedirs(LAYOUT_TEMPLATES_DIR, exist_ok=True)
@@ -3969,7 +4033,13 @@ def unique_layout_path(display_name):
 
 
 def layout_path_for_slug(slug):
-    return os.path.join(LAYOUTS_DIR, f"{slug}.json")
+    primary = os.path.join(LAYOUTS_DIR, f"{slug}.json")
+    if os.path.isfile(primary):
+        return primary
+    legacy = _legacy_layout_path(slug)
+    if _active_layout_region == "nz" and os.path.isfile(legacy):
+        return legacy
+    return primary
 
 
 def template_path_for_slug(slug):
@@ -4276,6 +4346,50 @@ def refresh_catalog_cache_async():
     _catalog_refresh_thread.start()
 
 
+def _startup_preload_worker() -> None:
+    """后台预读库存/Display，不阻塞窗口弹出。"""
+    try:
+        reload_stock_prices()
+    except Exception:
+        pass
+    try:
+        _load_display_items_cache()
+    except Exception:
+        pass
+
+
+def _defer_heatmap_metrics() -> None:
+    global _heatmap_lazy_until_ms
+    _heatmap_lazy_until_ms = pygame.time.get_ticks() + 3000
+
+
+def _heatmap_metrics_allowed() -> bool:
+    return pygame.time.get_ticks() >= _heatmap_lazy_until_ms
+
+
+def _finish_boot_store_open(path: str) -> bool:
+    """主线程：打开上次门店并切到编辑器。"""
+    global startup_active, startup_buttons, editor_buttons, input_box
+    global sidebar_dropdowns, template_rows_top, template_rows_bottom, _boot_store_pending
+    try:
+        switch_store_layout(path)
+        startup_active = False
+        startup_buttons = None
+        editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (
+            build_sidebar_ui()
+        )
+        _defer_heatmap_metrics()
+        print(f"已打开上次门店: {store_name}")
+        return True
+    except Exception as exc:
+        print(f"打开上次门店失败: {exc}")
+        startup_active = True
+        startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
+        return False
+    finally:
+        _boot_store_pending = None
+
+
 def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
@@ -4307,7 +4421,11 @@ def load_layout(filepath, *, keep_undo=False):
     for f in data.get("furnitures", []):
         name = f.get("name", "")
         stored_family = sanitize_display_text(f.get("product_family", ""), "")
-        family = effective_product_family(name, stored_family)
+        # 启动时直接用 JSON 里已存的系列名，避免同步扫 Display/周销量大表（可点「刷新」再对齐）
+        if stored_family and not family_is_placeholder(stored_family, name):
+            family = stored_family
+        else:
+            family = stored_family or ""
         roi = float(f.get("roi") or 0)
         furniture = Furniture(
             name,
@@ -5562,7 +5680,7 @@ def build_store_catalog_ui(*, picker_mode=False, fast=False, cache_only=False):
     btn_w = 400 if picker_mode else 360
     btn_h = 44
     gap = 10
-    y = 118 if picker_mode else 130
+    y = 118 if picker_mode else 148
     buttons = {}
     for i, (name, slug) in enumerate(STORE_CATALOG):
         path = layout_path_for_slug(slug)
@@ -5597,16 +5715,57 @@ def build_startup_ui():
     return build_store_catalog_ui(picker_mode=False)
 
 
+def _draw_region_tabs(surface) -> None:
+    from region_config import REGION_LABELS, SUPPORTED_REGIONS
+
+    global _region_tab_rects
+    _region_tab_rects = {}
+    tab_w, tab_h, gap = 88, 30, 8
+    total_w = len(SUPPORTED_REGIONS) * tab_w + (len(SUPPORTED_REGIONS) - 1) * gap
+    x = (SCREEN_WIDTH - total_w) // 2
+    y = 14
+    for rid in SUPPORTED_REGIONS:
+        rect = pygame.Rect(x, y, tab_w, tab_h)
+        active = rid == _active_layout_region
+        pygame.draw.rect(surface, (255, 255, 255), rect, border_radius=8)
+        pygame.draw.rect(surface, C_ACCENT if active else C_BORDER, rect, 2 if active else 1, border_radius=8)
+        label = REGION_LABELS.get(rid, rid.upper())
+        txt = FONT_MARK.render(label, True, C_ACCENT if active else C_MUTED)
+        surface.blit(txt, txt.get_rect(center=rect.center))
+        _region_tab_rects[rid] = rect
+        x += tab_w + gap
+
+
+def _startup_region_tab_hit(mx, my) -> str | None:
+    pos = ui_pos((mx, my))
+    for rid, rect in _region_tab_rects.items():
+        if rect.collidepoint(pos):
+            return rid
+    return None
+
+
 def draw_startup_screen(surface, buttons):
     surface.fill(C_BG)
-    title = FONT_TITLE.render("选择门店", True, C_TEXT)
-    surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 48)))
-    sub = FONT_SMALL.render("单击门店进入编辑  |  返回前已自动保存", True, C_MUTED)
-    surface.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 82)))
-    hint = FONT_BODY.render("单击门店名称进入", True, C_ACCENT)
-    surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 108)))
-    for btn in buttons.values():
-        btn.draw(surface)
+    if _boot_store_pending:
+        title = FONT_TITLE.render("正在打开上次门店", True, C_TEXT)
+        surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 24)))
+        hint = FONT_BODY.render("布局文件加载中，请稍候…", True, C_ACCENT)
+        surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 16)))
+    else:
+        _draw_region_tabs(surface)
+        title = FONT_TITLE.render("选择门店", True, C_TEXT)
+        surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 58)))
+        folder = layout_data_folder_hint()
+        sub = FONT_SMALL.render(
+            f"布局 → {folder}/layouts/  ·  销量/Display → {folder}/  ·  单击门店进入",
+            True,
+            C_MUTED,
+        )
+        surface.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 92)))
+        hint = FONT_BODY.render("先选上方国家/区域，再点门店名称", True, C_ACCENT)
+        surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 118)))
+        for btn in buttons.values():
+            btn.draw(surface)
     ver = FONT_MARK.render(f"v{APP_VERSION}", True, C_MUTED)
     surface.blit(ver, (SCREEN_WIDTH - ver.get_width() - 12, SCREEN_HEIGHT - ver.get_height() - 8))
 
@@ -5617,6 +5776,11 @@ def _startup_hit_button(mx, my, btn):
 
 def handle_startup_mouseup(mx, my, buttons):
     """松开鼠标进入（常规单击操作）。"""
+    picked = _startup_region_tab_hit(mx, my)
+    if picked and picked != _active_layout_region:
+        apply_layout_region(picked, persist=True)
+        show_toast(f"已切换到{layout_data_folder_hint()}（{picked.upper()}）")
+        return "region_changed"
     for btn in buttons.values():
         if _startup_hit_button(mx, my, btn):
             handle_startup_action(btn.action)
@@ -6488,7 +6652,7 @@ def draw_scale_bar(surface):
 
 
 def draw_heatmap_legend(surface):
-    if not placed_furnitures or not sales_data_ready():
+    if not placed_furnitures or not sales_data_ready() or not _heatmap_metrics_allowed():
         return
     ensure_heatmap_metrics()
     bar_w, bar_h = 18, 128
@@ -7293,35 +7457,34 @@ def main():
         messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
         raise SystemExit(1) from e
 
-    ensure_layouts_dir()
-    try:
-        reload_stock_prices()
-    except Exception:
-        pass
+    from display_lookup import load_grabber_config
+    from region_config import get_active_region
 
+    apply_layout_region(get_active_region(load_grabber_config()), persist=False)
+    ensure_layouts_dir()
     init_display()
     print("坪效布局编辑器已启动。")
     refresh_catalog_cache_async()
+    threading.Thread(target=_startup_preload_worker, daemon=True).start()
 
+    global _boot_store_pending
     last_path = load_last_store_path()
-    if last_path:
-        try:
-            switch_store_layout(last_path)
-            startup_active = False
-            print(f"已打开上次门店: {store_name}")
-        except Exception as e:
-            print(f"打开上次门店失败: {e}")
-            startup_active = True
+    if last_path and os.path.isfile(last_path):
+        _boot_store_pending = last_path
+        startup_active = True
+        print(f"将在窗口显示后打开: {os.path.basename(last_path)}")
     else:
+        _boot_store_pending = None
         startup_active = True
         print("请选择门店。")
 
     startup_buttons = build_store_catalog_ui(fast=True, cache_only=True) if startup_active else None
     store_picker_buttons = None
     editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (None, None, {}, 0, 0)
-    if not startup_active:
-        editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = build_sidebar_ui()
     running = True
+
+    if _boot_store_pending:
+        pygame.event.post(pygame.event.Event(EVENT_STORE_BOOT))
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
@@ -7341,6 +7504,10 @@ def main():
 
             if event.type == EVENT_HOME_DEFERRED:
                 handle_home_deferred()
+                continue
+
+            if event.type == EVENT_STORE_BOOT and _boot_store_pending:
+                _finish_boot_store_open(_boot_store_pending)
                 continue
 
             if store_picker_active:
@@ -7449,7 +7616,10 @@ def main():
 
             if startup_active:
                 if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                    handle_startup_mouseup(*event.pos, startup_buttons)
+                    result = handle_startup_mouseup(*event.pos, startup_buttons)
+                    if result == "region_changed":
+                        startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
+                        refresh_catalog_cache_async()
                 continue
 
             if event.type == pygame.MOUSEWHEEL:
@@ -7700,7 +7870,7 @@ def main():
             draw_obstacles(screen)
             draw_layout_markers(screen)
             draw_alignment_guides(screen)
-            if sales_data_ready() and placed_furnitures:
+            if sales_data_ready() and placed_furnitures and _heatmap_metrics_allowed():
                 ensure_heatmap_metrics()
             draw_order = furniture_draw_order()
             selected_set = set(selected_furnitures)
