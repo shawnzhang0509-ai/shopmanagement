@@ -28,6 +28,6 @@
     }
   },
   "_legacy_note": "若你原来用 data/display.xlsx（无 nz 子目录），程序仍会读取；建议搬到 data/nz/ 后统一结构",
-  "_sql_bootstrap_note": "若缺少 sql/ca/ 等目录，运行 python tools/bootstrap_region_sql.py；图片域名由程序按 image_base_url 自动替换",
+  "_sql_bootstrap_note": "若缺少 sql/ca/ 等目录，运行 python tools/bootstrap_region_sql.py；支持 display.txt / weekly_sales.txt；图片域名由程序按 image_base_url 自动替换",
   "_region_env_note": "环境变量 ACTIVE_REGION=au 或 DISPLAY_DB_URL_AU=... 可覆盖"
 }

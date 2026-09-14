@@ -2,6 +2,7 @@
 """为 sql/nz、sql/au、sql/ca 补齐 display / weekly_sales / product_stock_price SQL 文件。
 
 若某区域目录缺失，从 sql/nz/ 或根目录 sql/ 复制模板（不覆盖已有文件）。
+程序也支持同名的 .txt（如 display.txt、weekly_sales.txt）。
 """
 from __future__ import annotations
 

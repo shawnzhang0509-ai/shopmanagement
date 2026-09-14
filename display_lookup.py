@@ -845,7 +845,7 @@ def build_runtime_config(cfg: dict | None = None) -> dict:
         sql_file = os.path.join(sql_folder_abs, "display.sql")
     else:
         sql_file = _resolve_path(sql_file)
-    base["sql_file"] = sql_file
+    base["sql_file"] = _resolve_existing_sql_file(sql_file)
 
     output_folder = base.get("output_folder") or "data"
     output_folder_abs = _resolve_path(output_folder)
@@ -899,6 +899,32 @@ _IMAGE_URL_PREFIXES = (
 )
 
 
+def _sql_path_variants(path: str) -> list[str]:
+    """同一条 SQL 的 .sql / .txt 变体（Windows 上有人用记事本存成 .txt）。"""
+    folder = os.path.dirname(path) or "."
+    name = os.path.basename(path) or "display.sql"
+    stem, _ext = os.path.splitext(name)
+    if not stem:
+        return [path]
+    out: list[str] = []
+    for suffix in (".sql", ".txt"):
+        candidate = os.path.join(folder, stem + suffix)
+        if candidate not in out:
+            out.append(candidate)
+    if path not in out:
+        out.insert(0, path)
+    return out
+
+
+def _resolve_existing_sql_file(path: str) -> str:
+    """若 .sql 不存在则尝试同名的 .txt。"""
+    abs_path = path if os.path.isabs(path) else _resolve_path(path)
+    for candidate in _sql_path_variants(abs_path):
+        if os.path.isfile(candidate):
+            return candidate
+    return abs_path
+
+
 def _patch_sql_for_region(query: str, cfg: dict) -> str:
     """把 SQL 里的图片域名换成当前区域的 image_base_url（支持 {{IMAGE_BASE_URL}}）。"""
     merged = merge_region_config(cfg)
@@ -921,7 +947,9 @@ def load_sql_query(cfg: dict | None = None, *, path: str | None = None) -> str:
     cfg = build_runtime_config(cfg)
     path = path or cfg["sql_file"]
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"找不到 SQL 文件: {path}")
+        alts = [p for p in _sql_path_variants(path) if p != path]
+        hint = f"（也可尝试 {os.path.basename(alts[0])}）" if alts else ""
+        raise FileNotFoundError(f"找不到 SQL 文件: {path}{hint}")
     with open(path, "r", encoding="utf-8") as f:
         lines = [ln for ln in f.readlines() if not ln.strip().startswith("--")]
     query = "\n".join(lines).strip()
@@ -949,25 +977,28 @@ def _sql_fallback_paths(primary_path: str, cfg: dict | None = None) -> list[str]
     ordered: list[str] = []
 
     def add(path: str) -> None:
-        if path and path not in ordered:
-            ordered.append(path)
+        for variant in _sql_path_variants(path):
+            if variant not in ordered:
+                ordered.append(variant)
 
     add(primary_path)
     folder = os.path.dirname(primary_path) or _resolve_path("sql")
-    for name in (filename, "display.sql", "display.minimal.sql"):
+    for name in (filename, "display.sql", "display.minimal.sql", "weekly_sales.sql"):
         add(os.path.join(folder, name))
 
     for rid in [region_id] + [r for r in SUPPORTED_REGIONS if r != region_id]:
         reg_dir = _resolve_path(default_sql_folder(rid))
         add(os.path.join(reg_dir, filename))
-        if filename not in ("display.sql", "display.minimal.sql"):
+        if filename not in ("display.sql", "display.minimal.sql", "display.txt", "display.minimal.txt"):
             add(os.path.join(reg_dir, "display.sql"))
         add(os.path.join(reg_dir, "display.minimal.sql"))
+        add(os.path.join(reg_dir, "weekly_sales.sql"))
 
     root_sql = os.path.join(SCRIPT_DIR, "sql")
     add(os.path.join(root_sql, filename))
     add(os.path.join(root_sql, "display.sql"))
     add(os.path.join(root_sql, "display.minimal.sql"))
+    add(os.path.join(root_sql, "weekly_sales.sql"))
     return ordered
 
 
@@ -1251,6 +1282,7 @@ def sales_runtime_config(cfg: dict | None = None) -> dict:
     )
     if not os.path.isabs(sql_file):
         sql_file = os.path.join(SCRIPT_DIR, sql_file)
+    sql_file = _resolve_existing_sql_file(sql_file)
     output_excel = base.get("sales_output_excel")
     if output_excel:
         output_excel = _resolve_path(output_excel)
