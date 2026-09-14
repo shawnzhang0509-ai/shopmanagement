@@ -188,7 +188,7 @@ class DataGrabDialog(tk.Toplevel):
         self.log_text.insert("end", msg + "\n")
         self.log_text.see("end")
         if self._on_status:
-            self._on_status.set(msg)
+            self._on_status(msg)
 
     def _start_grab(self) -> None:
         if self._running:
