@@ -1,40 +1,32 @@
 {
-  "_comment": "复制为 grabber_config.json。支持新西兰(nz)/澳洲(au)/加拿大(ca)独立数据库与数据目录。",
+  "_comment": "复制为 grabber_config.json。SQL 在 sql/{nz,au,ca}/，Excel 在 data/{nz,au,ca}/。",
   "active_region": "nz",
-  "database_url": "mssql+pymssql://nzlivepooluser:YOUR_PASSWORD@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
-  "sql_folder": "sql",
-  "output_folder": "data",
-  "sql_file": "sql/display.sql",
-  "_sql_file_note": "只维护 sql/display.sql；ImageUrl 与 product_stock_price.sql 相同。其它 display*.sql 为自动兜底/可选。",
-  "output_excel": "data/display.xlsx",
-  "output_json": "data/display_cache.json",
-  "sales_sql_file": "sql/weekly_sales.sql",
-  "sales_output_excel": "data/weekly_sales.xlsx",
-  "stock_price_sql_file": "sql/product_stock_price.sql",
-  "stock_price_output_excel": "data/product_stock_price.xlsx",
-  "blacklist_file": "data/display_blacklist.csv",
-  "image_base_url": "https://ierpapi.ifurniture.co.nz/",
   "schedule_interval": 30,
   "schedule_unit": "分钟",
   "minimize_to_tray": false,
   "grab_sales_with_display": true,
   "sync_roi_after_grab": false,
+  "run_regions": ["nz"],
   "regions": {
     "nz": {
       "database_url": "mssql+pymssql://nzlivepooluser:YOUR_PASSWORD@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
-      "output_folder": "data",
+      "sql_folder": "sql/nz",
+      "output_folder": "data/nz",
       "image_base_url": "https://ierpapi.ifurniture.co.nz/"
     },
     "au": {
       "database_url": "mssql+pymssql://USER:YOUR_PASSWORD@YOUR-AU-SERVER.database.windows.net:1433/au_ierp_live?charset=utf8",
+      "sql_folder": "sql/au",
       "output_folder": "data/au",
       "image_base_url": "https://ierpapi.ifurniture.com.au/"
     },
     "ca": {
       "database_url": "mssql+pymssql://USER:YOUR_PASSWORD@YOUR-CA-SERVER.database.windows.net:1433/ca_ierp_live?charset=utf8",
+      "sql_folder": "sql/ca",
       "output_folder": "data/ca",
       "image_base_url": "https://ierpapi.ifurniture.ca/"
     }
   },
-  "_region_env_note": "也可设环境变量 ACTIVE_REGION=au 或 DISPLAY_DB_URL_AU=... 覆盖对应区域连接"
+  "_legacy_note": "若你原来用 data/display.xlsx（无 nz 子目录），程序仍会读取；建议搬到 data/nz/ 后统一结构",
+  "_region_env_note": "环境变量 ACTIVE_REGION=au 或 DISPLAY_DB_URL_AU=... 可覆盖"
 }

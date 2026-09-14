@@ -76,6 +76,39 @@ def region_section(cfg: dict, region_id: str | None = None) -> dict[str, Any]:
     return dict(section) if isinstance(section, dict) else {}
 
 
+def default_sql_folder(region_id: str) -> str:
+    profile = load_region_profile(region_id)
+    return str(profile.get("default_sql_folder") or f"sql/{region_id}")
+
+
+def default_output_folder(region_id: str) -> str:
+    profile = load_region_profile(region_id)
+    return str(profile.get("default_output_folder") or f"data/{region_id}")
+
+
+def legacy_data_paths() -> list[str]:
+    """旧版扁平 data/ 目录，读取时兜底。"""
+    return [
+        os.path.join(SCRIPT_DIR, "data"),
+        os.path.join(SCRIPT_DIR, "data", "nz"),
+    ]
+
+
+def legacy_display_excel_candidates() -> list[str]:
+    paths = [
+        os.path.join(SCRIPT_DIR, "data", "display.xlsx"),
+        os.path.join(SCRIPT_DIR, "data", "nz", "display.xlsx"),
+        os.path.join(SCRIPT_DIR, "display.xlsx"),
+    ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def merge_region_config(cfg: dict | None = None, region_id: str | None = None) -> dict[str, Any]:
     """合并全局配置 + 当前区域 overrides，供抓取与读取使用。"""
     base = dict(cfg or _load_grabber_config_raw())
@@ -92,16 +125,35 @@ def merge_region_config(cfg: dict | None = None, region_id: str | None = None) -
     merged["_region_label"] = str(profile.get("label") or REGION_LABELS.get(region_id, region_id))
 
     has_regions_block = isinstance(base.get("regions"), dict) and bool(base["regions"])
-    if has_regions_block and not section.get("output_folder"):
-        merged["output_folder"] = profile.get("default_output_folder") or f"data/{region_id}"
-    elif not merged.get("output_folder"):
-        merged["output_folder"] = profile.get("default_output_folder") or "data"
+
+    if not section.get("sql_folder"):
+        root_sql = str(merged.get("sql_folder") or "").strip()
+        if has_regions_block or not root_sql or root_sql == "sql":
+            merged["sql_folder"] = default_sql_folder(region_id)
+        elif not merged.get("sql_folder"):
+            merged["sql_folder"] = default_sql_folder(region_id)
+
+    if not section.get("output_folder"):
+        root_out = str(merged.get("output_folder") or "").strip()
+        if has_regions_block or not root_out or root_out == "data":
+            merged["output_folder"] = default_output_folder(region_id)
+        elif not merged.get("output_folder"):
+            merged["output_folder"] = default_output_folder(region_id)
 
     if not merged.get("image_base_url"):
         merged["image_base_url"] = profile.get("image_base_url") or ""
 
     folder = str(merged.get("output_folder") or "").strip()
-    if has_regions_block and folder:
+    sql_folder = str(merged.get("sql_folder") or default_sql_folder(region_id)).strip()
+
+    if not section.get("sql_file"):
+        merged["sql_file"] = os.path.join(sql_folder, "display.sql")
+    if not section.get("sales_sql_file"):
+        merged["sales_sql_file"] = os.path.join(sql_folder, "weekly_sales.sql")
+    if not section.get("stock_price_sql_file"):
+        merged["stock_price_sql_file"] = os.path.join(sql_folder, "product_stock_price.sql")
+
+    if folder:
         if not section.get("output_excel"):
             merged["output_excel"] = os.path.join(folder, "display.xlsx")
         if not section.get("output_json"):
@@ -114,6 +166,14 @@ def merge_region_config(cfg: dict | None = None, region_id: str | None = None) -
             merged["blacklist_file"] = os.path.join(folder, "display_blacklist.csv")
 
     return merged
+
+
+def config_for_region(cfg: dict, region_id: str) -> dict:
+    """把全局 cfg + 指定 region 合并为一次抓取用的配置。"""
+    region_id = normalize_region_id(region_id)
+    regions = dict(cfg.get("regions") or {})
+    section = dict(regions.get(region_id) or {})
+    return merge_region_config({**cfg, "active_region": region_id, "regions": {**regions, region_id: section}}, region_id)
 
 
 def region_labels() -> list[tuple[str, str]]:

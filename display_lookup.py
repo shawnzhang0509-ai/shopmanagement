@@ -28,6 +28,7 @@ EXAMPLE_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.exam
 from region_config import (  # noqa: E402
     display_excel_path,
     get_active_region,
+    legacy_display_excel_candidates,
     merge_region_config,
     region_database_url,
     shops_for_region,
@@ -815,6 +816,8 @@ def save_grabber_config(cfg: dict) -> None:
         regions = dict(merged.get("regions") or existing.get("regions") or {})
         section = dict(regions.get(region_id) or {})
         section["database_url"] = db_url
+        if merged.get("sql_folder"):
+            section["sql_folder"] = merged["sql_folder"]
         if merged.get("output_folder"):
             section["output_folder"] = merged["output_folder"]
         if merged.get("image_base_url"):
@@ -862,12 +865,13 @@ def resolve_display_excel_paths() -> list[str]:
     paths: list[str] = []
     paths.append(display_excel_path(cfg))
     runtime = build_runtime_config(cfg)
-    if runtime.get("output_excel") and runtime["output_excel"] not in paths:
-        paths.append(runtime["output_excel"])
-    if cfg.get("output_excel"):
-        legacy_cfg_path = _resolve_path(cfg["output_excel"])
-        if legacy_cfg_path not in paths:
-            paths.append(legacy_cfg_path)
+    if runtime.get("output_excel"):
+        rt_path = _resolve_path(runtime["output_excel"])
+        if rt_path not in paths:
+            paths.append(rt_path)
+    for legacy_path in legacy_display_excel_candidates():
+        if legacy_path not in paths:
+            paths.append(legacy_path)
     paths.extend([DEFAULT_EXCEL, LEGACY_EXCEL])
     seen: set[str] = set()
     out: list[str] = []

@@ -1,7 +1,8 @@
 {
   "id": "nz",
   "label": "新西兰",
-  "default_output_folder": "data",
+  "default_sql_folder": "sql/nz",
+  "default_output_folder": "data/nz",
   "image_base_url": "https://ierpapi.ifurniture.co.nz/",
   "shops": [
     {"id": "all", "label": "全部", "patterns": []},
