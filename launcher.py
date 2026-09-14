@@ -185,10 +185,18 @@ class DataGrabDialog(tk.Toplevel):
         }
 
     def _log(self, msg: str) -> None:
-        self.log_text.insert("end", msg + "\n")
-        self.log_text.see("end")
-        if self._on_status:
-            self._on_status(msg)
+        """后台线程安全：通过 after 回到主线程写日志。"""
+
+        def append() -> None:
+            self.log_text.insert("end", msg + "\n")
+            self.log_text.see("end")
+            if self._on_status:
+                self._on_status(msg)
+
+        try:
+            self.after(0, append)
+        except tk.TclError:
+            append()
 
     def _start_grab(self) -> None:
         if self._running:
@@ -495,12 +503,12 @@ class LauncherApp:
     def show_grab_wizard(self) -> None:
         if not self._require_deps(["pymssql", "sqlalchemy", "pandas", "openpyxl"]):
             return
-        DataGrabDialog(self.root, on_status=self.status_var.set)
+        DataGrabDialog(self.root, on_status=lambda msg: self.status_var.set(msg))
 
     def _quick_grab(self, *, sales_only: bool = False, stock_only: bool = False) -> None:
         if not self._require_deps(["pymssql", "sqlalchemy", "pandas", "openpyxl"]):
             return
-        dlg = DataGrabDialog(self.root, on_status=self.status_var.set)
+        dlg = DataGrabDialog(self.root, on_status=lambda msg: self.status_var.set(msg))
         dlg.var_display.set(False)
         dlg.var_sales.set(sales_only)
         dlg.var_stock.set(stock_only)

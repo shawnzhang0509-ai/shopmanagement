@@ -922,6 +922,13 @@ def _sql_fallback_paths(primary_path: str) -> list[str]:
         candidate = os.path.join(folder, name)
         if candidate not in ordered and os.path.isfile(candidate):
             ordered.append(candidate)
+    # 旧版扁平 sql/display.sql
+    legacy_root = os.path.join(SCRIPT_DIR, "sql", "display.sql")
+    if legacy_root not in ordered and os.path.isfile(legacy_root):
+        ordered.append(legacy_root)
+    legacy_min = os.path.join(SCRIPT_DIR, "sql", "display.minimal.sql")
+    if legacy_min not in ordered and os.path.isfile(legacy_min):
+        ordered.append(legacy_min)
     return ordered
 
 
