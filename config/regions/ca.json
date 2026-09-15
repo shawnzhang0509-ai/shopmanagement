@@ -4,6 +4,8 @@
   "default_sql_folder": "sql/ca",
   "default_output_folder": "data/ca",
   "image_base_url": "https://ierpapi.ifurniture.ca/",
+  "display_location_patterns": ["display"],
+  "storage_location_patterns": ["storage"],
   "shops": [
     {"id": "all", "label": "全部", "patterns": []},
     {"id": "toronto", "label": "Toronto", "patterns": ["toronto", "mississauga", "scarborough"]},

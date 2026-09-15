@@ -52,6 +52,15 @@ from heatmap_metrics import (
     week_period_display,
 )
 from stock_price_lookup import format_stock_badge, format_stock_price_hint, reload_stock_prices
+
+
+def _furniture_stock_badge(sku: str) -> str:
+    try:
+        from dual_placement import format_enhanced_stock_badge
+
+        return format_enhanced_stock_badge(sku, shop_id=current_sales_shop_id() or "all")
+    except Exception:
+        return format_stock_badge(sku)
 from ui_common import Dropdown, InputBox, draw_fitted_text, sanitize_display_text
 
 pygame.init()
@@ -2587,7 +2596,7 @@ class Furniture:
                 name = _truncate_label(self.name, FONT_TINY, max(20, int(span * 0.88)))
                 surf = FONT_TINY.render(name, True, C_TEXT)
                 surface.blit(surf, surf.get_rect(center=(int(cx), int(cy - 6))))
-                badge = format_stock_badge(self.name)
+                badge = _furniture_stock_badge(self.name)
                 if badge and span >= 36:
                     bsurf = FONT_TINY.render(badge, True, C_MUTED)
                     surface.blit(bsurf, bsurf.get_rect(center=(int(cx), int(cy + 8))))
@@ -2642,7 +2651,7 @@ class Furniture:
                 selected=selected,
                 span_px=span,
                 is_discontinued=self.is_discontinued,
-                stock_badge=format_stock_badge(self.name),
+                stock_badge=_furniture_stock_badge(self.name),
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
@@ -6259,8 +6268,12 @@ def _template_search_blob(t) -> str:
 def _matches_template_search(q: str, t) -> bool:
     if not q:
         return True
-    blob = _template_search_blob(t)
     q_lower = q.lower()
+    if q_lower in ("双摆", "仓储", "dual", "storage"):
+        from dual_placement import is_dual_placement_eligible
+
+        return is_dual_placement_eligible(t.name, shop_id=current_sales_shop_id() or "all")
+    blob = _template_search_blob(t)
     if q_lower in blob.lower() or q in blob:
         return True
     if getattr(t, "is_discontinued", False) and q_lower in ("停产", "discontinued", "dc"):

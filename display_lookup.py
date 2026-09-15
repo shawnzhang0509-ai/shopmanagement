@@ -29,6 +29,7 @@ from region_config import (  # noqa: E402
     display_excel_path,
     get_active_region,
     legacy_display_excel_candidates,
+    load_region_profile,
     merge_region_config,
     region_database_url,
     shops_for_region,
@@ -113,18 +114,28 @@ class DisplayItem:
     stock_details: str = ""
     is_discontinued: bool = False
     displays: list[DisplaySlot] = field(default_factory=list)
+    storages: list[DisplaySlot] = field(default_factory=list)
 
     @property
     def key(self) -> str:
         return self.product_code or self.product_name
 
-    def display_qty_for_shop(self, shop_id: str) -> int:
+    def _qty_for_shop(self, slots: list[DisplaySlot], shop_id: str) -> int:
         if shop_id == "all":
-            return sum(s.qty for s in self.displays)
-        return sum(s.qty for s in self.displays if s.shop_id == shop_id)
+            return sum(s.qty for s in slots)
+        return sum(s.qty for s in slots if s.shop_id == shop_id)
+
+    def display_qty_for_shop(self, shop_id: str) -> int:
+        return self._qty_for_shop(self.displays, shop_id)
+
+    def storage_qty_for_shop(self, shop_id: str) -> int:
+        return self._qty_for_shop(self.storages, shop_id)
 
     def shops_with_display(self) -> set[str]:
         return {s.shop_id for s in self.displays if s.qty > 0}
+
+    def shops_with_storage(self) -> set[str]:
+        return {s.shop_id for s in self.storages if s.qty > 0}
 
 
 def _normalize_key(value: str) -> str:
@@ -317,11 +328,41 @@ def _resolve_columns(headers: list[str]) -> tuple[str, dict[str, int]] | None:
     return fmt, mapping
 
 
+def _location_patterns(field: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    profile = load_region_profile(get_active_region())
+    raw = profile.get(field) or list(default)
+    if isinstance(raw, str):
+        raw = [raw]
+    patterns = tuple(str(p).strip().lower() for p in raw if str(p).strip())
+    return patterns or default
+
+
+def display_location_patterns() -> tuple[str, ...]:
+    return _location_patterns("display_location_patterns", ("display",))
+
+
+def storage_location_patterns() -> tuple[str, ...]:
+    return _location_patterns("storage_location_patterns", ("storage",))
+
+
+def classify_placement_location(location: str) -> str | None:
+    """门店摆场库位类型：display / storage / None。"""
+    low = str(location or "").lower()
+    if not low or "no longer available" in low:
+        return None
+    if any(p in low for p in storage_location_patterns()):
+        return "storage"
+    if any(p in low for p in display_location_patterns()):
+        return "display"
+    return None
+
+
 def is_display_location(location: str) -> bool:
-    low = location.lower()
-    if "no longer available" in low:
-        return False
-    return "display" in low
+    return classify_placement_location(location) == "display"
+
+
+def is_storage_location(location: str) -> bool:
+    return classify_placement_location(location) == "storage"
 
 
 def shop_id_for_location(location: str) -> str:
@@ -342,16 +383,24 @@ def shop_label(shop_id: str) -> str:
 
 
 def parse_stock_details(text: str) -> list[DisplaySlot]:
-    slots: list[DisplaySlot] = []
+    displays, _storages = parse_placement_stock_details(text)
+    return displays
+
+
+def parse_placement_stock_details(text: str) -> tuple[list[DisplaySlot], list[DisplaySlot]]:
+    """解析 stock_details 字符串，按 Display / Storage 分类（与 SQL 抓取同一套规则）。"""
+    displays: list[DisplaySlot] = []
+    storages: list[DisplaySlot] = []
     if not text:
-        return slots
+        return displays, storages
     for part in str(text).split(";"):
         part = part.strip()
         if not part or ":" not in part:
             continue
         loc, qty_s = part.rsplit(":", 1)
         loc = loc.strip()
-        if not is_display_location(loc):
+        kind = classify_placement_location(loc)
+        if kind is None:
             continue
         try:
             qty = int(float(qty_s.strip()))
@@ -360,8 +409,12 @@ def parse_stock_details(text: str) -> list[DisplaySlot]:
         if qty <= 0:
             continue
         sid = shop_id_for_location(loc)
-        slots.append(DisplaySlot(sid, shop_label(sid), loc, qty))
-    return slots
+        slot = DisplaySlot(sid, shop_label(sid), loc, qty)
+        if kind == "storage":
+            storages.append(slot)
+        else:
+            displays.append(slot)
+    return displays, storages
 
 
 def _cell_str(row: tuple, idx: int | None) -> str:
@@ -382,21 +435,37 @@ def _row_to_item(row: dict) -> DisplayItem | None:
         return None
     family = _resolve_family_name(family, name, code)
     sub_family = _resolve_sub_family_name(sub_family, name, code)
-    displays = row.get("displays")
-    if isinstance(displays, list) and displays:
-        slots = [
+    raw_displays = row.get("displays")
+    raw_storages = row.get("storages")
+    if isinstance(raw_displays, list) and raw_displays:
+        display_slots = [
             DisplaySlot(
                 str(d.get("shop_id", "other")),
                 str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
                 str(d.get("location", "")),
                 int(d.get("qty", 0) or 0),
             )
-            for d in displays
+            for d in raw_displays
             if int(d.get("qty", 0) or 0) > 0
         ]
     else:
-        slots = parse_stock_details(stock)
-    if not slots:
+        display_slots, _parsed_storage = parse_placement_stock_details(stock)
+        if not raw_storages:
+            raw_storages = _parsed_storage
+    if isinstance(raw_storages, list) and raw_storages:
+        storage_slots = [
+            DisplaySlot(
+                str(d.get("shop_id", "other")),
+                str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
+                str(d.get("location", "")),
+                int(d.get("qty", 0) or 0),
+            )
+            for d in raw_storages
+            if int(d.get("qty", 0) or 0) > 0
+        ]
+    else:
+        storage_slots = []
+    if not display_slots and not storage_slots:
         return None
     return DisplayItem(
         code or name,
@@ -406,7 +475,8 @@ def _row_to_item(row: dict) -> DisplayItem | None:
         image_url,
         stock,
         is_discontinued,
-        slots,
+        display_slots,
+        storage_slots,
     )
 
 
@@ -437,7 +507,8 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 "sub_product_family": _resolve_sub_family_name(sub_family, name, code),
                 "image_url": image_url,
                 "is_discontinued": is_discontinued,
-                "slots": {},
+                "display_slots": {},
+                "storage_slots": {},
             }
         else:
             if family:
@@ -452,16 +523,23 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 groups[key]["is_discontinued"] = True
         sid = shop_id_for_location(warehouse)
         slot_key = (sid, warehouse)
-        groups[key]["slots"][slot_key] = groups[key]["slots"].get(slot_key, 0) + qty
+        kind = classify_placement_location(warehouse) or "display"
+        bucket = "storage_slots" if kind == "storage" else "display_slots"
+        groups[key][bucket][slot_key] = groups[key][bucket].get(slot_key, 0) + qty
 
     items: list[DisplayItem] = []
     for g in groups.values():
         displays = [
             {"shop_id": sid, "shop_label": shop_label(sid), "location": loc, "qty": q}
-            for (sid, loc), q in g["slots"].items()
+            for (sid, loc), q in g["display_slots"].items()
         ]
-        stock = ";".join(f"{d['location']}:{d['qty']}" for d in displays)
-        item = _row_to_item({**g, "displays": displays, "stock_details": stock})
+        storages = [
+            {"shop_id": sid, "shop_label": shop_label(sid), "location": loc, "qty": q}
+            for (sid, loc), q in g["storage_slots"].items()
+        ]
+        stock_parts = [f"{d['location']}:{d['qty']}" for d in displays + storages]
+        stock = ";".join(stock_parts)
+        item = _row_to_item({**g, "displays": displays, "storages": storages, "stock_details": stock})
         if item:
             items.append(item)
     return items
@@ -1543,6 +1621,7 @@ def filter_gallery_items(
     *,
     survey_filter: str = "all",
     blacklist_mode: str = "exclude",
+    dual_placement_only: bool = False,
     template_index: TemplateIndexCache | None = None,
 ) -> list[DisplayItem]:
     """画廊筛选：门店 / 搜索 / 已测绘 / 黑名单模式。"""
@@ -1572,6 +1651,11 @@ def filter_gallery_items(
             continue
         if survey_filter == "unmodeled" and modeled:
             continue
+        if dual_placement_only:
+            from dual_placement import is_dual_placement_eligible
+
+            if not is_dual_placement_eligible(it.key, shop_id=shop_id):
+                continue
         out.append(it)
     out.sort(key=lambda x: (
         x.product_family.lower(),
