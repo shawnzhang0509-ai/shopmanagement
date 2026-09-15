@@ -8,7 +8,7 @@
 --   停产 = 仅导出标记，WHERE 中不过滤（勿加 IsDiscontinued = 0）
 --
 -- 其它 display*.sql 为程序自动兜底，日常只改本文件。
--- Display 库存：仓库名含 Display，StockStatus Normal/Clearance
+-- 摆场库存：仓库名含 Display 或 Storage（程序按库位名分类 display / storage）
 -- ═══════════════════════════════════════════════════════════════
 
 SELECT
@@ -22,7 +22,7 @@ SELECT
     MAX(
         CASE
             WHEN img.RelativeFilePath IS NOT NULL
-            THEN 'https://ierpapi.ifurniture.co.nz/' + REPLACE(img.RelativeFilePath, '\', '/')
+            THEN '{{IMAGE_BASE_URL}}' + REPLACE(img.RelativeFilePath, '\', '/')
             ELSE ''
         END
     ) AS ImageUrl,
@@ -62,7 +62,7 @@ INNER JOIN [dbo].[Stocks] s
 INNER JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id
 
-WHERE w.Name LIKE '%Display%'
+WHERE (w.Name LIKE '%Display%' OR w.Name LIKE '%Storage%')
 
 GROUP BY
     w.Name,

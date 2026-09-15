@@ -52,6 +52,15 @@ from heatmap_metrics import (
     week_period_display,
 )
 from stock_price_lookup import format_stock_badge, format_stock_price_hint, reload_stock_prices
+
+
+def _furniture_stock_badge(sku: str) -> str:
+    try:
+        from dual_placement import format_enhanced_stock_badge
+
+        return format_enhanced_stock_badge(sku, shop_id=current_sales_shop_id() or "all")
+    except Exception:
+        return format_stock_badge(sku)
 from ui_common import Dropdown, InputBox, draw_fitted_text, sanitize_display_text
 
 pygame.init()
@@ -124,7 +133,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -384,6 +393,8 @@ _save_thread = None
 _save_generation = 0
 _catalog_refresh_thread = None
 _catalog_refresh_ready = False
+_catalog_refresh_gen = 0
+_region_preload_thread = None
 marquee_active = False
 marquee_start = None
 marquee_current = None
@@ -2585,7 +2596,7 @@ class Furniture:
                 name = _truncate_label(self.name, FONT_TINY, max(20, int(span * 0.88)))
                 surf = FONT_TINY.render(name, True, C_TEXT)
                 surface.blit(surf, surf.get_rect(center=(int(cx), int(cy - 6))))
-                badge = format_stock_badge(self.name)
+                badge = _furniture_stock_badge(self.name)
                 if badge and span >= 36:
                     bsurf = FONT_TINY.render(badge, True, C_MUTED)
                     surface.blit(bsurf, bsurf.get_rect(center=(int(cx), int(cy + 8))))
@@ -2640,7 +2651,7 @@ class Furniture:
                 selected=selected,
                 span_px=span,
                 is_discontinued=self.is_discontinued,
-                stock_badge=format_stock_badge(self.name),
+                stock_badge=_furniture_stock_badge(self.name),
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
@@ -3956,9 +3967,10 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     global STORE_CATALOG, LAYOUT_SLUG_TO_SALES_SHOP, CATALOG_LAYOUT_SPECS
     global _active_layout_region, _display_items_cache, _boot_store_pending
 
-    from display_lookup import load_grabber_config, reload_shops, save_grabber_config
+    from display_lookup import load_grabber_config, save_grabber_config
     from region_config import (
         catalog_layout_specs,
+        default_output_folder,
         layout_catalog,
         layout_slug_to_sales_shop,
         layouts_dir,
@@ -3982,11 +3994,16 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     _active_layout_region = region_id
     _display_items_cache = None
     _boot_store_pending = None
-    reload_shops(cfg)
     try:
-        from sales_lookup import reload_weekly_sales
+        from sales_lookup import invalidate_weekly_sales_cache
 
-        reload_weekly_sales()
+        invalidate_weekly_sales_cache()
+    except Exception:
+        pass
+    try:
+        from stock_price_lookup import invalidate_stock_prices_cache
+
+        invalidate_stock_prices_cache()
     except Exception:
         pass
     try:
@@ -3997,12 +4014,51 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     ensure_layouts_dir()
 
 
+def _schedule_region_preload(region_id: str) -> None:
+    """后台预读该区域 Excel，不阻塞 Tab 切换。"""
+    global _region_preload_thread
+
+    def worker(rid: str) -> None:
+        if rid != _active_layout_region:
+            return
+        try:
+            from display_lookup import load_grabber_config
+
+            cfg = {**load_grabber_config(), "active_region": rid}
+            try:
+                _load_display_items_cache()
+            except Exception:
+                pass
+            if rid != _active_layout_region:
+                return
+            try:
+                from region_config import weekly_sales_excel_path
+                from sales_lookup import load_weekly_sales
+
+                load_weekly_sales(weekly_sales_excel_path(cfg, rid))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    _region_preload_thread = threading.Thread(target=worker, args=(region_id,), daemon=True)
+    _region_preload_thread.start()
+
+
 def layout_data_folder_hint() -> str:
     from display_lookup import load_grabber_config
-    from region_config import merge_region_config
+    from region_config import default_output_folder, merge_region_config
 
     merged = merge_region_config(load_grabber_config(), _active_layout_region)
-    return str(merged.get("output_folder") or f"data/{_active_layout_region}")
+    folder = str(merged.get("output_folder") or default_output_folder(_active_layout_region))
+    if folder.replace("\\", "/").rstrip("/") == "data":
+        folder = default_output_folder(_active_layout_region)
+    if os.path.isabs(folder):
+        try:
+            folder = os.path.relpath(folder, SCRIPT_DIR)
+        except ValueError:
+            pass
+    return folder.replace("\\", "/")
 
 
 def _legacy_layout_path(slug: str) -> str:
@@ -4331,15 +4387,18 @@ def flush_deferred_save(*, block=False):
 
 
 def refresh_catalog_cache_async():
-    global _catalog_refresh_thread, _catalog_refresh_ready
-    if _catalog_refresh_thread and _catalog_refresh_thread.is_alive():
-        return
+    global _catalog_refresh_thread, _catalog_refresh_ready, _catalog_refresh_gen
+    _catalog_refresh_gen += 1
+    gen = _catalog_refresh_gen
 
     def worker():
         global _catalog_refresh_ready
         for _, slug in STORE_CATALOG:
+            if gen != _catalog_refresh_gen:
+                return
             read_store_summary(layout_path_for_slug(slug))
-        _catalog_refresh_ready = True
+        if gen == _catalog_refresh_gen:
+            _catalog_refresh_ready = True
 
     _catalog_refresh_ready = False
     _catalog_refresh_thread = threading.Thread(target=worker, daemon=True)
@@ -5686,6 +5745,8 @@ def build_store_catalog_ui(*, picker_mode=False, fast=False, cache_only=False):
         path = layout_path_for_slug(slug)
         if cache_only or fast:
             detail = catalog_detail_from_cache(path)
+            if detail == "点击打开":
+                detail = "已保存 · 点击打开" if os.path.isfile(path) else "新建 20×15m"
         else:
             info = read_store_summary(path)
             if info:
@@ -5757,12 +5818,12 @@ def draw_startup_screen(surface, buttons):
         surface.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 58)))
         folder = layout_data_folder_hint()
         sub = FONT_SMALL.render(
-            f"布局 → {folder}/layouts/  ·  销量/Display → {folder}/  ·  单击门店进入",
+            f"数据目录 {folder}/  （布局在 layouts/ 子目录）",
             True,
             C_MUTED,
         )
         surface.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 92)))
-        hint = FONT_BODY.render("先选上方国家/区域，再点门店名称", True, C_ACCENT)
+        hint = FONT_BODY.render("点上方 Tab 换国家，再点门店进入", True, C_ACCENT)
         surface.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, 118)))
         for btn in buttons.values():
             btn.draw(surface)
@@ -5779,7 +5840,7 @@ def handle_startup_mouseup(mx, my, buttons):
     picked = _startup_region_tab_hit(mx, my)
     if picked and picked != _active_layout_region:
         apply_layout_region(picked, persist=True)
-        show_toast(f"已切换到{layout_data_folder_hint()}（{picked.upper()}）")
+        _schedule_region_preload(picked)
         return "region_changed"
     for btn in buttons.values():
         if _startup_hit_button(mx, my, btn):
@@ -6207,8 +6268,12 @@ def _template_search_blob(t) -> str:
 def _matches_template_search(q: str, t) -> bool:
     if not q:
         return True
-    blob = _template_search_blob(t)
     q_lower = q.lower()
+    if q_lower in ("双摆", "仓储", "dual", "storage"):
+        from dual_placement import is_dual_placement_eligible
+
+        return is_dual_placement_eligible(t.name, shop_id=current_sales_shop_id() or "all")
+    blob = _template_search_blob(t)
     if q_lower in blob.lower() or q in blob:
         return True
     if getattr(t, "is_discontinued", False) and q_lower in ("停产", "discontinued", "dc"):
@@ -7620,6 +7685,10 @@ def main():
                     if result == "region_changed":
                         startup_buttons = build_store_catalog_ui(fast=True, cache_only=True)
                         refresh_catalog_cache_async()
+                        from region_config import REGION_LABELS
+
+                        label = REGION_LABELS.get(_active_layout_region, _active_layout_region.upper())
+                        show_toast(f"已切换到 {label} · {layout_data_folder_hint()}/")
                 continue
 
             if event.type == pygame.MOUSEWHEEL:

@@ -173,7 +173,9 @@ class DataGrabDialog(tk.Toplevel):
         self.display_path_var.set(f"Display 大库 → {out_folder}/display.xlsx {suffix}")
         self.sales_path_var.set(f"周销量 → {out_folder}/weekly_sales.xlsx（较慢）")
         self.stock_path_var.set(f"仓库库存/价格 → {out_folder}/product_stock_price.xlsx")
-        self.sql_hint_var.set(f"SQL 目录: {runtime.get('sql_folder', f'sql/{rid}')}/")
+        sql_folder = runtime.get("sql_folder") or f"sql/{rid}"
+        sql_file = runtime.get("sql_file") or f"{sql_folder}/display.sql"
+        self.sql_hint_var.set(f"SQL: {sql_file}  （支持 .sql / .txt，缺失时自动回退）")
 
     def _grab_cfg(self) -> dict:
         selected = self._selected_regions()

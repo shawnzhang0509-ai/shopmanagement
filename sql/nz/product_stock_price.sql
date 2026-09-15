@@ -32,7 +32,7 @@ SELECT
     MAX(
         CASE
             WHEN img.RelativeFilePath IS NOT NULL
-            THEN 'https://ierpapi.ifurniture.co.nz/' + REPLACE(img.RelativeFilePath, '\', '/')
+            THEN '{{IMAGE_BASE_URL}}' + REPLACE(img.RelativeFilePath, '\', '/')
             ELSE ''
         END
     ) AS ImageUrl,

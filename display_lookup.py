@@ -29,6 +29,7 @@ from region_config import (  # noqa: E402
     display_excel_path,
     get_active_region,
     legacy_display_excel_candidates,
+    load_region_profile,
     merge_region_config,
     region_database_url,
     shops_for_region,
@@ -113,18 +114,28 @@ class DisplayItem:
     stock_details: str = ""
     is_discontinued: bool = False
     displays: list[DisplaySlot] = field(default_factory=list)
+    storages: list[DisplaySlot] = field(default_factory=list)
 
     @property
     def key(self) -> str:
         return self.product_code or self.product_name
 
-    def display_qty_for_shop(self, shop_id: str) -> int:
+    def _qty_for_shop(self, slots: list[DisplaySlot], shop_id: str) -> int:
         if shop_id == "all":
-            return sum(s.qty for s in self.displays)
-        return sum(s.qty for s in self.displays if s.shop_id == shop_id)
+            return sum(s.qty for s in slots)
+        return sum(s.qty for s in slots if s.shop_id == shop_id)
+
+    def display_qty_for_shop(self, shop_id: str) -> int:
+        return self._qty_for_shop(self.displays, shop_id)
+
+    def storage_qty_for_shop(self, shop_id: str) -> int:
+        return self._qty_for_shop(self.storages, shop_id)
 
     def shops_with_display(self) -> set[str]:
         return {s.shop_id for s in self.displays if s.qty > 0}
+
+    def shops_with_storage(self) -> set[str]:
+        return {s.shop_id for s in self.storages if s.qty > 0}
 
 
 def _normalize_key(value: str) -> str:
@@ -317,11 +328,41 @@ def _resolve_columns(headers: list[str]) -> tuple[str, dict[str, int]] | None:
     return fmt, mapping
 
 
+def _location_patterns(field: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    profile = load_region_profile(get_active_region())
+    raw = profile.get(field) or list(default)
+    if isinstance(raw, str):
+        raw = [raw]
+    patterns = tuple(str(p).strip().lower() for p in raw if str(p).strip())
+    return patterns or default
+
+
+def display_location_patterns() -> tuple[str, ...]:
+    return _location_patterns("display_location_patterns", ("display",))
+
+
+def storage_location_patterns() -> tuple[str, ...]:
+    return _location_patterns("storage_location_patterns", ("storage",))
+
+
+def classify_placement_location(location: str) -> str | None:
+    """门店摆场库位类型：display / storage / None。"""
+    low = str(location or "").lower()
+    if not low or "no longer available" in low:
+        return None
+    if any(p in low for p in storage_location_patterns()):
+        return "storage"
+    if any(p in low for p in display_location_patterns()):
+        return "display"
+    return None
+
+
 def is_display_location(location: str) -> bool:
-    low = location.lower()
-    if "no longer available" in low:
-        return False
-    return "display" in low
+    return classify_placement_location(location) == "display"
+
+
+def is_storage_location(location: str) -> bool:
+    return classify_placement_location(location) == "storage"
 
 
 def shop_id_for_location(location: str) -> str:
@@ -342,16 +383,24 @@ def shop_label(shop_id: str) -> str:
 
 
 def parse_stock_details(text: str) -> list[DisplaySlot]:
-    slots: list[DisplaySlot] = []
+    displays, _storages = parse_placement_stock_details(text)
+    return displays
+
+
+def parse_placement_stock_details(text: str) -> tuple[list[DisplaySlot], list[DisplaySlot]]:
+    """解析 stock_details 字符串，按 Display / Storage 分类（与 SQL 抓取同一套规则）。"""
+    displays: list[DisplaySlot] = []
+    storages: list[DisplaySlot] = []
     if not text:
-        return slots
+        return displays, storages
     for part in str(text).split(";"):
         part = part.strip()
         if not part or ":" not in part:
             continue
         loc, qty_s = part.rsplit(":", 1)
         loc = loc.strip()
-        if not is_display_location(loc):
+        kind = classify_placement_location(loc)
+        if kind is None:
             continue
         try:
             qty = int(float(qty_s.strip()))
@@ -360,8 +409,12 @@ def parse_stock_details(text: str) -> list[DisplaySlot]:
         if qty <= 0:
             continue
         sid = shop_id_for_location(loc)
-        slots.append(DisplaySlot(sid, shop_label(sid), loc, qty))
-    return slots
+        slot = DisplaySlot(sid, shop_label(sid), loc, qty)
+        if kind == "storage":
+            storages.append(slot)
+        else:
+            displays.append(slot)
+    return displays, storages
 
 
 def _cell_str(row: tuple, idx: int | None) -> str:
@@ -382,21 +435,37 @@ def _row_to_item(row: dict) -> DisplayItem | None:
         return None
     family = _resolve_family_name(family, name, code)
     sub_family = _resolve_sub_family_name(sub_family, name, code)
-    displays = row.get("displays")
-    if isinstance(displays, list) and displays:
-        slots = [
+    raw_displays = row.get("displays")
+    raw_storages = row.get("storages")
+    if isinstance(raw_displays, list) and raw_displays:
+        display_slots = [
             DisplaySlot(
                 str(d.get("shop_id", "other")),
                 str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
                 str(d.get("location", "")),
                 int(d.get("qty", 0) or 0),
             )
-            for d in displays
+            for d in raw_displays
             if int(d.get("qty", 0) or 0) > 0
         ]
     else:
-        slots = parse_stock_details(stock)
-    if not slots:
+        display_slots, _parsed_storage = parse_placement_stock_details(stock)
+        if not raw_storages:
+            raw_storages = _parsed_storage
+    if isinstance(raw_storages, list) and raw_storages:
+        storage_slots = [
+            DisplaySlot(
+                str(d.get("shop_id", "other")),
+                str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
+                str(d.get("location", "")),
+                int(d.get("qty", 0) or 0),
+            )
+            for d in raw_storages
+            if int(d.get("qty", 0) or 0) > 0
+        ]
+    else:
+        storage_slots = []
+    if not display_slots and not storage_slots:
         return None
     return DisplayItem(
         code or name,
@@ -406,7 +475,8 @@ def _row_to_item(row: dict) -> DisplayItem | None:
         image_url,
         stock,
         is_discontinued,
-        slots,
+        display_slots,
+        storage_slots,
     )
 
 
@@ -437,7 +507,8 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 "sub_product_family": _resolve_sub_family_name(sub_family, name, code),
                 "image_url": image_url,
                 "is_discontinued": is_discontinued,
-                "slots": {},
+                "display_slots": {},
+                "storage_slots": {},
             }
         else:
             if family:
@@ -452,16 +523,23 @@ def _aggregate_warehouse_rows(rows: list[dict]) -> list[DisplayItem]:
                 groups[key]["is_discontinued"] = True
         sid = shop_id_for_location(warehouse)
         slot_key = (sid, warehouse)
-        groups[key]["slots"][slot_key] = groups[key]["slots"].get(slot_key, 0) + qty
+        kind = classify_placement_location(warehouse) or "display"
+        bucket = "storage_slots" if kind == "storage" else "display_slots"
+        groups[key][bucket][slot_key] = groups[key][bucket].get(slot_key, 0) + qty
 
     items: list[DisplayItem] = []
     for g in groups.values():
         displays = [
             {"shop_id": sid, "shop_label": shop_label(sid), "location": loc, "qty": q}
-            for (sid, loc), q in g["slots"].items()
+            for (sid, loc), q in g["display_slots"].items()
         ]
-        stock = ";".join(f"{d['location']}:{d['qty']}" for d in displays)
-        item = _row_to_item({**g, "displays": displays, "stock_details": stock})
+        storages = [
+            {"shop_id": sid, "shop_label": shop_label(sid), "location": loc, "qty": q}
+            for (sid, loc), q in g["storage_slots"].items()
+        ]
+        stock_parts = [f"{d['location']}:{d['qty']}" for d in displays + storages]
+        stock = ";".join(stock_parts)
+        item = _row_to_item({**g, "displays": displays, "storages": storages, "stock_details": stock})
         if item:
             items.append(item)
     return items
@@ -845,7 +923,7 @@ def build_runtime_config(cfg: dict | None = None) -> dict:
         sql_file = os.path.join(sql_folder_abs, "display.sql")
     else:
         sql_file = _resolve_path(sql_file)
-    base["sql_file"] = sql_file
+    base["sql_file"] = _resolve_existing_sql_file(sql_file)
 
     output_folder = base.get("output_folder") or "data"
     output_folder_abs = _resolve_path(output_folder)
@@ -892,17 +970,70 @@ def resolve_cache_path() -> str:
     return CACHE_FILE
 
 
+_IMAGE_URL_PREFIXES = (
+    "https://ierpapi.ifurniture.co.nz/",
+    "https://ierpapi.ifurniture.com.au/",
+    "https://ierpapi.ifurniture.ca/",
+)
+
+
+def _sql_path_variants(path: str) -> list[str]:
+    """同一条 SQL 的 .sql / .txt 变体（Windows 上有人用记事本存成 .txt）。"""
+    folder = os.path.dirname(path) or "."
+    name = os.path.basename(path) or "display.sql"
+    stem, _ext = os.path.splitext(name)
+    if not stem:
+        return [path]
+    out: list[str] = []
+    for suffix in (".sql", ".txt"):
+        candidate = os.path.join(folder, stem + suffix)
+        if candidate not in out:
+            out.append(candidate)
+    if path not in out:
+        out.insert(0, path)
+    return out
+
+
+def _resolve_existing_sql_file(path: str) -> str:
+    """若 .sql 不存在则尝试同名的 .txt。"""
+    abs_path = path if os.path.isabs(path) else _resolve_path(path)
+    for candidate in _sql_path_variants(abs_path):
+        if os.path.isfile(candidate):
+            return candidate
+    return abs_path
+
+
+def _patch_sql_for_region(query: str, cfg: dict) -> str:
+    """把 SQL 里的图片域名换成当前区域的 image_base_url（支持 {{IMAGE_BASE_URL}}）。"""
+    merged = merge_region_config(cfg)
+    target = str(merged.get("image_base_url") or "").strip()
+    if not target:
+        profile = (merged.get("_region_profile") or {}) if isinstance(merged.get("_region_profile"), dict) else {}
+        target = str(profile.get("image_base_url") or "").strip()
+    if not target:
+        return query
+    if not target.endswith("/"):
+        target += "/"
+    out = query.replace("{{IMAGE_BASE_URL}}", target)
+    for prefix in _IMAGE_URL_PREFIXES:
+        if prefix != target:
+            out = out.replace(prefix, target)
+    return out
+
+
 def load_sql_query(cfg: dict | None = None, *, path: str | None = None) -> str:
     cfg = build_runtime_config(cfg)
     path = path or cfg["sql_file"]
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"找不到 SQL 文件: {path}")
+        alts = [p for p in _sql_path_variants(path) if p != path]
+        hint = f"（也可尝试 {os.path.basename(alts[0])}）" if alts else ""
+        raise FileNotFoundError(f"找不到 SQL 文件: {path}{hint}")
     with open(path, "r", encoding="utf-8") as f:
         lines = [ln for ln in f.readlines() if not ln.strip().startswith("--")]
     query = "\n".join(lines).strip()
     if not query:
         raise ValueError(f"SQL 文件为空: {path}")
-    return query
+    return _patch_sql_for_region(query, cfg)
 
 
 def _is_schema_sql_error(exc: Exception) -> bool:
@@ -915,20 +1046,37 @@ def _is_schema_sql_error(exc: Exception) -> bool:
     )
 
 
-def _sql_fallback_paths(primary_path: str) -> list[str]:
+def _sql_fallback_paths(primary_path: str, cfg: dict | None = None) -> list[str]:
+    """按区域目录 → 其它区域 → 根 sql/ 顺序尝试（文件缺失时不报错，由调用方跳过）。"""
+    from region_config import SUPPORTED_REGIONS, default_sql_folder, get_active_region, normalize_region_id
+
+    filename = os.path.basename(primary_path) or "display.sql"
+    region_id = normalize_region_id(get_active_region(cfg or load_grabber_config()))
+    ordered: list[str] = []
+
+    def add(path: str) -> None:
+        for variant in _sql_path_variants(path):
+            if variant not in ordered:
+                ordered.append(variant)
+
+    add(primary_path)
     folder = os.path.dirname(primary_path) or _resolve_path("sql")
-    ordered = [primary_path]
-    for name in ("display.sql", "display.minimal.sql"):
-        candidate = os.path.join(folder, name)
-        if candidate not in ordered and os.path.isfile(candidate):
-            ordered.append(candidate)
-    # 旧版扁平 sql/display.sql
-    legacy_root = os.path.join(SCRIPT_DIR, "sql", "display.sql")
-    if legacy_root not in ordered and os.path.isfile(legacy_root):
-        ordered.append(legacy_root)
-    legacy_min = os.path.join(SCRIPT_DIR, "sql", "display.minimal.sql")
-    if legacy_min not in ordered and os.path.isfile(legacy_min):
-        ordered.append(legacy_min)
+    for name in (filename, "display.sql", "display.minimal.sql", "weekly_sales.sql"):
+        add(os.path.join(folder, name))
+
+    for rid in [region_id] + [r for r in SUPPORTED_REGIONS if r != region_id]:
+        reg_dir = _resolve_path(default_sql_folder(rid))
+        add(os.path.join(reg_dir, filename))
+        if filename not in ("display.sql", "display.minimal.sql", "display.txt", "display.minimal.txt"):
+            add(os.path.join(reg_dir, "display.sql"))
+        add(os.path.join(reg_dir, "display.minimal.sql"))
+        add(os.path.join(reg_dir, "weekly_sales.sql"))
+
+    root_sql = os.path.join(SCRIPT_DIR, "sql")
+    add(os.path.join(root_sql, filename))
+    add(os.path.join(root_sql, "display.sql"))
+    add(os.path.join(root_sql, "display.minimal.sql"))
+    add(os.path.join(root_sql, "weekly_sales.sql"))
     return ordered
 
 
@@ -1079,16 +1227,32 @@ def _fetch_raw_rows(
 
     primary = cfg["sql_file"]
     last_exc: Exception | None = None
-    for path in _sql_fallback_paths(primary):
+    tried_missing: list[str] = []
+    for path in _sql_fallback_paths(primary, cfg):
+        if not os.path.isfile(path):
+            tried_missing.append(path)
+            continue
         try:
             rows = _execute(load_sql_query(cfg, path=path))
             _last_sql_file = path
+            if path != primary:
+                region = get_active_region(cfg)
+                print(f"提示: 使用备用 SQL {os.path.relpath(path, SCRIPT_DIR)}（{region}）")
             return rows
         except Exception as exc:
             if _is_schema_sql_error(exc):
                 last_exc = exc
                 continue
             raise RuntimeError(format_db_error(exc)) from exc
+
+    if tried_missing:
+        sample = "\n  ".join(tried_missing[:5])
+        bootstrap = os.path.join("tools", "bootstrap_region_sql.py")
+        raise RuntimeError(
+            f"找不到 SQL 文件（例如 {primary}）。\n"
+            f"已尝试:\n  {sample}\n"
+            f"请先 git pull，或运行: python {bootstrap}"
+        )
 
     hint = "请在 SSMS 运行 sql/discover_schema.sql，把 Products 表的图片列名发给我们。"
     if last_exc is not None:
@@ -1196,6 +1360,7 @@ def sales_runtime_config(cfg: dict | None = None) -> dict:
     )
     if not os.path.isabs(sql_file):
         sql_file = os.path.join(SCRIPT_DIR, sql_file)
+    sql_file = _resolve_existing_sql_file(sql_file)
     output_excel = base.get("sales_output_excel")
     if output_excel:
         output_excel = _resolve_path(output_excel)
@@ -1456,6 +1621,7 @@ def filter_gallery_items(
     *,
     survey_filter: str = "all",
     blacklist_mode: str = "exclude",
+    dual_placement_only: bool = False,
     template_index: TemplateIndexCache | None = None,
 ) -> list[DisplayItem]:
     """画廊筛选：门店 / 搜索 / 已测绘 / 黑名单模式。"""
@@ -1485,6 +1651,11 @@ def filter_gallery_items(
             continue
         if survey_filter == "unmodeled" and modeled:
             continue
+        if dual_placement_only:
+            from dual_placement import is_dual_placement_eligible
+
+            if not is_dual_placement_eligible(it.key, shop_id=shop_id):
+                continue
         out.append(it)
     out.sort(key=lambda x: (
         x.product_family.lower(),

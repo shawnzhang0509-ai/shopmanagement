@@ -233,12 +233,17 @@ def resolve_product_family(key: str, *, shop_id: str | None = None) -> str:
     return text
 
 
-def reload_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
+def invalidate_weekly_sales_cache() -> None:
+    """仅清空缓存，不读 Excel（区域切换时用，避免主线程卡顿）。"""
     global _sales_cache, _family_totals_cache, _sku_family_map, _sku_totals_cache
     _sales_cache = None
     _family_totals_cache = {}
     _sku_family_map = None
     _sku_totals_cache = {}
+
+
+def reload_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
+    invalidate_weekly_sales_cache()
     return load_weekly_sales(path)
 
 

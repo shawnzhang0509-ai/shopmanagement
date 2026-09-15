@@ -170,7 +170,7 @@ FOCUS_ZONES = ("name", "family")
 focus_zone = "canvas"
 app_screen = "gallery"  # editor | gallery
 display_shop = "all"
-display_survey_filter = "all"  # all | modeled | unmodeled
+display_survey_filter = "all"  # all | modeled | unmodeled | dual
 display_blacklist_mode = "exclude"  # exclude | all | only
 selected_display_key = None
 display_items = []
@@ -227,13 +227,15 @@ class GalleryView:
         self._template_index = TemplateIndexCache()
 
     def _filtered_displays(self, templates):
+        dual_only = display_survey_filter == "dual"
         return filter_gallery_items(
             display_items_including_blacklist(),
             display_shop,
             self._search_query,
             templates,
-            survey_filter=display_survey_filter,
+            survey_filter="all" if dual_only else display_survey_filter,
             blacklist_mode=display_blacklist_mode,
+            dual_placement_only=dual_only,
             template_index=self._template_index,
         )
 
@@ -494,7 +496,7 @@ class GalleryView:
             ),
             "survey": Dropdown(
                 (20 + shop_w + gap, fy, filt_w, 28),
-                [("all", "全部"), ("modeled", "已测绘"), ("unmodeled", "未测绘")],
+                [("all", "全部"), ("modeled", "已测绘"), ("unmodeled", "未测绘"), ("dual", "仓+储")],
                 display_survey_filter,
                 label="测绘",
                 dropdown_id="survey",
@@ -575,7 +577,7 @@ class GalleryView:
                 hint += f" · 有图链接 {with_img}/{len(display_items)}"
             else:
                 hint += " · 无 ImageUrl，请重新 grab_display"
-            survey_labels = {"all": "全部", "modeled": "已测绘", "unmodeled": "未测绘"}
+            survey_labels = {"all": "全部", "modeled": "已测绘", "unmodeled": "未测绘", "dual": "仓+储"}
             bl_labels = {"exclude": "剔除黑", "all": "含黑名单", "only": "仅黑"}
             hint += f" · {survey_labels.get(display_survey_filter, '')} · {bl_labels.get(display_blacklist_mode, '')}"
             bl_n, bl_src, _ = blacklist_status()
