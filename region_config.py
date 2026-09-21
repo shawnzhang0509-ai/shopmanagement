@@ -16,7 +16,7 @@ _FALLBACK_NZ_SHOPS: list[dict[str, Any]] = [
     {"id": "onehunga", "label": "Onehunga", "patterns": ["onehunga"]},
     {"id": "westgate", "label": "Westgate", "patterns": ["westgate"]},
     {"id": "hamilton", "label": "Hamilton", "patterns": ["hamilton"]},
-    {"id": "chch", "label": "Christchurch", "patterns": ["chch", "christchurch", "colombo", "bleiham"]},
+    {"id": "chch", "label": "Christchurch", "patterns": ["chch", "chc", "christchurch", "christ church", "colombo", "bleiham", "hornby", "riccarton"]},
     {"id": "carbine", "label": "Carbine Rd", "patterns": ["carbine"]},
     {"id": "other", "label": "其他", "patterns": []},
 ]

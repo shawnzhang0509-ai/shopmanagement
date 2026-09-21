@@ -365,6 +365,9 @@ def legend_tick_values(vmin: float, vmax: float, *, step: float | None = None) -
 
 
 def sales_data_ready() -> bool:
-    import os
+    from sales_lookup import resolve_weekly_sales_path
 
-    return os.path.isfile(DEFAULT_EXCEL) and os.path.getsize(DEFAULT_EXCEL) > 0
+    path = resolve_weekly_sales_path()
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        return False
+    return bool(load_weekly_sales())

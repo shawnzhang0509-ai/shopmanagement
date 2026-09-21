@@ -134,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.7"
+APP_VERSION = "2.1.8"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -352,6 +352,7 @@ store_height_mm = int(DEFAULT_STORE_HEIGHT_M * 1000)
 startup_active = True
 store_name = "新门店"
 current_layout_path = None
+_layout_store_slug: str | None = None
 store_picker_active = False
 startup_buttons = None
 renaming_store = False
@@ -2097,6 +2098,8 @@ def roi_to_color(roi):
 
 
 def current_store_slug() -> str | None:
+    if _layout_store_slug:
+        return _layout_store_slug
     if current_layout_path:
         return catalog_slug_for_path(current_layout_path)
     return None
@@ -2221,7 +2224,18 @@ def heatmap_period_title() -> str:
     slug = current_sales_shop_id()
     if heatmap_week_mode == "range":
         if not keys:
-            return f"周均 · 近 {heatmap_week_count} 周（无数据）"
+            from sales_lookup import count_shop_rows, resolve_weekly_sales_path, sample_branch_names
+
+            shop_label = sales_shop_display_label()
+            rel = os.path.relpath(resolve_weekly_sales_path(), SCRIPT_DIR)
+            if not sales_data_ready():
+                return f"周均 · 近 {heatmap_week_count} 周（未找到 {rel}，请 grab_sales）"
+            if slug and count_shop_rows(slug) == 0:
+                branches = "、".join(sample_branch_names(5)) or "（表内 BranchName 为空）"
+                return (
+                    f"周均 · 近 {heatmap_week_count} 周（{shop_label}/{slug} 无匹配 Branch：{branches}…）"
+                )
+            return f"周均 · 近 {heatmap_week_count} 周（{shop_label} 无有效周次，请检查 YearWeekPeriod 列）"
         if len(keys) == 1:
             return f"周均 · {week_period_display(slug, keys[0])}"
         return f"周均 · 近 {len(keys)} 周 · {keys[0]} … {keys[-1]}"
@@ -4556,11 +4570,12 @@ def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
     global heatmap_week_count, heatmap_week_mode, heatmap_week_index, heatmap_sales_level, _pending_heatmap_week
-    global _sales_shop_warned, walls_locked, canvas_display_mode
+    global _sales_shop_warned, walls_locked, canvas_display_mode, _layout_store_slug
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
     current_layout_path = filepath
+    _layout_store_slug = str(data.get("store_slug") or "").strip() or catalog_slug_for_path(filepath)
     store = data.get("store", {})
     store_width_mm = int(store.get("width_mm", store_width_mm))
     store_height_mm = int(store.get("height_mm", store_height_mm))

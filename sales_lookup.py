@@ -15,10 +15,64 @@ from display_lookup import SCRIPT_DIR, load_grabber_config, shop_id_for_location
 from region_config import weekly_sales_excel_path
 
 DEFAULT_EXCEL = weekly_sales_excel_path()
+_sales_loaded_from: str | None = None
+
+
+def weekly_sales_path_candidates(path: str | None = None) -> list[str]:
+    """区域路径优先，再回退 legacy data/weekly_sales.xlsx。"""
+    if path:
+        return [path]
+    cfg = load_grabber_config()
+    primary = weekly_sales_excel_path(cfg)
+    legacy = os.path.join(SCRIPT_DIR, "data", "weekly_sales.xlsx")
+    paths = [primary]
+    if legacy not in paths:
+        paths.append(legacy)
+    return paths
 
 
 def resolve_weekly_sales_path(path: str | None = None) -> str:
-    return path or weekly_sales_excel_path(load_grabber_config())
+    for candidate in weekly_sales_path_candidates(path):
+        if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+            return candidate
+    return weekly_sales_path_candidates(path)[0]
+
+
+def weekly_sales_load_source() -> str | None:
+    return _sales_loaded_from
+
+
+def _read_weekly_sales_file(path: str) -> list[WeeklySalesRow]:
+    try:
+        try:
+            import pandas as pd  # noqa: F401
+
+            rows = _rows_from_pandas(path)
+        except ImportError:
+            rows = _rows_from_openpyxl(path)
+        if not rows:
+            rows = _rows_from_openpyxl(path)
+    except Exception as exc:
+        print(f"读取周销量表失败 ({path}): {exc}")
+        return []
+    return rows
+
+
+def count_shop_rows(shop_id: str | None) -> int:
+    if not shop_id or shop_id in ("all", ""):
+        return len(load_weekly_sales())
+    return sum(1 for row in load_weekly_sales() if row.shop_id == shop_id)
+
+
+def sample_branch_names(limit: int = 8) -> list[str]:
+    seen: list[str] = []
+    for row in load_weekly_sales():
+        name = str(row.branch_name or "").strip()
+        if name and name not in seen:
+            seen.append(name)
+        if len(seen) >= limit:
+            break
+    return seen
 SALES_SQL = os.path.join(SCRIPT_DIR, "sql", "weekly_sales.sql")
 
 _sales_cache: list["WeeklySalesRow"] | None = None
@@ -160,30 +214,30 @@ def _rows_from_pandas(path: str) -> list[WeeklySalesRow]:
 
 
 def load_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
-    global _sales_cache
+    global _sales_cache, _sales_loaded_from
     if _sales_cache is not None and path is None:
         return _sales_cache
 
-    path = resolve_weekly_sales_path(path)
-    if not os.path.isfile(path):
-        _sales_cache = []
-        return _sales_cache
+    if path is not None:
+        rows = _read_weekly_sales_file(path) if os.path.isfile(path) else []
+        return rows
 
-    try:
-        try:
-            import pandas as pd  # noqa: F401
+    rows: list[WeeklySalesRow] = []
+    loaded_from: str | None = None
+    for candidate in weekly_sales_path_candidates():
+        if not os.path.isfile(candidate) or os.path.getsize(candidate) <= 0:
+            continue
+        rows = _read_weekly_sales_file(candidate)
+        if rows:
+            loaded_from = candidate
+            break
+        if loaded_from is None:
+            loaded_from = candidate
 
-            rows = _rows_from_pandas(path)
-        except ImportError:
-            rows = _rows_from_openpyxl(path)
-        if not rows:
-            rows = _rows_from_openpyxl(path)
-    except Exception as exc:
-        print(f"读取周销量表失败: {exc}")
-        rows = []
-
-    if path is None or path == DEFAULT_EXCEL:
-        _sales_cache = rows
+    _sales_cache = rows
+    _sales_loaded_from = loaded_from
+    if rows and loaded_from and loaded_from != DEFAULT_EXCEL:
+        print(f"周销量：使用 {os.path.relpath(loaded_from, SCRIPT_DIR)}（区域默认表无数据行）")
     return rows
 
 
@@ -235,8 +289,9 @@ def resolve_product_family(key: str, *, shop_id: str | None = None) -> str:
 
 def invalidate_weekly_sales_cache() -> None:
     """仅清空缓存，不读 Excel（区域切换时用，避免主线程卡顿）。"""
-    global _sales_cache, _family_totals_cache, _sku_family_map, _sku_totals_cache
+    global _sales_cache, _sales_loaded_from, _family_totals_cache, _sku_family_map, _sku_totals_cache
     _sales_cache = None
+    _sales_loaded_from = None
     _family_totals_cache = {}
     _sku_family_map = None
     _sku_totals_cache = {}
