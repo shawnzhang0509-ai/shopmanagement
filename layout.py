@@ -662,6 +662,51 @@ def align_selected_furniture(mode: str) -> None:
         show_toast("已在同一条对齐线上")
 
 
+def distribute_selected_furniture(axis: str) -> None:
+    """多选家具在组外框内等间距分布：h=横向（按左右边界留 equal gap），v=竖向。"""
+    if len(selected_furnitures) < 3:
+        show_toast("平均分布需要至少 3 件家具")
+        return
+    if axis not in ("h", "v"):
+        return
+    push_undo()
+    pairs = [(furn, furniture_world_bbox(furn)) for furn in selected_furnitures]
+    if axis == "h":
+        pairs.sort(key=lambda t: (t[1][0] + t[1][2]) * 0.5)
+        group_min = min(b[0] for _, b in pairs)
+        group_max = max(b[2] for _, b in pairs)
+        total_size = sum(b[2] - b[0] for _, b in pairs)
+        span = group_max - group_min
+        gap = (span - total_size) / (len(pairs) - 1) if len(pairs) > 1 else 0.0
+        cursor = group_min
+        moved = 0
+        for furn, (xmin, ymin, xmax, ymax) in pairs:
+            w = xmax - xmin
+            dx = cursor - xmin
+            if abs(dx) > 1e-6:
+                furn.x += dx
+                moved += 1
+            cursor += w + gap
+        show_toast(f"已横向均分（{moved or len(pairs)} 件）" if moved else "横向间距已均匀")
+    else:
+        pairs.sort(key=lambda t: (t[1][1] + t[1][3]) * 0.5)
+        group_min = min(b[1] for _, b in pairs)
+        group_max = max(b[3] for _, b in pairs)
+        total_size = sum(b[3] - b[1] for _, b in pairs)
+        span = group_max - group_min
+        gap = (span - total_size) / (len(pairs) - 1) if len(pairs) > 1 else 0.0
+        cursor = group_min
+        moved = 0
+        for furn, (xmin, ymin, xmax, ymax) in pairs:
+            h = ymax - ymin
+            dy = cursor - ymin
+            if abs(dy) > 1e-6:
+                furn.y += dy
+                moved += 1
+            cursor += h + gap
+        show_toast(f"已竖向均分（{moved or len(pairs)} 件）" if moved else "竖向间距已均匀")
+
+
 def build_furniture_drag_snapshot(primary) -> list[tuple[object, float, float]]:
     sync_furniture_instance_ids()
     return [(item, item.x, item.y) for item in collect_furniture_drag_pack(primary)]
@@ -7017,6 +7062,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     core_keys = (
         "save", "undo", "refresh", "home", "tools_toggle",
         "align_left", "align_right", "align_top", "align_bottom",
+        "distribute_h", "distribute_v",
         "week_prev", "week_next", "walls_lock",
         "add", "resize", "rename", "delete",
     )
