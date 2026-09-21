@@ -56,8 +56,10 @@ PAD = 14
 C_WARN = (234, 88, 12)
 C_ATTENTION_BG = (255, 247, 237)
 C_ROW_EVEN = (255, 255, 255)
-C_ROW_ODD = (245, 247, 250)
-C_ROW_LINE = (226, 232, 240)
+C_ROW_ODD = (238, 242, 248)
+C_ROW_LINE = (203, 213, 225)
+C_ROW_HOVER = (219, 234, 254)
+C_LABEL_COL = (252, 253, 255)
 
 VIEW_OVERVIEW = "overview"
 VIEW_COMPARE = "compare"
@@ -104,6 +106,7 @@ class StoreDashboard:
         self.remediation_only = False
         self.num_weeks = 8
         self.attention_count = 0
+        self.compare_hover_row: int | None = None
         self.week_keys: list[str] = []
         self.scroll_y = 0
         self._data_dirty = True
@@ -264,7 +267,7 @@ class StoreDashboard:
             if self.view == VIEW_OVERVIEW:
                 self._draw_overview(w, h)
             elif self.view == VIEW_COMPARE:
-                self._draw_compare(w, h)
+                self._draw_compare(w, h, mouse)
             else:
                 self._draw_layouts(w, h)
             if self.status:
@@ -372,7 +375,17 @@ class StoreDashboard:
             self.screen.blit(amt_s, (bar_rect.right + 6, y))
             y += 22
 
-    def _draw_compare(self, w: int, h: int) -> None:
+    def _compare_row_index(self, mouse: tuple[int, int], area: pygame.Rect, bar_area_top: int, row_h: int, n_rows: int) -> int | None:
+        mx, my = mouse
+        if not area.collidepoint(mx, my) or my < bar_area_top:
+            return None
+        rel = my - bar_area_top + self.scroll_y
+        idx = int(rel // row_h)
+        if 0 <= idx < n_rows:
+            return idx
+        return None
+
+    def _draw_compare(self, w: int, h: int, mouse: tuple[int, int] = (0, 0)) -> None:
         area = pygame.Rect(SIDEBAR_W + PAD, HEADER_H + PAD, w - SIDEBAR_W - PAD * 2, h - HEADER_H - PAD * 2 - 28)
 
         rows = self._visible_compare_rows()
@@ -413,6 +426,19 @@ class StoreDashboard:
         self.scroll_y = min(self.scroll_y, max_scroll)
 
         max_val = max((max(r.by_store.values(), default=0) for r in rows), default=1.0) or 1.0
+        hover_idx = self._compare_row_index(mouse, area, bar_area_top, row_h, len(rows))
+        self.compare_hover_row = hover_idx
+
+        label_col = pygame.Rect(area.x, area.y, label_w, area.height)
+        pygame.draw.rect(self.screen, C_LABEL_COL, label_col)
+        pygame.draw.line(self.screen, C_ROW_LINE, (chart_x - 1, area.y), (chart_x - 1, area.bottom), 2)
+        pygame.draw.line(
+            self.screen,
+            C_ROW_LINE,
+            (area.right - meta_w, area.y),
+            (area.right - meta_w, area.bottom),
+            2,
+        )
 
         prev_clip = self.screen.get_clip()
         self.screen.set_clip(area)
@@ -424,13 +450,26 @@ class StoreDashboard:
                 row_idx += 1
                 continue
             row_band = pygame.Rect(area.x, y, area.width, row_h)
-            if row.attention:
+            hovered = hover_idx is not None and row_idx == hover_idx
+            if hovered:
+                pygame.draw.rect(self.screen, C_ROW_HOVER, row_band)
+                pygame.draw.line(self.screen, C_ACCENT, (area.x, y + row_h // 2), (area.right - meta_w, y + row_h // 2), 1)
+            elif row.attention:
                 pygame.draw.rect(self.screen, C_ATTENTION_BG, row_band)
             else:
                 pygame.draw.rect(
                     self.screen,
                     C_ROW_EVEN if row_idx % 2 == 0 else C_ROW_ODD,
                     row_band,
+                )
+            label_bg = pygame.Rect(area.x, y, label_w, row_h)
+            if hovered:
+                pygame.draw.rect(self.screen, C_ROW_HOVER, label_bg)
+            else:
+                pygame.draw.rect(
+                    self.screen,
+                    C_LABEL_COL if row_idx % 2 == 0 else (248, 250, 252),
+                    label_bg,
                 )
             pygame.draw.line(
                 self.screen,
@@ -451,28 +490,38 @@ class StoreDashboard:
             for i, col in enumerate(columns):
                 bx = chart_x + i * (seg_w + 6)
                 seg_rect = pygame.Rect(bx, y + 2, seg_w, row_h - 4)
-                if row_idx % 2 == 1 and not row.attention:
-                    pygame.draw.rect(self.screen, (252, 253, 255), seg_rect, border_radius=2)
                 ci = sidebar_color_index(col.slug)
                 c = STORE_COLORS[ci % len(STORE_COLORS)]
                 amt = row.by_slug.get(col.slug, row.by_store.get(col.shop_id, 0.0))
                 bw = max(2, int((amt / max_val) * (seg_w - 8))) if amt > 0 else 0
                 is_min = row.attention and col.slug == row.min_slug
+                cell_bg = (255, 255, 255) if row_idx % 2 == 0 else (248, 250, 253)
+                if hovered:
+                    cell_bg = C_ROW_HOVER
+                pygame.draw.rect(self.screen, cell_bg, seg_rect, border_radius=2)
+                pygame.draw.rect(self.screen, (230, 235, 242), seg_rect, 1, border_radius=2)
                 bar_x = bx + 4
-                bar_y = y + 9
+                bar_y = y + 10
                 if bw > 0:
-                    bar = pygame.Rect(bar_x, bar_y, bw, 14)
+                    bar = pygame.Rect(bar_x, bar_y, bw, 12)
                     pygame.draw.rect(self.screen, c, bar, border_radius=3)
                     if is_min:
-                        pygame.draw.rect(self.screen, C_WARN, bar, 2, border_radius=3)
+                        pygame.draw.rect(self.screen, c, bar.inflate(4, 4), 2, border_radius=4)
                 elif is_min:
-                    pygame.draw.rect(self.screen, C_WARN, (bar_x, bar_y + 3, 8, 8), border_radius=2)
+                    pygame.draw.rect(self.screen, c, seg_rect.inflate(-4, -4), 2, border_radius=3)
+                    dash = self.font_tiny.render("—", True, C_MUTED)
+                    self.screen.blit(dash, dash.get_rect(center=seg_rect.center))
+                if hovered and amt > 0:
+                    val = _truncate(self.font_tiny, _money(amt), seg_w - 6)
+                    val_s = self.font_tiny.render(val, True, C_TEXT)
+                    vx = min(seg_rect.right - val_s.get_width() - 2, bar_x + bw + 2)
+                    self.screen.blit(val_s, (vx, y + 8))
             meta_x = area.right - meta_w + 4
             if row.attention and row.spread_cv > 0:
                 short_min = (row.min_store_name or "").replace("店", "").replace("基督城 ", "")
                 meta = f"↓{_truncate(self.font_tiny, short_min, 36)} CV{int(row.spread_cv * 100)}%"
                 meta += f"  {_money(row.total)}"
-                meta_s = self.font_tiny.render(_truncate(self.font_tiny, meta, meta_w - 8), True, C_WARN)
+                meta_s = self.font_tiny.render(_truncate(self.font_tiny, meta, meta_w - 8), True, C_MUTED)
             else:
                 meta_s = self.font_tiny.render(_money(row.total), True, C_MUTED)
             self.screen.blit(meta_s, (meta_x + meta_w - 8 - meta_s.get_width(), y + 9))
@@ -490,9 +539,9 @@ class StoreDashboard:
                 1,
             )
 
-        hint = "● = 布局已摆 · ⚠ = 跨店方差大且垫店 · 滚轮浏览"
+        hint = "● = 布局已摆 · 鼠标移入高亮整行 · 滚轮浏览"
         if self.remediation_only:
-            hint = "整改模式：按方差 CV 排序 · 橙框=垫店 · 点布局预览可改摆场"
+            hint = "整改模式：列色粗框/「—」= 该店垫底 · 悬停看各店金额"
         elif self.family_filter == FILTER_LAYOUT:
             hint = "仅显示布局里有的系列 · 滚轮浏览"
         axis = self.font_tiny.render(hint, True, C_MUTED)
