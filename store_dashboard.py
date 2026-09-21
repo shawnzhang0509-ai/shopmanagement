@@ -23,7 +23,9 @@ from store_dashboard_data import (
     WEEK_OPTIONS,
     aggregate_family_comparison,
     aggregate_store_overviews,
+    count_attention_families,
     entries_for_ui,
+    filter_attention_rows,
     list_recent_week_keys_global,
     slug_to_entry,
     week_range_label,
@@ -49,6 +51,8 @@ from ui_common import (
 SIDEBAR_W = 260
 HEADER_H = 92
 PAD = 14
+C_WARN = (234, 88, 12)
+C_ATTENTION_BG = (255, 247, 237)
 
 VIEW_OVERVIEW = "overview"
 VIEW_COMPARE = "compare"
@@ -92,7 +96,9 @@ class StoreDashboard:
 
         self.view = VIEW_LAYOUTS
         self.family_filter = FILTER_LAYOUT
+        self.remediation_only = False
         self.num_weeks = 8
+        self.attention_count = 0
         self.week_keys: list[str] = []
         self.scroll_y = 0
         self._data_dirty = True
@@ -138,14 +144,8 @@ class StoreDashboard:
             family_filter=self.family_filter,
             top_n=top_n,
         )
-        layout_n = len(families_in_layouts(self.selected_slugs))
-        filt = "布局系列" if self.family_filter == FILTER_LAYOUT else "全部系列"
-        self.status = (
-            f"近 {self.num_weeks} 周 · {week_range_label(self.week_keys)} · "
-            f"{filt} · 显示 {len(self.compare_rows)} 行"
-        )
-        if self.family_filter == FILTER_LAYOUT:
-            self.status += f"（布局共 {layout_n} 个系列）"
+        self.attention_count = count_attention_families(self.compare_rows)
+        self._update_status_line()
         self._data_dirty = False
 
     def _rebuild_toolbar(self) -> None:
@@ -175,6 +175,38 @@ class StoreDashboard:
             Button((x, y, 88, 28), "布局系列", lambda: self._set_family_filter(FILTER_LAYOUT), toggle=True)
         )
         self.buttons[-1].active = self.family_filter == FILTER_LAYOUT
+        x += 96
+        rem_label = f"整改提醒 ({self.attention_count})" if self.attention_count else "整改提醒"
+        self.buttons.append(
+            Button((x, y, 96, 28), rem_label, lambda: self._toggle_remediation(), toggle=True)
+        )
+        self.buttons[-1].active = self.remediation_only
+
+    def _visible_compare_rows(self):
+        if self.remediation_only:
+            return filter_attention_rows(self.compare_rows)
+        return self.compare_rows
+
+    def _toggle_remediation(self) -> None:
+        self.remediation_only = not self.remediation_only
+        self.scroll_y = 0
+        self._rebuild_toolbar()
+        self._update_status_line()
+
+    def _update_status_line(self) -> None:
+        if not self.week_keys:
+            return
+        layout_n = len(families_in_layouts(self.selected_slugs))
+        filt = "布局系列" if self.family_filter == FILTER_LAYOUT else "全部系列"
+        visible_n = len(self._visible_compare_rows())
+        self.status = (
+            f"近 {self.num_weeks} 周 · {week_range_label(self.week_keys)} · "
+            f"{filt} · 显示 {visible_n} 行"
+        )
+        if self.attention_count:
+            self.status += f" · ⚠ {self.attention_count} 系列方差大/垫店需整改"
+        if self.family_filter == FILTER_LAYOUT:
+            self.status += f"（布局共 {layout_n} 个系列）"
 
     def _set_family_filter(self, mode: str) -> None:
         self.family_filter = mode
@@ -335,8 +367,12 @@ class StoreDashboard:
     def _draw_compare(self, w: int, h: int) -> None:
         area = pygame.Rect(SIDEBAR_W + PAD, HEADER_H + PAD, w - SIDEBAR_W - PAD * 2, h - HEADER_H - PAD * 2 - 28)
 
-        if not self.compare_rows:
-            msg = "暂无系列数据" if sales_data_available() else "请先抓取周销量"
+        rows = self._visible_compare_rows()
+        if not rows:
+            if self.remediation_only and self.compare_rows:
+                msg = "当前筛选下无「方差大且垫店」系列，可取消「整改提醒」查看全部"
+            else:
+                msg = "暂无系列数据" if sales_data_available() else "请先抓取周销量"
             self.screen.blit(self.font_body.render(msg, True, C_MUTED), (area.x, area.y))
             return
 
@@ -351,12 +387,12 @@ class StoreDashboard:
 
         row_h = 28
         bar_area_top = area.y + 28
-        chart_h = len(self.compare_rows) * row_h
+        chart_h = len(rows) * row_h
         content_h = chart_h + 20
         max_scroll = max(0, content_h - area.height + 40)
         self.scroll_y = min(self.scroll_y, max_scroll)
 
-        max_val = max((max(r.by_store.values(), default=0) for r in self.compare_rows), default=1.0) or 1.0
+        max_val = max((max(r.by_store.values(), default=0) for r in rows), default=1.0) or 1.0
         label_w = min(160, int(area.width * 0.22))
         chart_x = area.x + label_w + 8
         chart_w = area.width - label_w - 16
@@ -364,30 +400,54 @@ class StoreDashboard:
         seg_w = max(20, (chart_w - (n_stores - 1) * 4) // n_stores)
 
         y = bar_area_top - self.scroll_y
-        for row in self.compare_rows:
+        for row in rows:
             if y + row_h < area.y or y > area.bottom:
                 y += row_h
                 continue
-            fam = _truncate(self.font_small, row.family, label_w - 8)
+            if row.attention:
+                band = pygame.Rect(area.x, y, area.width, row_h)
+                pygame.draw.rect(self.screen, C_ATTENTION_BG, band)
+            fam = _truncate(self.font_small, row.family, label_w - 28)
             label_x = area.x
             if row.on_layout:
                 pygame.draw.circle(self.screen, C_ACCENT, (area.x + 6, y + 14), 4)
                 label_x += 14
+            if row.attention:
+                self.screen.blit(self.font_small.render("⚠", True, C_WARN), (label_x, y + 2))
+                label_x += 16
             self.screen.blit(self.font_small.render(fam, True, C_TEXT), (label_x, y + 4))
             bx = chart_x
             for i, ov in enumerate(self.overviews):
-                amt = row.by_store.get(ov.shop_id, 0.0)
+                amt = row.by_slug.get(ov.slug, row.by_store.get(ov.shop_id, 0.0))
                 bw = max(2, int((amt / max_val) * seg_w)) if amt > 0 else 0
                 c = STORE_COLORS[i % len(STORE_COLORS)]
+                is_min = row.attention and ov.slug == row.min_slug
                 if bw > 0:
-                    pygame.draw.rect(self.screen, c, (bx, y + 6, bw, 16), border_radius=3)
+                    bar = pygame.Rect(bx, y + 6, bw, 16)
+                    pygame.draw.rect(self.screen, c, bar, border_radius=3)
+                    if is_min:
+                        pygame.draw.rect(self.screen, C_WARN, bar, 2, border_radius=3)
+                elif is_min:
+                    pygame.draw.rect(self.screen, C_WARN, (bx, y + 10, 8, 8), border_radius=2)
                 bx += seg_w + 4
+            meta_x = area.right
+            if row.attention and row.spread_cv > 0:
+                cv_s = self.font_tiny.render(f"CV {int(row.spread_cv * 100)}%", True, C_WARN)
+                meta_x -= cv_s.get_width() + 6
+                self.screen.blit(cv_s, (meta_x, y + 6))
+                short_min = (row.min_store_name or "").replace("店", "").replace("基督城 ", "")[:8]
+                if short_min:
+                    tip = self.font_tiny.render(f"↓{short_min}", True, C_WARN)
+                    meta_x -= tip.get_width() + 4
+                    self.screen.blit(tip, (meta_x, y + 6))
             total_s = self.font_tiny.render(_money(row.total), True, C_MUTED)
             self.screen.blit(total_s, (area.right - total_s.get_width(), y + 6))
             y += row_h
 
-        hint = "● = 布局已摆 · 滚轮浏览"
-        if self.family_filter == FILTER_LAYOUT:
+        hint = "● = 布局已摆 · ⚠ = 跨店方差大且垫店 · 滚轮浏览"
+        if self.remediation_only:
+            hint = "整改模式：按方差 CV 排序 · 橙框=垫店 · 点布局预览可改摆场"
+        elif self.family_filter == FILTER_LAYOUT:
             hint = "仅显示布局里有的系列 · 滚轮浏览"
         axis = self.font_tiny.render(hint, True, C_MUTED)
         self.screen.blit(axis, (area.x, area.bottom - 18))
@@ -395,14 +455,23 @@ class StoreDashboard:
     def _open_layout_editor(self, slug: str) -> None:
         from layout_family_lookup import layout_path_for_slug
 
-        path = os.path.abspath(layout_path_for_slug(slug))
+        path = layout_path_for_slug(slug)
         if not os.path.isfile(path):
             self.status = f"找不到布局文件: {slug}"
             return
-        last = os.path.join(SCRIPT_DIR, "data", "layouts", "_last.json")
-        os.makedirs(os.path.dirname(last), exist_ok=True)
+        from region_config import layouts_dir
+        from display_lookup import load_grabber_config
+
+        layouts_root = layouts_dir(load_grabber_config())
+        last = os.path.join(layouts_root, "_last.json")
+        os.makedirs(layouts_root, exist_ok=True)
+        try:
+            rel = os.path.relpath(path, layouts_root).replace("\\", "/")
+            stored = rel if not rel.startswith("..") else path
+        except ValueError:
+            stored = path
         with open(last, "w", encoding="utf-8") as f:
-            json.dump({"path": path, "slug": slug}, f, ensure_ascii=False)
+            json.dump({"path": stored, "slug": slug}, f, ensure_ascii=False)
         kwargs: dict = {"cwd": SCRIPT_DIR}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE

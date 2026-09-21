@@ -260,6 +260,12 @@ def invalidate_weekly_sales_cache() -> None:
     """仅清空缓存，不读 Excel（区域切换时用，避免主线程卡顿）。"""
     global _sales_cache, _family_totals_cache, _sku_family_map, _sku_totals_cache
     _sales_cache = None
+    try:
+        from heatmap_metrics import clear_heatmap_cache
+
+        clear_heatmap_cache()
+    except Exception:
+        pass
     _family_totals_cache = {}
     _sku_family_map = None
     _sku_totals_cache = {}

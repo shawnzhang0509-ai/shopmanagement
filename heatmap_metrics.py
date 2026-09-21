@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from typing import Any
 
@@ -13,7 +14,14 @@ from sales_lookup import (
 )
 
 _week_keys_cache: dict[tuple[str | None, int], set[str]] = {}
-_amount_cache: dict[tuple[str, str, str | None, int], float] = {}
+_amount_cache: dict[tuple, float] = {}
+_sales_index_path: str | None = None
+_sales_index_mtime: float = 0.0
+_weeks_by_shop: dict[str, set[str]] = {}
+_week_period_labels: dict[tuple[str, str], str] = {}
+_index_product: dict[tuple[str, str, str], float] = {}
+_index_family: dict[tuple[str, str, str], float] = {}
+_index_prefix: dict[tuple[str, str, str], float] = {}
 
 # 9 档实色渐变：低坪效(红) → 中(黄) → 高坪效(绿)
 # 深红 → 中红 → 浅红 → 深黄 → 中黄 → 浅黄 → 浅绿 → 中绿 → 深绿
@@ -92,28 +100,91 @@ def _week_key(period: str) -> str:
 
 def clear_heatmap_cache() -> None:
     global _week_keys_cache, _amount_cache
+    global _sales_index_path, _sales_index_mtime
+    global _weeks_by_shop, _week_period_labels
+    global _index_product, _index_family, _index_prefix
     _week_keys_cache = {}
     _amount_cache = {}
+    _sales_index_path = None
+    _sales_index_mtime = 0.0
+    _weeks_by_shop = {}
+    _week_period_labels = {}
+    _index_product = {}
+    _index_family = {}
+    _index_prefix = {}
+
+
+def _ensure_sales_index() -> None:
+    """一次扫描 weekly_sales，供周次列表与坪效查询复用（避免每件家具全表遍历）。"""
+    global _sales_index_path, _sales_index_mtime
+    global _weeks_by_shop, _week_period_labels
+    global _index_product, _index_family, _index_prefix
+
+    from sales_lookup import load_weekly_sales, resolve_weekly_sales_path
+
+    path = resolve_weekly_sales_path()
+    try:
+        mtime = os.path.getmtime(path) if os.path.isfile(path) else 0.0
+    except OSError:
+        mtime = 0.0
+    if _sales_index_path == path and mtime == _sales_index_mtime and _weeks_by_shop:
+        return
+
+    _weeks_by_shop = {}
+    _week_period_labels = {}
+    _index_product = {}
+    _index_family = {}
+    _index_prefix = {}
+    _sales_index_path = path
+    _sales_index_mtime = mtime
+
+    for row in load_weekly_sales():
+        wk = _week_key(row.year_week_period)
+        if not wk:
+            continue
+        sid = row.shop_id or "other"
+        _weeks_by_shop.setdefault(sid, set()).add(wk)
+        label_key = (sid, wk)
+        if label_key not in _week_period_labels:
+            _week_period_labels[label_key] = str(row.year_week_period or wk)
+        amt = float(row.total_amount or 0)
+        if amt == 0:
+            continue
+        sku_n = _normalize_key(row.sku)
+        fam_n = _normalize_key(row.product_family)
+        pref_n = _normalize_key(sku_prefix(row.sku))
+        if sku_n:
+            pk = (sid, wk, sku_n)
+            _index_product[pk] = _index_product.get(pk, 0.0) + amt
+        if fam_n:
+            fk = (sid, wk, fam_n)
+            _index_family[fk] = _index_family.get(fk, 0.0) + amt
+        if pref_n:
+            rk = (sid, wk, pref_n)
+            _index_prefix[rk] = _index_prefix.get(rk, 0.0) + amt
 
 
 def list_all_week_keys(shop_id: str | None = None) -> list[str]:
     """门店全部有数据的自然周（升序）。"""
-    weeks: set[str] = set()
-    for row in load_weekly_sales():
-        if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
-            continue
-        wk = _week_key(row.year_week_period)
-        if wk:
-            weeks.add(wk)
-    return sorted(weeks)
+    _ensure_sales_index()
+    if shop_id and shop_id not in ("all", ""):
+        return sorted(_weeks_by_shop.get(shop_id, set()))
+    all_w: set[str] = set()
+    for ws in _weeks_by_shop.values():
+        all_w |= ws
+    return sorted(all_w)
 
 
 def week_period_display(shop_id: str | None, week_key: str) -> str:
-    for row in load_weekly_sales():
-        if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
-            continue
-        if _week_key(row.year_week_period) == week_key:
-            return str(row.year_week_period or week_key)
+    _ensure_sales_index()
+    sid = shop_id or ""
+    if sid:
+        label = _week_period_labels.get((sid, week_key))
+        if label:
+            return label
+    for (s, wk), label in _week_period_labels.items():
+        if wk == week_key and (not sid or s == sid):
+            return label
     return week_key
 
 
@@ -123,13 +194,13 @@ def list_recent_week_keys(shop_id: str | None = None, num_weeks: int = 4) -> lis
     if cache_key in _week_keys_cache:
         return sorted(_week_keys_cache[cache_key])
 
-    weeks: set[str] = set()
-    for row in load_weekly_sales():
-        if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
-            continue
-        wk = _week_key(row.year_week_period)
-        if wk:
-            weeks.add(wk)
+    _ensure_sales_index()
+    if shop_id and shop_id not in ("all", ""):
+        weeks = _weeks_by_shop.get(shop_id, set())
+    else:
+        weeks = set()
+        for ws in _weeks_by_shop.values():
+            weeks |= ws
     chosen = sorted(weeks)[-num_weeks:]
     _week_keys_cache[cache_key] = set(chosen)
     return chosen
@@ -172,39 +243,29 @@ def lookup_sales_amount(
         _amount_cache[cache_key] = 0.0
         return 0.0
 
+    _ensure_sales_index()
     sku_n = _normalize_key(sku)
     fam = resolve_product_family(family or sku) or family or sku
     fam_n = _normalize_key(fam)
     prefix_n = _normalize_key(sku_prefix(sku))
     amount = 0.0
+    sid = shop_id
 
-    for row in load_weekly_sales():
-        if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
-            continue
-        if _week_key(row.year_week_period) not in allowed:
-            continue
-        row_sku = _normalize_key(row.sku)
-        row_fam = _normalize_key(row.product_family)
+    for wk in allowed:
         if lvl == "family":
-            if fam_n and row_fam == fam_n:
-                amount += row.total_amount
+            if fam_n:
+                amount += _index_family.get((sid, wk, fam_n), 0.0)
             continue
         if lvl == "prefix":
-            if prefix_n and _normalize_key(sku_prefix(row.sku)) == prefix_n:
-                amount += row.total_amount
+            if prefix_n:
+                amount += _index_prefix.get((sid, wk, prefix_n), 0.0)
             continue
-        # product：先 SKU，无匹配再回落系列
-        if sku_n and row_sku == sku_n:
-            amount += row.total_amount
+        if sku_n:
+            amount += _index_product.get((sid, wk, sku_n), 0.0)
 
     if lvl == "product" and amount <= 0 and fam_n:
-        for row in load_weekly_sales():
-            if shop_id and shop_id not in ("all", "") and row.shop_id != shop_id:
-                continue
-            if _week_key(row.year_week_period) not in allowed:
-                continue
-            if _normalize_key(row.product_family) == fam_n:
-                amount += row.total_amount
+        for wk in allowed:
+            amount += _index_family.get((sid, wk, fam_n), 0.0)
 
     _amount_cache[cache_key] = amount
     return amount
@@ -368,6 +429,4 @@ def sales_data_ready() -> bool:
     from sales_lookup import resolve_weekly_sales_path
 
     path = resolve_weekly_sales_path()
-    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
-        return False
-    return bool(load_weekly_sales())
+    return os.path.isfile(path) and os.path.getsize(path) > 0
