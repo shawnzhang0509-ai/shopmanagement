@@ -61,6 +61,7 @@ def _furniture_stock_badge(sku: str) -> str:
         return format_enhanced_stock_badge(sku, shop_id=current_sales_shop_id() or "all")
     except Exception:
         return format_stock_badge(sku)
+
 from ui_common import Dropdown, InputBox, draw_fitted_text, sanitize_display_text
 
 pygame.init()
@@ -133,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -331,6 +332,7 @@ ROTATE_DROPDOWN_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 SIDEBAR_HEADER_H = 68
 SIDEBAR_BTN_H = 32
+SIDEBAR_STATUS_H = 22
 SIDEBAR_BTN_GAP = 6
 SIDEBAR_SECTION_GAP = 8
 WEEK_CAPTION_H = 18
@@ -6847,6 +6849,15 @@ def build_sidebar_ui():
     buttons["tools_toggle"].active = sidebar_tools_expanded
     y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
 
+    # 对齐：多选 ≥2 件家具时使用（始终可见，不藏在「展开布局工具」里）
+    bw4 = (w - SIDEBAR_BTN_GAP * 3) // 4
+    buttons["align_left"] = Button((pad, y, bw4, SIDEBAR_BTN_H - 2), "左对齐", "align_left")
+    buttons["align_right"] = Button((pad + bw4 + SIDEBAR_BTN_GAP, y, bw4, SIDEBAR_BTN_H - 2), "右对齐", "align_right")
+    buttons["align_top"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 2, y, bw4, SIDEBAR_BTN_H - 2), "上对齐", "align_top")
+    buttons["align_bottom"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 3, y, bw4, SIDEBAR_BTN_H - 2), "下对齐", "align_bottom")
+    y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
+
+
     dropdowns: dict[str, Dropdown] = {}
 
     if sidebar_tools_expanded:
@@ -6883,11 +6894,7 @@ def build_sidebar_ui():
         buttons["bind_parent"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "绑定父件", "bind_parent")
         buttons["unbind"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "解绑", "unbind")
         y += SIDEBAR_BTN_H
-        buttons["align_left"] = Button((pad, y, bw4, SIDEBAR_BTN_H - 2), "左对齐", "align_left")
-        buttons["align_right"] = Button((pad + bw4 + SIDEBAR_BTN_GAP, y, bw4, SIDEBAR_BTN_H - 2), "右对齐", "align_right")
-        buttons["align_top"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 2, y, bw4, SIDEBAR_BTN_H - 2), "上对齐", "align_top")
-        buttons["align_bottom"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 3, y, bw4, SIDEBAR_BTN_H - 2), "下对齐", "align_bottom")
-        y += SIDEBAR_BTN_H
+
         buttons["rename_store"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "重命名", "rename_store")
         buttons["store"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "画布", "store")
         y += SIDEBAR_BTN_H
@@ -6939,8 +6946,8 @@ def build_sidebar_ui():
     y += SIDEBAR_BTN_H + SIDEBAR_SECTION_GAP
 
     # ── 核心：家具模板（占满剩余高度）──
-    footer_h = (SIDEBAR_BTN_H + 4) + 8 + SIDEBAR_BTN_H + 16
-    template_rows_bottom = SCREEN_HEIGHT - footer_h - 8
+    footer_h = SIDEBAR_STATUS_H + 10 + SIDEBAR_BTN_H + 8 + (SIDEBAR_BTN_H + 4) + 10
+    template_rows_bottom = SCREEN_HEIGHT - footer_h
     input_box = InputBox((pad, y, w, 34), placeholder="搜索名称/系列/编号… (Ctrl+F)")
     input_box.set_text(search_text)
     if search_box_active:
@@ -6953,8 +6960,14 @@ def build_sidebar_ui():
         label="系列",
         dropdown_id="family",
     )
-    y += 32
-    template_rows_top = y + 18
+    y += 34
+    template_rows_top = y + 20
+    min_list_h = TEMPLATE_ROW_H * 2
+    if template_rows_top + min_list_h > template_rows_bottom:
+        template_rows_top = max(SIDEBAR_HEADER_H + 40, template_rows_bottom - min_list_h)
+        input_box.rect.y = template_rows_top - 56
+        if dropdowns.get("family"):
+            dropdowns["family"].rect.y = template_rows_top - 22
 
     # 底部操作栏（固定）
     action_y = template_rows_bottom + 8
@@ -7003,6 +7016,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
 
     core_keys = (
         "save", "undo", "refresh", "home", "tools_toggle",
+        "align_left", "align_right", "align_top", "align_bottom",
         "week_prev", "week_next", "walls_lock",
         "add", "resize", "rename", "delete",
     )
@@ -7047,7 +7061,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
 
     # 搜索 + 模板列表（核心区域）
     search_y = input_box.rect.y
-    surface.blit(FONT_LABEL.render("家具模板", True, C_TEXT), (12, search_y - 18))
+    surface.blit(FONT_LABEL.render("家具模板", True, C_TEXT), (12, max(4, search_y - 20)))
     input_box.draw(surface)
 
     filtered = filtered_templates()
@@ -7063,11 +7077,17 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         count_label += f' · "{q[:14]}{"..." if len(q) > 14 else ""}"'
     if len(filtered) > visible_n:
         count_label += f" · {template_scroll_offset + 1}-{template_scroll_offset + len(visible)}"
-    surface.blit(FONT_SMALL.render(count_label, True, C_MUTED), (12, template_rows_top - 16))
+    count_surf = FONT_SMALL.render(count_label, True, C_MUTED)
+    surface.blit(count_surf, (SIDEBAR_WIDTH - 12 - count_surf.get_width(), template_rows_top - 18))
 
     list_y = template_rows_top
+    list_clip = pygame.Rect(0, template_rows_top - 2, SIDEBAR_WIDTH, max(0, template_rows_bottom - template_rows_top + 2))
+    prev_clip = surface.get_clip()
+    surface.set_clip(list_clip)
     for i, (idx, tpl) in enumerate(visible):
         row = pygame.Rect(12, list_y + i * TEMPLATE_ROW_H, SIDEBAR_WIDTH - 24, TEMPLATE_ROW_H - 4)
+        if row.y >= template_rows_bottom:
+            break
         selected = idx == selected_template_index
         discontinued = bool(getattr(tpl, "is_discontinued", False))
         bg = C_ACCENT_LIGHT if selected else ((255, 241, 235) if discontinued else (248, 250, 252))
@@ -7103,11 +7123,11 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
             FONT_SMALL.render(meta, True, C_DISCONTINUED if discontinued else C_MUTED),
             (tx, row.y + 26),
         )
+    surface.set_clip(prev_clip)
 
     # 模板列表与底部操作栏分隔
     pygame.draw.line(surface, C_BORDER, (12, template_rows_bottom + 2), (SIDEBAR_WIDTH - 12, template_rows_bottom + 2), 1)
 
-    sel_y = SCREEN_HEIGHT - 42
     status_extra = ""
     if selected_marker_index is not None:
         marker = layout_markers[selected_marker_index]
@@ -7130,14 +7150,19 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         else:
             status_extra = f"障碍×{len(selected_collisions)} · "
 
-    surface.blit(
-        FONT_SMALL.render(
-            status_extra
-            + f"{store_width_mm / 1000:g}×{store_height_mm / 1000:g}m · 家具{len(placed_furnitures)} · 框选移动 · Ctrl+F",
-            True,
-            C_ACCENT if status_extra else C_MUTED,
-        ),
-        (12, SCREEN_HEIGHT - 22),
+    status_line = (
+        status_extra
+        + f"{store_width_mm / 1000:g}×{store_height_mm / 1000:g}m · 家具{len(placed_furnitures)} · 框选 · Ctrl+F"
+    )
+    status_rect = pygame.Rect(12, SCREEN_HEIGHT - SIDEBAR_STATUS_H - 6, SIDEBAR_WIDTH - 24, SIDEBAR_STATUS_H)
+    draw_fitted_text(
+        surface,
+        status_line,
+        FONT_SMALL,
+        C_ACCENT if status_extra else C_MUTED,
+        status_rect,
+        align="left",
+        pad=0,
     )
 
     if not view_interaction_fast_mode() and not open_dropdown_id:
