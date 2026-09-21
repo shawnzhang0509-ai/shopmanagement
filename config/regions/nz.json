@@ -1,0 +1,42 @@
+{
+  "id": "nz",
+  "label": "新西兰",
+  "default_sql_folder": "sql/nz",
+  "default_output_folder": "data/nz",
+  "image_base_url": "https://ierpapi.ifurniture.co.nz/",
+  "display_location_patterns": ["display"],
+  "storage_location_patterns": ["storage"],
+  "shops": [
+    {"id": "all", "label": "全部", "patterns": []},
+    {"id": "onehunga", "label": "Onehunga", "patterns": ["onehunga"]},
+    {"id": "westgate", "label": "Westgate", "patterns": ["westgate"]},
+    {"id": "hamilton", "label": "Hamilton", "patterns": ["hamilton"]},
+    {"id": "chch", "label": "Christchurch", "patterns": ["chch", "christchurch", "colombo", "bleiham"]},
+    {"id": "carbine", "label": "Carbine Rd", "patterns": ["carbine"]},
+    {"id": "other", "label": "其他", "patterns": []}
+  ],
+  "store_entries": [
+    {"name": "Onehunga店", "slug": "onehunga", "shop_id": "onehunga"},
+    {"name": "Hamilton店", "slug": "hamilton", "shop_id": "hamilton"},
+    {"name": "Westgate店", "slug": "westgate", "shop_id": "westgate"},
+    {"name": "基督城 Colombo店", "slug": "christchurch_colombo", "shop_id": "chch"},
+    {"name": "基督城 Bleiham店", "slug": "christchurch_bleiham", "shop_id": "chch"}
+  ],
+  "layout_stores": [
+    ["Onehunga店", "onehunga"],
+    ["Hamilton店", "hamilton"],
+    ["Westgate店", "westgate"],
+    ["基督城 Colombo店", "christchurch_colombo"],
+    ["基督城 Bleiham店", "christchurch_bleiham"]
+  ],
+  "layout_slug_to_sales_shop": {
+    "onehunga": "onehunga",
+    "hamilton": "hamilton",
+    "westgate": "westgate",
+    "christchurch_colombo": "chch",
+    "christchurch_bleiham": "chch"
+  },
+  "catalog_layout_specs": {
+    "onehunga": [43000, 76300]
+  }
+}

@@ -52,6 +52,16 @@ from heatmap_metrics import (
     week_period_display,
 )
 from stock_price_lookup import format_stock_badge, format_stock_price_hint, reload_stock_prices
+
+
+def _furniture_stock_badge(sku: str) -> str:
+    try:
+        from dual_placement import format_enhanced_stock_badge
+
+        return format_enhanced_stock_badge(sku, shop_id=current_sales_shop_id() or "all")
+    except Exception:
+        return format_stock_badge(sku)
+
 from ui_common import Dropdown, InputBox, draw_fitted_text, sanitize_display_text
 
 pygame.init()
@@ -2588,7 +2598,7 @@ class Furniture:
                 name = _truncate_label(self.name, FONT_TINY, max(20, int(span * 0.88)))
                 surf = FONT_TINY.render(name, True, C_TEXT)
                 surface.blit(surf, surf.get_rect(center=(int(cx), int(cy - 6))))
-                badge = format_stock_badge(self.name)
+                badge = _furniture_stock_badge(self.name)
                 if badge and span >= 36:
                     bsurf = FONT_TINY.render(badge, True, C_MUTED)
                     surface.blit(bsurf, bsurf.get_rect(center=(int(cx), int(cy + 8))))
@@ -2643,7 +2653,7 @@ class Furniture:
                 selected=selected,
                 span_px=span,
                 is_discontinued=self.is_discontinued,
-                stock_badge=format_stock_badge(self.name),
+                stock_badge=_furniture_stock_badge(self.name),
             )
             self._label_rect = tag_rect.inflate(LABEL_HIT_PAD, LABEL_HIT_PAD)
         else:
@@ -6260,8 +6270,12 @@ def _template_search_blob(t) -> str:
 def _matches_template_search(q: str, t) -> bool:
     if not q:
         return True
-    blob = _template_search_blob(t)
     q_lower = q.lower()
+    if q_lower in ("双摆", "仓储", "dual", "storage"):
+        from dual_placement import is_dual_placement_eligible
+
+        return is_dual_placement_eligible(t.name, shop_id=current_sales_shop_id() or "all")
+    blob = _template_search_blob(t)
     if q_lower in blob.lower() or q in blob:
         return True
     if getattr(t, "is_discontinued", False) and q_lower in ("停产", "discontinued", "dc"):
@@ -6843,6 +6857,7 @@ def build_sidebar_ui():
     buttons["align_bottom"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 3, y, bw4, SIDEBAR_BTN_H - 2), "下对齐", "align_bottom")
     y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
 
+
     dropdowns: dict[str, Dropdown] = {}
 
     if sidebar_tools_expanded:
@@ -6879,6 +6894,7 @@ def build_sidebar_ui():
         buttons["bind_parent"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "绑定父件", "bind_parent")
         buttons["unbind"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "解绑", "unbind")
         y += SIDEBAR_BTN_H
+
         buttons["rename_store"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "重命名", "rename_store")
         buttons["store"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "画布", "store")
         y += SIDEBAR_BTN_H

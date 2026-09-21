@@ -1,0 +1,93 @@
+-- 产品库存 + 原价/促销价（按 SKU 一行）
+-- 加拿大：下方 CarbineStock / WallsStock 等列名为兼容 Excel 保留，请按 SSMS
+--   sql/discover_schema.sql 查 Warehouses 表后，把仓库名改成多伦多/温哥华等实际名称。
+-- 用法:
+--   SSMS: 改 @SkuFilter = '855' 只查某系列；留空 '' 查全部
+--   抓取: python scripts/grab_stock_price.py → data/product_stock_price.xlsx
+--
+-- 北岛库存 = Carbine Rd Warehouse + Walls / Walls Road / Walls in Transit
+-- 南岛库存 = CHCH Gerald Connelly / GC
+
+DECLARE @SkuFilter VARCHAR(20) = '';
+
+SELECT
+    p.Sku,
+    p.Name AS ProductName,
+    ISNULL(p.ProductFamily, '') AS ProductFamily,
+    p.PriceRadarVolume,
+    CAST(p.IsDiscontinued AS INT) AS IsDiscontinued,
+    p.UnitPrice,
+    CASE
+        WHEN promo.SalePrice IS NOT NULL
+         AND promo.SalePrice > 0
+         AND promo.SalePrice < p.UnitPrice
+        THEN promo.SalePrice
+        ELSE p.UnitPrice
+    END AS SalePrice,
+    CASE
+        WHEN promo.SalePrice IS NOT NULL
+         AND promo.SalePrice > 0
+         AND promo.SalePrice < p.UnitPrice
+        THEN 1
+        ELSE 0
+    END AS OnPromotion,
+    MAX(
+        CASE
+            WHEN img.RelativeFilePath IS NOT NULL
+            THEN '{{IMAGE_BASE_URL}}' + REPLACE(img.RelativeFilePath, '\', '/')
+            ELSE ''
+        END
+    ) AS ImageUrl,
+    SUM(CASE WHEN TRIM(w.Name) = 'Carbine Rd Warehouse' THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS CarbineStock,
+    SUM(CASE WHEN TRIM(w.Name) IN ('Walls', 'Walls Road', 'Walls in Transit') THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS WallsStock,
+    SUM(CASE WHEN TRIM(w.Name) = 'Carbine Rd Warehouse' THEN ISNULL(s.Quantity, 0) ELSE 0 END)
+    + SUM(CASE WHEN TRIM(w.Name) IN ('Walls', 'Walls Road', 'Walls in Transit') THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS NorthIslandTotal,
+    SUM(CASE WHEN TRIM(w.Name) IN ('CHCH Gerald Connelly', 'GC') THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS GeraldConnellyStock
+FROM [dbo].[Products] p
+
+-- 当前生效促销：同一产品多条时取最低 SalePrice
+LEFT JOIN (
+    SELECT ProductId, SalePrice, PromotionId
+    FROM (
+        SELECT
+            pp.ProductId,
+            pp.SalePrice,
+            pp.PromotionId,
+            ROW_NUMBER() OVER (
+                PARTITION BY pp.ProductId
+                ORDER BY pp.SalePrice ASC, pp.PromotionId ASC
+            ) AS rn
+        FROM dbo.ProductPromotions pp
+        INNER JOIN dbo.Promotions pr
+            ON pp.PromotionId = pr.Id
+        WHERE pp.IsDisabled = 0
+          AND pr.IsEnabled = 1
+          AND GETUTCDATE() BETWEEN pr.StartTimeUtc AND pr.EndTimeUtc
+          AND pp.SalePrice IS NOT NULL
+          AND pp.SalePrice > 0
+    ) t
+    WHERE rn = 1
+) promo
+    ON promo.ProductId = p.Id
+
+-- ↓ ImageUrl 子查询与 sql/display.sql 保持同步 ↓
+LEFT JOIN (
+    ON s.ProductId = p.Id
+    AND s.StockStatus = 'Normal'
+    AND s.StockOnHoldStatus IS NULL
+
+LEFT JOIN [dbo].[Warehouses] w
+    ON s.WarehouseId = w.Id
+
+WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
+
+GROUP BY
+    p.Sku,
+    p.Name,
+    p.ProductFamily,
+    p.PriceRadarVolume,
+    p.IsDiscontinued,
+    p.UnitPrice,
+    promo.SalePrice
+
+ORDER BY p.Sku;

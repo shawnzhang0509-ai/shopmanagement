@@ -1,13 +1,33 @@
 {
-  "_comment": "复制为 grabber_config.json。database_url 直接从 main_gui 的 grabber_config.json 复制即可。",
-  "database_url": "mssql+pymssql://nzlivepooluser:iFur3RP%405sc%5El%5Et3%21@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
-  "sql_folder": "sql",
-  "output_folder": "data",
-  "sql_file": "sql/display.sql",
-  "output_excel": "data/display.xlsx",
-  "output_json": "data/display_cache.json",
-  "blacklist_file": "data/display_blacklist.xlsx",
+  "_comment": "复制为 grabber_config.json。SQL 在 sql/{nz,au,ca}/，Excel 在 data/{nz,au,ca}/。",
+  "active_region": "nz",
   "schedule_interval": 30,
   "schedule_unit": "分钟",
-  "minimize_to_tray": false
+  "minimize_to_tray": false,
+  "grab_sales_with_display": true,
+  "sync_roi_after_grab": false,
+  "run_regions": ["nz"],
+  "regions": {
+    "nz": {
+      "database_url": "mssql+pymssql://nzlivepooluser:YOUR_PASSWORD@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
+      "sql_folder": "sql/nz",
+      "output_folder": "data/nz",
+      "image_base_url": "https://ierpapi.ifurniture.co.nz/"
+    },
+    "au": {
+      "database_url": "mssql+pymssql://USER:YOUR_PASSWORD@YOUR-AU-SERVER.database.windows.net:1433/au_ierp_live?charset=utf8",
+      "sql_folder": "sql/au",
+      "output_folder": "data/au",
+      "image_base_url": "https://ierpapi.ifurniture.com.au/"
+    },
+    "ca": {
+      "database_url": "mssql+pymssql://USER:YOUR_PASSWORD@YOUR-CA-SERVER.database.windows.net:1433/ca_ierp_live?charset=utf8",
+      "sql_folder": "sql/ca",
+      "output_folder": "data/ca",
+      "image_base_url": "https://ierpapi.ifurniture.ca/"
+    }
+  },
+  "_legacy_note": "若你原来用 data/display.xlsx（无 nz 子目录），程序仍会读取；建议搬到 data/nz/ 后统一结构",
+  "_sql_bootstrap_note": "若缺少 sql/ca/ 等目录，运行 python tools/bootstrap_region_sql.py；支持 display.txt / weekly_sales.txt；图片域名由程序按 image_base_url 自动替换",
+  "_region_env_note": "环境变量 ACTIVE_REGION=au 或 DISPLAY_DB_URL_AU=... 可覆盖"
 }

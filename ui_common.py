@@ -34,10 +34,25 @@ C_SUCCESS = (46, 204, 113)
 C_SUCCESS_LIGHT = (212, 239, 223)
 C_DANGER = (231, 76, 60)
 C_DANGER_LIGHT = (250, 219, 216)
+C_DISCONTINUED = (192, 57, 43)
+C_DISCONTINUED_BG = (255, 241, 235)
+C_DISCONTINUED_BORDER = (211, 84, 0)
+DISCONTINUED_LABEL = "停产"
 C_PREVIEW = (52, 152, 219)
 C_PREVIEW_FILL = (214, 234, 248)
 
-FONT_CANDIDATES = ["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei", "Arial"]
+FONT_CANDIDATES = [
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK",
+    "WenQuanYi Micro Hei",
+    "WenQuanYi Zen Hei",
+    "Source Han Sans SC",
+    "SimHei",
+    "DejaVu Sans",
+    "Arial",
+]
 
 FONT_TITLE = None
 FONT_BODY = None
@@ -62,14 +77,18 @@ def get_tk_root():
 _CTRL_UNICODE = {
     "a": "\x01",
     "c": "\x03",
+    "s": "\x13",
     "v": "\x16",
     "x": "\x18",
+    "z": "\x1a",
 }
 _CTRL_SCANCODES = {
     "a": 4,
     "c": 6,
+    "s": 22,
     "v": 25,
     "x": 45,
+    "z": 29,
 }
 
 
@@ -140,6 +159,19 @@ def _normalize_paste(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").split("\n", 1)[0]
 
 
+def load_font(size: int, bold: bool = False) -> pygame.font.Font:
+    """Load a UI font by family candidates (call after pygame.init())."""
+    if not pygame.get_init():
+        pygame.init()
+    if not pygame.font.get_init():
+        pygame.font.init()
+    for name in FONT_CANDIDATES:
+        path = pygame.font.match_font(name, bold=bold)
+        if path:
+            return pygame.font.Font(path, size)
+    return pygame.font.SysFont(None, size, bold=bold)
+
+
 def init_fonts():
     """Load fonts after pygame.init(). Safe to call multiple times."""
     global FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_LABEL, FONT_MARK
@@ -151,18 +183,61 @@ def init_fonts():
     if not pygame.font.get_init():
         pygame.font.init()
 
-    def load_font(size: int, bold: bool = False) -> pygame.font.Font:
-        for name in FONT_CANDIDATES:
-            path = pygame.font.match_font(name, bold=bold)
-            if path:
-                return pygame.font.Font(path, size)
-        return pygame.font.SysFont(None, size, bold=bold)
-
     FONT_TITLE = load_font(22, bold=True)
     FONT_BODY = load_font(16)
     FONT_SMALL = load_font(13)
     FONT_LABEL = load_font(14, bold=True)
     FONT_MARK = load_font(12)
+
+
+def truncate_text(text: str, font: pygame.font.Font, max_px: int, *, ell: str = "...") -> str:
+    """Truncate text with ellipsis so rendered width fits max_px."""
+    text = str(text or "").strip()
+    if not text or font.size(text)[0] <= max_px:
+        return text
+    while len(text) > 1 and font.size(text + ell)[0] > max_px:
+        text = text[:-1]
+    return text + ell
+
+
+def draw_fitted_text(
+    surface,
+    text: str,
+    font: pygame.font.Font,
+    color,
+    rect: pygame.Rect,
+    *,
+    align: str = "center",
+    pad: int = 6,
+) -> None:
+    """Render text centered/left within rect, truncating if needed."""
+    max_w = max(1, rect.width - pad * 2)
+    label = truncate_text(text, font, max_w)
+    surf = font.render(label, True, color)
+    if align == "left":
+        x = rect.x + pad
+    else:
+        x = rect.centerx - surf.get_width() // 2
+    y = rect.centery - surf.get_height() // 2
+    clip = pygame.Rect(rect.x + pad, rect.y, max_w, rect.height)
+    surface.set_clip(clip)
+    surface.blit(surf, (x, y))
+    surface.set_clip(None)
+
+
+def sanitize_display_text(val, default: str = "") -> str:
+    """Normalize Excel/JSON cell values; NaN and 'nan' become default."""
+    import math
+
+    if val is None:
+        return default
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return default
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", "null", "#n/a", "n/a", "<na>"):
+        return default
+    return s
 
 
 class Button:
@@ -207,8 +282,134 @@ class Button:
             bg, fg, border = (241, 245, 249), C_MUTED, C_BORDER
         pygame.draw.rect(surface, bg, self.rect, border_radius=4)
         pygame.draw.rect(surface, border, self.rect, 1, border_radius=4)
-        text = FONT_SMALL.render(self.label, True, fg)
-        surface.blit(text, text.get_rect(center=self.rect.center))
+        draw_fitted_text(surface, self.label, FONT_SMALL, fg, self.rect)
+
+
+class Dropdown:
+    """Traditional dropdown: click trigger to open a list, pick one option."""
+
+    ITEM_H = 28
+
+    def __init__(
+        self,
+        rect,
+        options: list[tuple[str, str]],
+        selected: str = "",
+        *,
+        label: str = "",
+        dropdown_id: str = "",
+        max_visible: int = 10,
+    ):
+        self.rect = pygame.Rect(rect)
+        self.options = list(options)
+        self.selected = selected or (options[0][0] if options else "")
+        self.label = label
+        self.dropdown_id = dropdown_id
+        self.open = False
+        self.enabled = True
+        self.max_visible = max_visible
+
+    def set_options(self, options: list[tuple[str, str]], *, keep_selection: bool = True) -> None:
+        self.options = list(options)
+        values = {v for v, _ in self.options}
+        if not keep_selection or self.selected not in values:
+            self.selected = self.options[0][0] if self.options else ""
+
+    def selected_label(self) -> str:
+        for value, text in self.options:
+            if value == self.selected:
+                return text
+        return self.selected
+
+    def trigger_label(self) -> str:
+        text = self.selected_label()
+        if self.label:
+            return f"{self.label}  {text}"
+        return text
+
+    def _draw_chevron(self, surface, fg) -> None:
+        cx = self.rect.right - 14
+        cy = self.rect.centery
+        half = 4
+        if self.open:
+            pts = [(cx - half, cy + 2), (cx + half, cy + 2), (cx, cy - 3)]
+        else:
+            pts = [(cx - half, cy - 2), (cx + half, cy - 2), (cx, cy + 3)]
+        pygame.draw.polygon(surface, fg, pts)
+
+    def menu_rect(self) -> pygame.Rect:
+        count = min(len(self.options), self.max_visible)
+        return pygame.Rect(self.rect.x, self.rect.bottom + 2, self.rect.width, count * self.ITEM_H + 4)
+
+    def contains_trigger(self, pos) -> bool:
+        return self.enabled and self.rect.collidepoint(pos)
+
+    def hit_test(self, pos):
+        """Return 'trigger', ('pick', value), 'outside', or None."""
+        if not self.enabled:
+            return None
+        if self.open:
+            menu = self.menu_rect()
+            if menu.collidepoint(pos):
+                idx = int((pos[1] - menu.y - 2) // self.ITEM_H)
+                if 0 <= idx < len(self.options):
+                    return ("pick", self.options[idx][0])
+                return "outside"
+            if self.rect.collidepoint(pos):
+                return "trigger"
+            return "outside"
+        if self.rect.collidepoint(pos):
+            return "trigger"
+        return None
+
+    def draw(self, surface, mouse_pos, *, on_dark: bool = False, draw_menu: bool = True):
+        init_fonts()
+        hover = self.enabled and self.rect.collidepoint(mouse_pos)
+        if on_dark:
+            bg = C_SIDEBAR_HOVER if hover or self.open else C_SIDEBAR_DARK
+            fg = C_SIDEBAR_TEXT
+            border = C_SIDEBAR_ACTIVE if self.open else C_SIDEBAR_HOVER
+        else:
+            bg = C_ACCENT_LIGHT if hover or self.open else (255, 255, 255)
+            fg = C_ACCENT if hover or self.open else C_TEXT
+            border = C_ACCENT if self.open else C_BORDER
+        if not self.enabled:
+            bg, fg, border = (241, 245, 249), C_MUTED, C_BORDER
+        pygame.draw.rect(surface, bg, self.rect, border_radius=6)
+        pygame.draw.rect(surface, border, self.rect, 1, border_radius=6)
+        label_surf = FONT_SMALL.render(self.trigger_label(), True, fg)
+        clip = label_surf.get_rect(centery=self.rect.centery)
+        clip.x = self.rect.x + 8
+        clip.width = self.rect.width - 28
+        surface.set_clip(clip)
+        surface.blit(label_surf, (self.rect.x + 8, self.rect.centery - label_surf.get_height() // 2))
+        surface.set_clip(None)
+        self._draw_chevron(surface, fg)
+
+        if draw_menu and self.open and self.options:
+            self.draw_menu(surface, mouse_pos)
+
+    def draw_menu(self, surface, mouse_pos):
+        init_fonts()
+        if not self.open or not self.options:
+            return
+        menu = self.menu_rect()
+        pygame.draw.rect(surface, (255, 255, 255), menu, border_radius=6)
+        pygame.draw.rect(surface, C_ACCENT, menu, 2, border_radius=6)
+        shadow = menu.copy()
+        shadow.y += 1
+        pygame.draw.rect(surface, (226, 232, 240), shadow, border_radius=6)
+        pygame.draw.rect(surface, (255, 255, 255), menu, border_radius=6)
+        pygame.draw.rect(surface, C_ACCENT, menu, 2, border_radius=6)
+        for i, (value, text) in enumerate(self.options[: self.max_visible]):
+            row = pygame.Rect(menu.x + 2, menu.y + 2 + i * self.ITEM_H, menu.width - 4, self.ITEM_H)
+            active = value == self.selected
+            if row.collidepoint(mouse_pos):
+                pygame.draw.rect(surface, C_ACCENT_LIGHT, row, border_radius=4)
+            elif active:
+                pygame.draw.rect(surface, (241, 245, 249), row, border_radius=4)
+            color = C_ACCENT if active else C_TEXT
+            surface.blit(FONT_SMALL.render(text, True, color), (row.x + 8, row.y + 6))
 
 
 class InputBox:
@@ -487,3 +688,64 @@ def draw_sidebar_header(surface, title, subtitle=None):
     surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (16, 12))
     if subtitle:
         surface.blit(FONT_SMALL.render(subtitle, True, C_SIDEBAR_MUTED), (16, 36))
+
+
+def draw_discontinued_badge(
+    surface,
+    anchor: pygame.Rect,
+    *,
+    align: str = "topright",
+    label: str = DISCONTINUED_LABEL,
+) -> pygame.Rect:
+    """醒目「停产」角标，用于卡片/画布/侧栏。"""
+    init_fonts()
+    text_surf = FONT_MARK.render(label, True, (255, 255, 255))
+    pad_x, pad_y = 5, 2
+    badge = pygame.Rect(0, 0, text_surf.get_width() + pad_x * 2, text_surf.get_height() + pad_y * 2)
+    if align == "topright":
+        badge.topright = anchor.topright
+    elif align == "topleft":
+        badge.topleft = anchor.topleft
+    elif align == "center":
+        badge.center = anchor.center
+    else:
+        badge.topright = anchor.topright
+    badge.inflate_ip(0, 0)
+    pygame.draw.rect(surface, C_DISCONTINUED, badge, border_radius=4)
+    surface.blit(text_surf, text_surf.get_rect(center=badge.center))
+    return badge
+
+
+def draw_discontinued_card_stripe(surface, rect: pygame.Rect, *, radius: int = 8) -> None:
+    """卡片左侧停产色条 + 浅底，与正常产品一眼可辨。"""
+    tint = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    tint.fill((*C_DISCONTINUED_BG, 120))
+    surface.blit(tint, rect.topleft)
+    stripe = pygame.Rect(rect.x, rect.y, 5, rect.height)
+    pygame.draw.rect(surface, C_DISCONTINUED, stripe, border_radius=max(2, radius // 2))
+    pygame.draw.rect(surface, C_DISCONTINUED_BORDER, rect, 2, border_radius=radius)
+
+
+def draw_discontinued_canvas_mark(
+    surface,
+    cx: float,
+    top_y: float,
+    *,
+    span_px: float = 80,
+) -> None:
+    """布局画布上家具顶部的停产标记。"""
+    init_fonts()
+    label = DISCONTINUED_LABEL
+    scale = max(0.65, min(1.15, span_px / 100.0))
+    font_size = max(10, int(12 * scale))
+    try:
+        font = pygame.font.SysFont(FONT_CANDIDATES[0], font_size, bold=True)
+    except Exception:
+        font = FONT_MARK
+    text = font.render(label, True, (255, 255, 255))
+    pad_x, pad_y = max(4, int(6 * scale)), max(2, int(3 * scale))
+    badge = pygame.Rect(0, 0, text.get_width() + pad_x * 2, text.get_height() + pad_y * 2)
+    badge.midbottom = (int(cx), int(top_y) - 2)
+    pygame.draw.rect(surface, C_DISCONTINUED, badge, border_radius=5)
+    pygame.draw.rect(surface, C_DISCONTINUED_BORDER, badge, 2, border_radius=5)
+    surface.blit(text, text.get_rect(center=badge.center))

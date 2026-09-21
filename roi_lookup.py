@@ -1,4 +1,4 @@
-"""从 roi.xlsx 按 product_family 查询 ROI。"""
+"""从 roi.xlsx 或周销量 Excel 按 product_family 查询 ROI。"""
 from __future__ import annotations
 
 import os
@@ -87,10 +87,64 @@ def load_roi_map() -> dict[str, float]:
     return _roi_cache
 
 
-def lookup_roi(product_family: str) -> float:
+def lookup_roi(product_family: str, shop_id: str | None = None) -> float:
     if not product_family:
         return 0.0
-    return load_roi_map().get(_normalize_key(product_family), 0.0)
+
+    try:
+        from sales_lookup import resolve_product_family
+
+        family = resolve_product_family(product_family, shop_id=shop_id)
+    except Exception:
+        family = product_family
+
+    roi_map = load_roi_map()
+    static = roi_map.get(_normalize_key(family), 0.0)
+    if static <= 0:
+        static = roi_map.get(_normalize_key(product_family), 0.0)
+    if static > 0:
+        return static
+
+    try:
+        from sales_lookup import lookup_sales_roi, lookup_sales_roi_by_sku, sales_data_available
+
+        if not sales_data_available():
+            return 0.0
+        roi = lookup_sales_roi(family, shop_id)
+        if roi > 0:
+            return roi
+        if family != product_family:
+            roi = lookup_sales_roi(product_family, shop_id)
+            if roi > 0:
+                return roi
+        roi = lookup_sales_roi_by_sku(product_family, shop_id)
+        if roi > 0:
+            return roi
+        if family != product_family:
+            return lookup_sales_roi_by_sku(family, shop_id)
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def resolve_furniture_roi(
+    name: str,
+    product_family: str = "",
+    shop_id: str | None = None,
+) -> tuple[str, float]:
+    """解析 SKU/系列并返回 (product_family, roi)。"""
+    raw = (product_family or name or "").strip()
+    try:
+        from sales_lookup import resolve_product_family
+
+        family = resolve_product_family(raw, shop_id=shop_id) or raw
+    except Exception:
+        family = raw
+    roi = lookup_roi(family, shop_id)
+    if roi <= 0 and raw and _normalize_key(raw) != _normalize_key(family):
+        roi = lookup_roi(raw, shop_id)
+    return family, roi
 
 
 def reload_roi_map() -> dict[str, float]:

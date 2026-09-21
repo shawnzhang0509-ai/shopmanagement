@@ -1,0 +1,36 @@
+{
+  "id": "ca",
+  "label": "加拿大",
+  "default_sql_folder": "sql/ca",
+  "default_output_folder": "data/ca",
+  "image_base_url": "https://ierpapi.ifurniture.ca/",
+  "display_location_patterns": ["display"],
+  "storage_location_patterns": ["storage"],
+  "shops": [
+    {"id": "all", "label": "全部", "patterns": []},
+    {"id": "toronto", "label": "Toronto", "patterns": ["toronto", "mississauga", "scarborough"]},
+    {"id": "vancouver", "label": "Vancouver", "patterns": ["vancouver", "burnaby", "richmond"]},
+    {"id": "calgary", "label": "Calgary", "patterns": ["calgary"]},
+    {"id": "montreal", "label": "Montreal", "patterns": ["montreal", "montréal"]},
+    {"id": "other", "label": "其他", "patterns": []}
+  ],
+  "store_entries": [
+    {"name": "Toronto店", "slug": "toronto", "shop_id": "toronto"},
+    {"name": "Vancouver店", "slug": "vancouver", "shop_id": "vancouver"},
+    {"name": "Calgary店", "slug": "calgary", "shop_id": "calgary"},
+    {"name": "Montreal店", "slug": "montreal", "shop_id": "montreal"}
+  ],
+  "layout_stores": [
+    ["Toronto店", "toronto"],
+    ["Vancouver店", "vancouver"],
+    ["Calgary店", "calgary"],
+    ["Montreal店", "montreal"]
+  ],
+  "layout_slug_to_sales_shop": {
+    "toronto": "toronto",
+    "vancouver": "vancouver",
+    "calgary": "calgary",
+    "montreal": "montreal"
+  },
+  "catalog_layout_specs": {}
+}
