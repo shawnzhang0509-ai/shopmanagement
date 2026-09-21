@@ -134,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.6"
+APP_VERSION = "2.1.7"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -589,7 +589,7 @@ def set_furniture_selection(items, *, toast_msg: str | None = None) -> None:
     elif len(selected_furnitures) == 1:
         show_toast(f"选中家具: {selected_furnitures[0].name}")
     elif len(selected_furnitures) > 1:
-        show_toast(f"已选 {len(selected_furnitures)} 件家具（可批量拖动）")
+        show_toast(f"已选 {len(selected_furnitures)} 件家具（可批量拖动/旋转）")
 
 
 def toggle_furniture_selection(furn) -> None:
@@ -6144,10 +6144,18 @@ def rotate_selected(direction):
         kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
         show_toast(f"{kind_label} 旋转至 {marker['rotation']:.0f}°（{rotation_mode_label()}）")
         return
-    if selected_feature:
+    if selected_furnitures:
         push_undo()
-        selected_feature.rotate_by(step)
-        show_toast(f"旋转至 {selected_feature.rotation:.0f}°（{rotation_mode_label()}）")
+        for furn in selected_furnitures:
+            furn.rotate_by(step)
+        if len(selected_furnitures) == 1:
+            show_toast(
+                f"旋转至 {selected_furnitures[0].rotation:.0f}°（{rotation_mode_label()}）"
+            )
+        else:
+            show_toast(
+                f"已旋转 {len(selected_furnitures)} 件家具（{rotation_mode_label()}）"
+            )
         return
     if selected_collisions:
         push_undo()
