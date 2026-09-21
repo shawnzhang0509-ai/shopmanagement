@@ -1,8 +1,8 @@
-"""周销量数据层：grab_sales.bat → data/weekly_sales.xlsx → ROI / 坪效分析。
+"""周销量数据层：grab_sales.bat → data/{region}/weekly_sales.xlsx → ROI / 坪效分析。
 
-与 display_lookup（Display 库存）分离：
-  grab_display.bat  → sql/display.sql      → data/display.xlsx
-  grab_sales.bat    → sql/weekly_sales.sql  → data/weekly_sales.xlsx
+与 display_lookup（Display 库存）分离；路径由 grabber_config active_region + regions.* 决定：
+  grab_display.bat  → sql/{region}/display.sql       → data/{region}/display.xlsx
+  grab_sales.bat    → sql/{region}/weekly_sales.sql  → data/{region}/weekly_sales.xlsx
 """
 from __future__ import annotations
 
@@ -18,9 +18,43 @@ DEFAULT_EXCEL = weekly_sales_excel_path()
 
 
 def resolve_weekly_sales_path(path: str | None = None) -> str:
-    return path or weekly_sales_excel_path(load_grabber_config())
-SALES_SQL = os.path.join(SCRIPT_DIR, "sql", "weekly_sales.sql")
+    """当前区域的周销量 Excel（仅 data/{region}/weekly_sales.xlsx，不读 legacy data/）。"""
+    if path:
+        return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
+    return weekly_sales_excel_path(load_grabber_config())
 
+
+def _read_weekly_sales_file(path: str) -> list[WeeklySalesRow]:
+    try:
+        try:
+            import pandas as pd  # noqa: F401
+
+            rows = _rows_from_pandas(path)
+        except ImportError:
+            rows = _rows_from_openpyxl(path)
+        if not rows:
+            rows = _rows_from_openpyxl(path)
+    except Exception as exc:
+        print(f"读取周销量表失败 ({path}): {exc}")
+        return []
+    return rows
+
+
+def count_shop_rows(shop_id: str | None) -> int:
+    if not shop_id or shop_id in ("all", ""):
+        return len(load_weekly_sales())
+    return sum(1 for row in load_weekly_sales() if row.shop_id == shop_id)
+
+
+def sample_branch_names(limit: int = 8) -> list[str]:
+    seen: list[str] = []
+    for row in load_weekly_sales():
+        name = str(row.branch_name or "").strip()
+        if name and name not in seen:
+            seen.append(name)
+        if len(seen) >= limit:
+            break
+    return seen
 _sales_cache: list["WeeklySalesRow"] | None = None
 _family_totals_cache: dict[tuple[str | None, str], dict[str, float]] = {}
 _sku_totals_cache: dict[tuple[str | None, str], dict[str, float]] = {}
@@ -164,25 +198,14 @@ def load_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
     if _sales_cache is not None and path is None:
         return _sales_cache
 
-    path = resolve_weekly_sales_path(path)
-    if not os.path.isfile(path):
-        _sales_cache = []
-        return _sales_cache
+    excel_path = resolve_weekly_sales_path(path)
+    if not os.path.isfile(excel_path):
+        if path is None:
+            _sales_cache = []
+        return []
 
-    try:
-        try:
-            import pandas as pd  # noqa: F401
-
-            rows = _rows_from_pandas(path)
-        except ImportError:
-            rows = _rows_from_openpyxl(path)
-        if not rows:
-            rows = _rows_from_openpyxl(path)
-    except Exception as exc:
-        print(f"读取周销量表失败: {exc}")
-        rows = []
-
-    if path is None or path == DEFAULT_EXCEL:
+    rows = _read_weekly_sales_file(excel_path)
+    if path is None or os.path.abspath(excel_path) == os.path.abspath(DEFAULT_EXCEL):
         _sales_cache = rows
     return rows
 

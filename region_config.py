@@ -16,7 +16,7 @@ _FALLBACK_NZ_SHOPS: list[dict[str, Any]] = [
     {"id": "onehunga", "label": "Onehunga", "patterns": ["onehunga"]},
     {"id": "westgate", "label": "Westgate", "patterns": ["westgate"]},
     {"id": "hamilton", "label": "Hamilton", "patterns": ["hamilton"]},
-    {"id": "chch", "label": "Christchurch", "patterns": ["chch", "christchurch", "colombo", "bleiham"]},
+    {"id": "chch", "label": "Christchurch", "patterns": ["chch", "chc", "christchurch", "christ church", "colombo", "bleiham", "hornby", "riccarton"]},
     {"id": "carbine", "label": "Carbine Rd", "patterns": ["carbine"]},
     {"id": "other", "label": "其他", "patterns": []},
 ]
@@ -87,7 +87,7 @@ def default_output_folder(region_id: str) -> str:
 
 
 def legacy_data_paths() -> list[str]:
-    """旧版扁平 data/ 目录，读取时兜底。"""
+    """迁移工具用：旧版扁平 data/ 与区域目录。"""
     return [
         os.path.join(SCRIPT_DIR, "data"),
         os.path.join(SCRIPT_DIR, "data", "nz"),
@@ -95,6 +95,7 @@ def legacy_data_paths() -> list[str]:
 
 
 def legacy_display_excel_candidates() -> list[str]:
+    """迁移工具用；运行时读取请用 display_excel_path()。"""
     paths = [
         os.path.join(SCRIPT_DIR, "data", "display.xlsx"),
         os.path.join(SCRIPT_DIR, "data", "nz", "display.xlsx"),

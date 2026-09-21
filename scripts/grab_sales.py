@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""周销量抓取：读 sql/weekly_sales.sql + grabber_config.json → data/weekly_sales.xlsx
+"""周销量抓取：读 sql/{region}/weekly_sales.sql → data/{region}/weekly_sales.xlsx
 
-与 grab_display 共用数据库连接，但输出独立 Excel，供 ROI / 坪效使用。
+与 grab_display 共用 grabber_config.json 的 active_region，供 ROI / 坪效使用。
 """
 from __future__ import annotations
 
@@ -31,25 +31,28 @@ def main() -> int:
     base = load_grabber_config()
     if args.region:
         base = {**base, "active_region": args.region}
-    cfg = sales_runtime_config(base)
     region = get_active_region(base)
+    runtime = sales_runtime_config(base)
 
     print("=" * 50)
-    print(f"周销量数据抓取 — {cfg.get('_region_label', region)}")
+    print(f"周销量数据抓取 — {runtime.get('_region_label', region)}")
     print("=" * 50)
     print(f"目录: {os.getcwd()}")
-    print(f"区域: {region} → {cfg.get('output_excel')}\n")
+    print(f"区域: {region}")
+    print(f"SQL : {runtime.get('sql_file')}")
+    print(f"输出: {runtime.get('output_excel')}\n")
 
     try:
-        rows, excel_path = grab_sql_to_excel(cfg)
+        rows, excel_path = grab_sql_to_excel(base, sales=True)
     except Exception as exc:
         print(f"抓取失败: {exc}")
         if last_load_error():
             print(last_load_error())
         print("\n请检查:")
-        print("  1. grabber_config.json 中 database_url 是否正确")
-        print("  2. sql/weekly_sales.sql 表名/列名是否与线上一致")
-        print("  3. pip install sqlalchemy pymssql openpyxl pandas")
+        print("  1. grabber_config.json → regions.{region}.database_url")
+        print(f"  2. sql/{region}/weekly_sales.sql 是否存在且与线上一致")
+        print(f"  3. 输出目录 data/{region}/ 可写")
+        print("  4. pip install sqlalchemy pymssql openpyxl pandas")
         return 1
 
     reload_weekly_sales(excel_path)

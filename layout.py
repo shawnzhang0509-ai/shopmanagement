@@ -134,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.4"
+APP_VERSION = "2.1.9"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -183,6 +183,9 @@ WALL_MIN_LENGTH_MM = 200
 EVENT_HOME_DEFERRED = pygame.USEREVENT + 1
 EVENT_STORE_BOOT = pygame.USEREVENT + 2
 _boot_store_pending: str | None = None
+_boot_store_defer_until_ms = 0
+_catalog_refresh_start_ms = 0
+_catalog_refresh_started = False
 _heatmap_lazy_until_ms = 0
 _active_layout_region: str = "nz"
 _region_tab_rects: dict[str, pygame.Rect] = {}
@@ -349,6 +352,7 @@ store_height_mm = int(DEFAULT_STORE_HEIGHT_M * 1000)
 startup_active = True
 store_name = "新门店"
 current_layout_path = None
+_layout_store_slug: str | None = None
 store_picker_active = False
 startup_buttons = None
 renaming_store = False
@@ -586,7 +590,7 @@ def set_furniture_selection(items, *, toast_msg: str | None = None) -> None:
     elif len(selected_furnitures) == 1:
         show_toast(f"选中家具: {selected_furnitures[0].name}")
     elif len(selected_furnitures) > 1:
-        show_toast(f"已选 {len(selected_furnitures)} 件家具（可批量拖动）")
+        show_toast(f"已选 {len(selected_furnitures)} 件家具（可批量拖动/旋转）")
 
 
 def toggle_furniture_selection(furn) -> None:
@@ -660,6 +664,51 @@ def align_selected_furniture(mode: str) -> None:
         show_toast(f"已{labels[mode]}（{moved} 件）")
     else:
         show_toast("已在同一条对齐线上")
+
+
+def distribute_selected_furniture(axis: str) -> None:
+    """多选家具在组外框内等间距分布：h=横向（按左右边界留 equal gap），v=竖向。"""
+    if len(selected_furnitures) < 3:
+        show_toast("平均分布需要至少 3 件家具")
+        return
+    if axis not in ("h", "v"):
+        return
+    push_undo()
+    pairs = [(furn, furniture_world_bbox(furn)) for furn in selected_furnitures]
+    if axis == "h":
+        pairs.sort(key=lambda t: (t[1][0] + t[1][2]) * 0.5)
+        group_min = min(b[0] for _, b in pairs)
+        group_max = max(b[2] for _, b in pairs)
+        total_size = sum(b[2] - b[0] for _, b in pairs)
+        span = group_max - group_min
+        gap = (span - total_size) / (len(pairs) - 1) if len(pairs) > 1 else 0.0
+        cursor = group_min
+        moved = 0
+        for furn, (xmin, ymin, xmax, ymax) in pairs:
+            w = xmax - xmin
+            dx = cursor - xmin
+            if abs(dx) > 1e-6:
+                furn.x += dx
+                moved += 1
+            cursor += w + gap
+        show_toast(f"已横向均分（{moved or len(pairs)} 件）" if moved else "横向间距已均匀")
+    else:
+        pairs.sort(key=lambda t: (t[1][1] + t[1][3]) * 0.5)
+        group_min = min(b[1] for _, b in pairs)
+        group_max = max(b[3] for _, b in pairs)
+        total_size = sum(b[3] - b[1] for _, b in pairs)
+        span = group_max - group_min
+        gap = (span - total_size) / (len(pairs) - 1) if len(pairs) > 1 else 0.0
+        cursor = group_min
+        moved = 0
+        for furn, (xmin, ymin, xmax, ymax) in pairs:
+            h = ymax - ymin
+            dy = cursor - ymin
+            if abs(dy) > 1e-6:
+                furn.y += dy
+                moved += 1
+            cursor += h + gap
+        show_toast(f"已竖向均分（{moved or len(pairs)} 件）" if moved else "竖向间距已均匀")
 
 
 def build_furniture_drag_snapshot(primary) -> list[tuple[object, float, float]]:
@@ -2049,6 +2098,8 @@ def roi_to_color(roi):
 
 
 def current_store_slug() -> str | None:
+    if _layout_store_slug:
+        return _layout_store_slug
     if current_layout_path:
         return catalog_slug_for_path(current_layout_path)
     return None
@@ -2173,7 +2224,18 @@ def heatmap_period_title() -> str:
     slug = current_sales_shop_id()
     if heatmap_week_mode == "range":
         if not keys:
-            return f"周均 · 近 {heatmap_week_count} 周（无数据）"
+            from sales_lookup import count_shop_rows, resolve_weekly_sales_path, sample_branch_names
+
+            shop_label = sales_shop_display_label()
+            rel = os.path.relpath(resolve_weekly_sales_path(), SCRIPT_DIR)
+            if not sales_data_ready():
+                return f"周均 · 近 {heatmap_week_count} 周（未找到 {rel}，请 grab_sales）"
+            if slug and count_shop_rows(slug) == 0:
+                branches = "、".join(sample_branch_names(5)) or "（表内 BranchName 为空）"
+                return (
+                    f"周均 · 近 {heatmap_week_count} 周（{shop_label}/{slug} 无匹配 Branch：{branches}…）"
+                )
+            return f"周均 · 近 {heatmap_week_count} 周（{shop_label} 无有效周次，请检查 YearWeekPeriod 列）"
         if len(keys) == 1:
             return f"周均 · {week_period_display(slug, keys[0])}"
         return f"周均 · 近 {len(keys)} 周 · {keys[0]} … {keys[-1]}"
@@ -3827,31 +3889,41 @@ def check_collision(furniture, obstacles):
     return False
 
 
-def load_furniture_templates(json_path):
+def load_furniture_templates(json_path, *, fast=False):
     if not os.path.isfile(json_path):
         raise FileNotFoundError(f"找不到 {json_path}，请确认在项目目录下运行")
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     templates = []
-    display_items = _load_display_items_cache()
+    display_items = None if fast else _load_display_items_cache()
     for item in data:
         points = shape_to_points(item)
         if points:
-            family = resolve_template_product_family(item, display_items)
+            tpl_id = sanitize_display_text(item.get("id", "unnamed"), "unnamed")
+            if fast:
+                stored = sanitize_display_text(item.get("product_family"), "")
+                if stored and not family_is_placeholder(stored, tpl_id):
+                    family = stored
+                else:
+                    family = ""
+                discontinued = bool(item.get("is_discontinued", False))
+            else:
+                family = resolve_template_product_family(item, display_items)
+                discontinued = _resolve_furniture_discontinued(
+                    item.get("id", "unnamed"),
+                    item.get("is_discontinued"),
+                )
             if "roi" in item:
                 roi = float(item.get("roi") or 0)
             else:
-                roi = lookup_roi(family)
+                roi = lookup_roi(family) if family else 0.0
             templates.append(
                 Furniture(
                     item.get("id", "unnamed"),
                     roi,
                     points,
                     product_family=family,
-                    is_discontinued=_resolve_furniture_discontinued(
-                        item.get("id", "unnamed"),
-                        item.get("is_discontinued"),
-                    ),
+                    is_discontinued=discontinued,
                 )
             )
     if not templates:
@@ -4120,11 +4192,34 @@ def catalog_slug_for_path(path):
     return None
 
 
+def _layout_relative_path(path: str) -> str | None:
+    if not path:
+        return None
+    try:
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(LAYOUTS_DIR))
+        if rel.startswith(".."):
+            return None
+        return rel.replace("\\", "/")
+    except ValueError:
+        return None
+
+
+def _resolve_layout_path(stored: str) -> str | None:
+    if not stored:
+        return None
+    if os.path.isabs(stored):
+        return stored if os.path.isfile(stored) else None
+    path = os.path.join(LAYOUTS_DIR, stored.replace("/", os.sep))
+    return path if os.path.isfile(path) else None
+
+
 def remember_last_store(path):
     if not path:
         return
     try:
-        payload = {"path": path, "slug": catalog_slug_for_path(path)}
+        rel = _layout_relative_path(path)
+        payload = {"slug": catalog_slug_for_path(path)}
+        payload["path"] = rel if rel else path
         with open(LAST_STORE_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
             f.flush()
@@ -4139,6 +4234,9 @@ def load_last_store_path():
     try:
         with open(LAST_STORE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+        path = _resolve_layout_path(data.get("path") or "")
+        if path:
+            return path
         path = data.get("path")
         if path and os.path.isfile(path):
             return path
@@ -4315,6 +4413,23 @@ def build_layout_data(filepath):
 
 def write_layout_data(filepath, data):
     ensure_layouts_dir()
+    new_f = len(data.get("furnitures") or [])
+    new_o = len(data.get("obstacles") or [])
+    if new_f == 0 and new_o == 0 and os.path.isfile(filepath):
+        try:
+            if os.path.getsize(filepath) > 1200:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+                old_f = len(old.get("furnitures") or [])
+                old_o = len(old.get("obstacles") or [])
+                if old_f > 0 or old_o > 0:
+                    print(
+                        f"拒绝用空布局覆盖已有门店文件（原 {old_f} 件家具 / {old_o} 个障碍）: {filepath}"
+                    )
+                    show_toast("未保存：当前为空布局，未覆盖磁盘上已有内容")
+                    return
+        except Exception:
+            pass
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
@@ -4433,7 +4548,7 @@ def _finish_boot_store_open(path: str) -> bool:
     global startup_active, startup_buttons, editor_buttons, input_box
     global sidebar_dropdowns, template_rows_top, template_rows_bottom, _boot_store_pending
     try:
-        switch_store_layout(path)
+        switch_store_layout(path, skip_flush_save=True)
         startup_active = False
         startup_buttons = None
         editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (
@@ -4455,11 +4570,12 @@ def load_layout(filepath, *, keep_undo=False):
     global placed_furnitures, collision_polygons, store_width_mm, store_height_mm
     global store_name, current_layout_path, layout_markers, selected_marker_index
     global heatmap_week_count, heatmap_week_mode, heatmap_week_index, heatmap_sales_level, _pending_heatmap_week
-    global _sales_shop_warned, walls_locked, canvas_display_mode
+    global _sales_shop_warned, walls_locked, canvas_display_mode, _layout_store_slug
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     store_name = data.get("name") or os.path.splitext(os.path.basename(filepath))[0]
     current_layout_path = filepath
+    _layout_store_slug = str(data.get("store_slug") or "").strip() or catalog_slug_for_path(filepath)
     store = data.get("store", {})
     store_width_mm = int(store.get("width_mm", store_width_mm))
     store_height_mm = int(store.get("height_mm", store_height_mm))
@@ -4493,7 +4609,7 @@ def load_layout(filepath, *, keep_undo=False):
             roi,
             f["points"],
             product_family=family,
-            is_discontinued=_resolve_furniture_discontinued(name, f.get("is_discontinued")),
+            is_discontinued=bool(f.get("is_discontinued", False)),
         )
         furniture.x = f.get("x", 0)
         furniture.y = f.get("y", 0)
@@ -4643,9 +4759,15 @@ def open_catalog_store(slug):
         create_store_layout(name, DEFAULT_STORE_WIDTH_M, DEFAULT_STORE_HEIGHT_M, filepath=path)
 
 
-def switch_store_layout(path):
-    flush_deferred_save(block=True)
-    if current_layout_path and os.path.isfile(current_layout_path):
+def switch_store_layout(path, *, skip_flush_save=False):
+    if not skip_flush_save:
+        flush_deferred_save(block=True)
+    if (
+        not skip_flush_save
+        and current_layout_path
+        and os.path.isfile(current_layout_path)
+        and os.path.abspath(current_layout_path) != os.path.abspath(path)
+    ):
         try:
             save_layout(current_layout_path)
         except Exception:
@@ -6037,10 +6159,18 @@ def rotate_selected(direction):
         kind_label = MARKER_KINDS.get(marker.get("kind"), "图标")
         show_toast(f"{kind_label} 旋转至 {marker['rotation']:.0f}°（{rotation_mode_label()}）")
         return
-    if selected_feature:
+    if selected_furnitures:
         push_undo()
-        selected_feature.rotate_by(step)
-        show_toast(f"旋转至 {selected_feature.rotation:.0f}°（{rotation_mode_label()}）")
+        for furn in selected_furnitures:
+            furn.rotate_by(step)
+        if len(selected_furnitures) == 1:
+            show_toast(
+                f"旋转至 {selected_furnitures[0].rotation:.0f}°（{rotation_mode_label()}）"
+            )
+        else:
+            show_toast(
+                f"已旋转 {len(selected_furnitures)} 件家具（{rotation_mode_label()}）"
+            )
         return
     if selected_collisions:
         push_undo()
@@ -6856,7 +6986,9 @@ def build_sidebar_ui():
     buttons["align_top"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 2, y, bw4, SIDEBAR_BTN_H - 2), "上对齐", "align_top")
     buttons["align_bottom"] = Button((pad + (bw4 + SIDEBAR_BTN_GAP) * 3, y, bw4, SIDEBAR_BTN_H - 2), "下对齐", "align_bottom")
     y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
-
+    buttons["distribute_h"] = Button((pad, y, bw2, SIDEBAR_BTN_H - 2), "横均分", "distribute_h")
+    buttons["distribute_v"] = Button((pad + bw2 + SIDEBAR_BTN_GAP, y, bw2, SIDEBAR_BTN_H - 2), "竖均分", "distribute_v")
+    y += SIDEBAR_BTN_H + SIDEBAR_BTN_GAP
 
     dropdowns: dict[str, Dropdown] = {}
 
@@ -7017,6 +7149,7 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
     core_keys = (
         "save", "undo", "refresh", "home", "tools_toggle",
         "align_left", "align_right", "align_top", "align_bottom",
+        "distribute_h", "distribute_v",
         "week_prev", "week_next", "walls_lock",
         "add", "resize", "rename", "delete",
     )
@@ -7250,6 +7383,10 @@ def handle_toolbar_click(action, buttons, dropdowns=None):
         align_selected_furniture("top")
     elif action == "align_bottom":
         align_selected_furniture("bottom")
+    elif action == "distribute_h":
+        distribute_selected_furniture("h")
+    elif action == "distribute_v":
+        distribute_selected_furniture("v")
     elif action == "roi_overlap":
         apply_roi_dropdown("on" if not show_roi_overlap_mode else "off", buttons, dropdowns)
     elif action == "week_prev":
@@ -7541,30 +7678,41 @@ def main():
     global dragging_wall_endpoint, wall_endpoint_snapshot, furniture_drag_snapshot
     global dragging_rotation, rotation_snapshots, rotation_pivot, rotation_start_pointer_angle
 
-    try:
-        furniture_templates = load_furniture_templates("furniture_templates.json")
-    except Exception as e:
-        messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
-        raise SystemExit(1) from e
-
     from display_lookup import load_grabber_config
     from region_config import get_active_region
 
     apply_layout_region(get_active_region(load_grabber_config()), persist=False)
     ensure_layouts_dir()
     init_display()
+
+    global _boot_store_pending, _boot_store_defer_until_ms, _catalog_refresh_start_ms, _catalog_refresh_started
+    screen.fill(C_BG)
+    boot_msg = FONT_TITLE.render("坪效布局编辑器", True, C_TEXT)
+    screen.blit(boot_msg, boot_msg.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 20)))
+    boot_hint = FONT_BODY.render("正在加载家具模板…", True, C_MUTED)
+    screen.blit(boot_hint, boot_hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 18)))
+    pygame.display.flip()
+
+    try:
+        furniture_templates = load_furniture_templates("furniture_templates.json", fast=True)
+    except Exception as e:
+        messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
+        raise SystemExit(1) from e
+
     print("坪效布局编辑器已启动。")
-    refresh_catalog_cache_async()
+    _catalog_refresh_start_ms = pygame.time.get_ticks() + 1200
+    _catalog_refresh_started = False
     threading.Thread(target=_startup_preload_worker, daemon=True).start()
 
-    global _boot_store_pending
     last_path = load_last_store_path()
     if last_path and os.path.isfile(last_path):
         _boot_store_pending = last_path
+        _boot_store_defer_until_ms = pygame.time.get_ticks() + 120
         startup_active = True
         print(f"将在窗口显示后打开: {os.path.basename(last_path)}")
     else:
         _boot_store_pending = None
+        _boot_store_defer_until_ms = 0
         startup_active = True
         print("请选择门店。")
 
@@ -7573,10 +7721,15 @@ def main():
     editor_buttons, input_box, sidebar_dropdowns, template_rows_top, template_rows_bottom = (None, None, {}, 0, 0)
     running = True
 
-    if _boot_store_pending:
-        pygame.event.post(pygame.event.Event(EVENT_STORE_BOOT))
-
     while running:
+        now_ms = pygame.time.get_ticks()
+        if _boot_store_pending and _boot_store_defer_until_ms and now_ms >= _boot_store_defer_until_ms:
+            _boot_store_defer_until_ms = 0
+            _finish_boot_store_open(_boot_store_pending)
+        if not _catalog_refresh_started and _catalog_refresh_start_ms and now_ms >= _catalog_refresh_start_ms:
+            _catalog_refresh_started = True
+            refresh_catalog_cache_async()
+
         mouse_pos = pygame.mouse.get_pos()
         pending_canvas_wheel = 0
         if not startup_active and editor_buttons is None:
@@ -7594,10 +7747,6 @@ def main():
 
             if event.type == EVENT_HOME_DEFERRED:
                 handle_home_deferred()
-                continue
-
-            if event.type == EVENT_STORE_BOOT and _boot_store_pending:
-                _finish_boot_store_open(_boot_store_pending)
                 continue
 
             if store_picker_active:
