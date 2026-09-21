@@ -1,6 +1,7 @@
 """多店汇总 / 系列对比 — 数据层。"""
 from __future__ import annotations
 
+import math
 import os
 
 from heatmap_metrics import _week_key
@@ -20,6 +21,12 @@ WEEK_OPTIONS: tuple[tuple[str, int], ...] = (
 
 FILTER_ALL = "all"
 FILTER_LAYOUT = "layout"
+
+# 系列跨店方差：均值过低时不判（避免小样本误报）
+MIN_FAMILY_MEAN_FOR_SPREAD = 800.0
+SPREAD_CV_ATTENTION = 0.55
+SPREAD_MIN_SHARE_OF_MEAN = 0.42
+SPREAD_MIN_MAX_RATIO = 2.0
 
 # 各店区分色（柱状图 / 图例）
 STORE_COLORS: tuple[tuple[int, int, int], ...] = (
@@ -49,8 +56,56 @@ class StoreOverview:
 class FamilyCompareRow:
     family: str
     by_store: dict[str, float] = field(default_factory=dict)
+    by_slug: dict[str, float] = field(default_factory=dict)
     total: float = 0.0
     on_layout: bool = False
+    spread_cv: float = 0.0
+    min_shop_id: str = ""
+    min_slug: str = ""
+    min_store_name: str = ""
+    min_amount: float = 0.0
+    max_amount: float = 0.0
+    attention: bool = False
+
+
+def _selected_entries(selected_slugs: set[str] | None) -> list[dict[str, str]]:
+    slug_set = selected_slugs or {e["slug"] for e in STORE_ENTRIES}
+    return [e for e in STORE_ENTRIES if e["slug"] in slug_set]
+
+
+def analyze_family_spread(
+    entries: list[dict[str, str]],
+    by_store: dict[str, float],
+) -> tuple[float, str, str, str, float, float, bool]:
+    """跨店离散度：变异系数 CV；attention=方差大且明显垫店。"""
+    if len(entries) < 2:
+        return 0.0, "", "", "", 0.0, 0.0, False
+    amounts = [float(by_store.get(e["shop_id"], 0.0)) for e in entries]
+    mean = sum(amounts) / len(amounts)
+    if mean < MIN_FAMILY_MEAN_FOR_SPREAD:
+        return 0.0, "", "", "", min(amounts), max(amounts), False
+    variance = sum((a - mean) ** 2 for a in amounts) / len(amounts)
+    stdev = math.sqrt(variance)
+    cv = stdev / mean if mean > 0 else 0.0
+    min_a = min(amounts)
+    max_a = max(amounts)
+    min_i = amounts.index(min_a)
+    min_e = entries[min_i]
+    attention = (
+        cv >= SPREAD_CV_ATTENTION
+        and min_a <= SPREAD_MIN_SHARE_OF_MEAN * mean
+        and max_a >= min_a * SPREAD_MIN_MAX_RATIO
+        and min_a < max_a
+    )
+    return (
+        cv,
+        min_e["shop_id"],
+        min_e["slug"],
+        min_e["name"],
+        min_a,
+        max_a,
+        attention,
+    )
 
 
 def list_recent_week_keys_global(num_weeks: int = 4) -> list[str]:
@@ -186,16 +241,29 @@ def aggregate_family_comparison(
         matrix.setdefault(fkey, {})
         matrix[fkey][row.shop_id] = matrix[fkey].get(row.shop_id, 0.0) + row.total_amount
 
+    entries = _selected_entries(slug_set)
     rows: list[FamilyCompareRow] = []
     for fkey, stores in matrix.items():
         display = fam_labels.get(fkey, fkey)
         total = sum(stores.values())
+        by_slug = {e["slug"]: float(stores.get(e["shop_id"], 0.0)) for e in entries}
+        cv, min_sid, min_slug, min_name, min_amt, max_amt, attention = analyze_family_spread(
+            entries, stores
+        )
         rows.append(
             FamilyCompareRow(
                 family=display,
                 by_store=dict(stores),
+                by_slug=by_slug,
                 total=total,
                 on_layout=fkey in layout_family_keys,
+                spread_cv=cv,
+                min_shop_id=min_sid,
+                min_slug=min_slug,
+                min_store_name=min_name,
+                min_amount=min_amt,
+                max_amount=max_amt,
+                attention=attention,
             )
         )
 
@@ -225,3 +293,13 @@ def entries_for_ui() -> list[dict[str, str]]:
 
 def slug_to_entry() -> dict[str, dict[str, str]]:
     return {e["slug"]: e for e in STORE_ENTRIES}
+
+
+def count_attention_families(rows: list[FamilyCompareRow]) -> int:
+    return sum(1 for r in rows if r.attention)
+
+
+def filter_attention_rows(rows: list[FamilyCompareRow]) -> list[FamilyCompareRow]:
+    out = [r for r in rows if r.attention]
+    out.sort(key=lambda r: (-r.spread_cv, -r.total, r.family.lower()))
+    return out
