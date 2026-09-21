@@ -150,8 +150,9 @@ class DisplayGrabberApp:
         ttk.Button(out_btns, text="打开", command=self._open_output).pack(side="left", padx=(4, 0))
 
         hint = (
-            "结构示例：sql/nz/display.sql → data/nz/display.xlsx；"
-            "布局在 data/nz/layouts/。旧版 data/display.xlsx 仍可读取。"
+            "结构：sql/{region}/display.sql → data/{region}/display.xlsx；"
+            "周销量 → data/{region}/weekly_sales.xlsx；布局 → data/{region}/layouts/。"
+            "程序只认区域目录，请把旧 data/*.xlsx 移到 data/nz/ 等再抓取。"
         )
         ttk.Label(cfg_frame, text=hint, foreground=MUTED, wraplength=760).grid(
             row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4)

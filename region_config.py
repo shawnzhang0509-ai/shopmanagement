@@ -87,7 +87,7 @@ def default_output_folder(region_id: str) -> str:
 
 
 def legacy_data_paths() -> list[str]:
-    """旧版扁平 data/ 目录，读取时兜底。"""
+    """迁移工具用：旧版扁平 data/ 与区域目录。"""
     return [
         os.path.join(SCRIPT_DIR, "data"),
         os.path.join(SCRIPT_DIR, "data", "nz"),
@@ -95,6 +95,7 @@ def legacy_data_paths() -> list[str]:
 
 
 def legacy_display_excel_candidates() -> list[str]:
+    """迁移工具用；运行时读取请用 display_excel_path()。"""
     paths = [
         os.path.join(SCRIPT_DIR, "data", "display.xlsx"),
         os.path.join(SCRIPT_DIR, "data", "nz", "display.xlsx"),

@@ -939,25 +939,9 @@ def build_runtime_config(cfg: dict | None = None) -> dict:
 
 
 def resolve_display_excel_paths() -> list[str]:
+    """仅当前区域 data/{region}/display.xlsx（不读 legacy data/display.xlsx）。"""
     cfg = load_grabber_config()
-    paths: list[str] = []
-    paths.append(display_excel_path(cfg))
-    runtime = build_runtime_config(cfg)
-    if runtime.get("output_excel"):
-        rt_path = _resolve_path(runtime["output_excel"])
-        if rt_path not in paths:
-            paths.append(rt_path)
-    for legacy_path in legacy_display_excel_candidates():
-        if legacy_path not in paths:
-            paths.append(legacy_path)
-    paths.extend([DEFAULT_EXCEL, LEGACY_EXCEL])
-    seen: set[str] = set()
-    out: list[str] = []
-    for p in paths:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
+    return [display_excel_path(cfg)]
 
 
 def resolve_cache_path() -> str:
@@ -1301,9 +1285,9 @@ def write_rows_to_excel(rows: list[dict], path: str) -> None:
     wb.save(path)
 
 
-def grab_sql_to_excel(cfg: dict | None = None) -> tuple[list[dict], str]:
-    """通用抓取：cfg 指定 sql_file + output_excel，写入 Excel 并返回原始行。"""
-    runtime = build_runtime_config(cfg)
+def grab_sql_to_excel(cfg: dict | None = None, *, sales: bool = False) -> tuple[list[dict], str]:
+    """通用抓取：Display 或周销量（sales=True → sql/{region}/weekly_sales.sql → data/{region}/）。"""
+    runtime = sales_runtime_config(cfg) if sales else build_runtime_config(cfg)
     rows = _fetch_raw_rows(runtime, canonicalize=False)
     excel_path = runtime["output_excel"]
     write_rows_to_excel(rows, excel_path)
@@ -1370,9 +1354,8 @@ def sales_runtime_config(cfg: dict | None = None) -> dict:
 
 
 def grab_weekly_sales(cfg: dict | None = None) -> tuple[list[dict], str]:
-    """周销量抓取：SQL → data/weekly_sales.xlsx。"""
-    runtime = sales_runtime_config(cfg)
-    rows, excel_path = grab_sql_to_excel(runtime)
+    """周销量抓取：sql/{region}/weekly_sales.sql → data/{region}/weekly_sales.xlsx。"""
+    rows, excel_path = grab_sql_to_excel(cfg, sales=True)
     try:
         from sales_lookup import reload_weekly_sales
 

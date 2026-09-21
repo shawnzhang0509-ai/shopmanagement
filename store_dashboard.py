@@ -118,7 +118,10 @@ class StoreDashboard:
             self.week_keys = []
             self.overviews = []
             self.compare_rows = []
-            self.status = "缺少 data/weekly_sales.xlsx — 请先运行 grab_sales.bat"
+            from sales_lookup import resolve_weekly_sales_path
+
+            rel = os.path.relpath(resolve_weekly_sales_path(), os.path.dirname(__file__))
+            self.status = f"缺少 {rel} — 请在当前区域运行 grab_sales.bat"
             self._data_dirty = False
             return
 

@@ -1,8 +1,8 @@
-"""周销量数据层：grab_sales.bat → data/weekly_sales.xlsx → ROI / 坪效分析。
+"""周销量数据层：grab_sales.bat → data/{region}/weekly_sales.xlsx → ROI / 坪效分析。
 
-与 display_lookup（Display 库存）分离：
-  grab_display.bat  → sql/display.sql      → data/display.xlsx
-  grab_sales.bat    → sql/weekly_sales.sql  → data/weekly_sales.xlsx
+与 display_lookup（Display 库存）分离；路径由 grabber_config active_region + regions.* 决定：
+  grab_display.bat  → sql/{region}/display.sql       → data/{region}/display.xlsx
+  grab_sales.bat    → sql/{region}/weekly_sales.sql  → data/{region}/weekly_sales.xlsx
 """
 from __future__ import annotations
 
@@ -15,31 +15,13 @@ from display_lookup import SCRIPT_DIR, load_grabber_config, shop_id_for_location
 from region_config import weekly_sales_excel_path
 
 DEFAULT_EXCEL = weekly_sales_excel_path()
-_sales_loaded_from: str | None = None
-
-
-def weekly_sales_path_candidates(path: str | None = None) -> list[str]:
-    """区域路径优先，再回退 legacy data/weekly_sales.xlsx。"""
-    if path:
-        return [path]
-    cfg = load_grabber_config()
-    primary = weekly_sales_excel_path(cfg)
-    legacy = os.path.join(SCRIPT_DIR, "data", "weekly_sales.xlsx")
-    paths = [primary]
-    if legacy not in paths:
-        paths.append(legacy)
-    return paths
 
 
 def resolve_weekly_sales_path(path: str | None = None) -> str:
-    for candidate in weekly_sales_path_candidates(path):
-        if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
-            return candidate
-    return weekly_sales_path_candidates(path)[0]
-
-
-def weekly_sales_load_source() -> str | None:
-    return _sales_loaded_from
+    """当前区域的周销量 Excel（仅 data/{region}/weekly_sales.xlsx，不读 legacy data/）。"""
+    if path:
+        return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
+    return weekly_sales_excel_path(load_grabber_config())
 
 
 def _read_weekly_sales_file(path: str) -> list[WeeklySalesRow]:
@@ -73,8 +55,6 @@ def sample_branch_names(limit: int = 8) -> list[str]:
         if len(seen) >= limit:
             break
     return seen
-SALES_SQL = os.path.join(SCRIPT_DIR, "sql", "weekly_sales.sql")
-
 _sales_cache: list["WeeklySalesRow"] | None = None
 _family_totals_cache: dict[tuple[str | None, str], dict[str, float]] = {}
 _sku_totals_cache: dict[tuple[str | None, str], dict[str, float]] = {}
@@ -214,30 +194,19 @@ def _rows_from_pandas(path: str) -> list[WeeklySalesRow]:
 
 
 def load_weekly_sales(path: str | None = None) -> list[WeeklySalesRow]:
-    global _sales_cache, _sales_loaded_from
+    global _sales_cache
     if _sales_cache is not None and path is None:
         return _sales_cache
 
-    if path is not None:
-        rows = _read_weekly_sales_file(path) if os.path.isfile(path) else []
-        return rows
+    excel_path = resolve_weekly_sales_path(path)
+    if not os.path.isfile(excel_path):
+        if path is None:
+            _sales_cache = []
+        return []
 
-    rows: list[WeeklySalesRow] = []
-    loaded_from: str | None = None
-    for candidate in weekly_sales_path_candidates():
-        if not os.path.isfile(candidate) or os.path.getsize(candidate) <= 0:
-            continue
-        rows = _read_weekly_sales_file(candidate)
-        if rows:
-            loaded_from = candidate
-            break
-        if loaded_from is None:
-            loaded_from = candidate
-
-    _sales_cache = rows
-    _sales_loaded_from = loaded_from
-    if rows and loaded_from and loaded_from != DEFAULT_EXCEL:
-        print(f"周销量：使用 {os.path.relpath(loaded_from, SCRIPT_DIR)}（区域默认表无数据行）")
+    rows = _read_weekly_sales_file(excel_path)
+    if path is None or os.path.abspath(excel_path) == os.path.abspath(DEFAULT_EXCEL):
+        _sales_cache = rows
     return rows
 
 
@@ -289,9 +258,8 @@ def resolve_product_family(key: str, *, shop_id: str | None = None) -> str:
 
 def invalidate_weekly_sales_cache() -> None:
     """仅清空缓存，不读 Excel（区域切换时用，避免主线程卡顿）。"""
-    global _sales_cache, _sales_loaded_from, _family_totals_cache, _sku_family_map, _sku_totals_cache
+    global _sales_cache, _family_totals_cache, _sku_family_map, _sku_totals_cache
     _sales_cache = None
-    _sales_loaded_from = None
     _family_totals_cache = {}
     _sku_family_map = None
     _sku_totals_cache = {}
