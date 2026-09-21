@@ -303,3 +303,35 @@ def filter_attention_rows(rows: list[FamilyCompareRow]) -> list[FamilyCompareRow
     out = [r for r in rows if r.attention]
     out.sort(key=lambda r: (-r.spread_cv, -r.total, r.family.lower()))
     return out
+
+
+def compare_store_columns(
+    selected_slugs: set[str],
+    shop_overviews: list[StoreOverview],
+) -> list[StoreOverview]:
+    """系列对比列：与侧栏一致，每 slug 一列（基督城两店各一列，销量可同为 chch）。"""
+    by_shop = {o.shop_id: o for o in shop_overviews}
+    out: list[StoreOverview] = []
+    for e in STORE_ENTRIES:
+        if e["slug"] not in selected_slugs:
+            continue
+        base = by_shop.get(e["shop_id"])
+        out.append(
+            StoreOverview(
+                shop_id=e["shop_id"],
+                name=e["name"],
+                slug=e["slug"],
+                total_amount=base.total_amount if base else 0.0,
+                total_qty=base.total_qty if base else 0.0,
+                top_families=list(base.top_families) if base else [],
+                layout_family_count=base.layout_family_count if base else 0,
+            )
+        )
+    return out
+
+
+def sidebar_color_index(slug: str) -> int:
+    for i, e in enumerate(STORE_ENTRIES):
+        if e["slug"] == slug:
+            return i
+    return 0

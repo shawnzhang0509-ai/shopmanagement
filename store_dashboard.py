@@ -23,9 +23,11 @@ from store_dashboard_data import (
     WEEK_OPTIONS,
     aggregate_family_comparison,
     aggregate_store_overviews,
+    compare_store_columns,
     count_attention_families,
     entries_for_ui,
     filter_attention_rows,
+    sidebar_color_index,
     list_recent_week_keys_global,
     slug_to_entry,
     week_range_label,
@@ -53,6 +55,9 @@ HEADER_H = 92
 PAD = 14
 C_WARN = (234, 88, 12)
 C_ATTENTION_BG = (255, 247, 237)
+C_ROW_EVEN = (255, 255, 255)
+C_ROW_ODD = (245, 247, 250)
+C_ROW_LINE = (226, 232, 240)
 
 VIEW_OVERVIEW = "overview"
 VIEW_COMPARE = "compare"
@@ -103,6 +108,7 @@ class StoreDashboard:
         self.scroll_y = 0
         self._data_dirty = True
         self.overviews = []
+        self.compare_columns: list = []
         self.compare_rows = []
 
         self.selected_slugs: set[str] = {e["slug"] for e in STORE_ENTRIES}
@@ -123,6 +129,7 @@ class StoreDashboard:
         if not sales_data_available():
             self.week_keys = []
             self.overviews = []
+            self.compare_columns = []
             self.compare_rows = []
             from sales_lookup import resolve_weekly_sales_path
 
@@ -136,6 +143,7 @@ class StoreDashboard:
         self.overviews = aggregate_store_overviews(
             shop_ids, self.week_keys, selected_slugs=self.selected_slugs
         )
+        self.compare_columns = compare_store_columns(self.selected_slugs, self.overviews)
         top_n = None if self.family_filter == FILTER_LAYOUT else 100
         self.compare_rows = aggregate_family_comparison(
             shop_ids,
@@ -376,73 +384,111 @@ class StoreDashboard:
             self.screen.blit(self.font_body.render(msg, True, C_MUTED), (area.x, area.y))
             return
 
-        lx = area.x
-        ly = area.y
-        for i, ov in enumerate(self.overviews):
-            c = STORE_COLORS[i % len(STORE_COLORS)]
-            pygame.draw.rect(self.screen, c, (lx, ly + 4, 12, 12), border_radius=2)
-            short = ov.name.replace("店", "")
-            self.screen.blit(self.font_tiny.render(short, True, C_TEXT), (lx + 16, ly))
-            lx += self.font_tiny.size(short)[0] + 36
+        columns = self.compare_columns or self.overviews
+        row_h = 32
+        header_h = 26
+        meta_w = 132
+        label_w = min(168, int(area.width * 0.2))
+        chart_x = area.x + label_w + 6
+        chart_w = max(120, area.width - label_w - meta_w - 20)
+        n_stores = max(1, len(columns))
+        seg_w = max(24, (chart_w - (n_stores - 1) * 6) // n_stores)
+        bar_area_top = area.y + header_h
 
-        row_h = 28
-        bar_area_top = area.y + 28
+        for i, col in enumerate(columns):
+            bx = chart_x + i * (seg_w + 6)
+            ci = sidebar_color_index(col.slug)
+            c = STORE_COLORS[ci % len(STORE_COLORS)]
+            hdr = pygame.Rect(bx, area.y + 2, seg_w, header_h - 4)
+            pygame.draw.rect(self.screen, (250, 251, 253), hdr, border_radius=4)
+            pygame.draw.rect(self.screen, C_ROW_LINE, hdr, 1, border_radius=4)
+            pygame.draw.rect(self.screen, c, (bx + 4, area.y + 6, 10, 10), border_radius=2)
+            short = col.name.replace("店", "").replace("基督城 ", "")
+            short = _truncate(self.font_tiny, short, seg_w - 18)
+            self.screen.blit(self.font_tiny.render(short, True, C_TEXT), (bx + 16, area.y + 5))
+
         chart_h = len(rows) * row_h
-        content_h = chart_h + 20
+        content_h = chart_h + header_h + 12
         max_scroll = max(0, content_h - area.height + 40)
         self.scroll_y = min(self.scroll_y, max_scroll)
 
         max_val = max((max(r.by_store.values(), default=0) for r in rows), default=1.0) or 1.0
-        label_w = min(160, int(area.width * 0.22))
-        chart_x = area.x + label_w + 8
-        chart_w = area.width - label_w - 16
-        n_stores = max(1, len(self.overviews))
-        seg_w = max(20, (chart_w - (n_stores - 1) * 4) // n_stores)
 
+        prev_clip = self.screen.get_clip()
+        self.screen.set_clip(area)
         y = bar_area_top - self.scroll_y
+        row_idx = 0
         for row in rows:
             if y + row_h < area.y or y > area.bottom:
                 y += row_h
+                row_idx += 1
                 continue
+            row_band = pygame.Rect(area.x, y, area.width, row_h)
             if row.attention:
-                band = pygame.Rect(area.x, y, area.width, row_h)
-                pygame.draw.rect(self.screen, C_ATTENTION_BG, band)
+                pygame.draw.rect(self.screen, C_ATTENTION_BG, row_band)
+            else:
+                pygame.draw.rect(
+                    self.screen,
+                    C_ROW_EVEN if row_idx % 2 == 0 else C_ROW_ODD,
+                    row_band,
+                )
+            pygame.draw.line(
+                self.screen,
+                C_ROW_LINE,
+                (area.x, y + row_h),
+                (area.right, y + row_h),
+                1,
+            )
             fam = _truncate(self.font_small, row.family, label_w - 28)
-            label_x = area.x
+            label_x = area.x + 4
             if row.on_layout:
-                pygame.draw.circle(self.screen, C_ACCENT, (area.x + 6, y + 14), 4)
+                pygame.draw.circle(self.screen, C_ACCENT, (area.x + 10, y + row_h // 2), 4)
                 label_x += 14
             if row.attention:
-                self.screen.blit(self.font_small.render("⚠", True, C_WARN), (label_x, y + 2))
+                self.screen.blit(self.font_small.render("⚠", True, C_WARN), (label_x, y + 7))
                 label_x += 16
-            self.screen.blit(self.font_small.render(fam, True, C_TEXT), (label_x, y + 4))
-            bx = chart_x
-            for i, ov in enumerate(self.overviews):
-                amt = row.by_slug.get(ov.slug, row.by_store.get(ov.shop_id, 0.0))
-                bw = max(2, int((amt / max_val) * seg_w)) if amt > 0 else 0
-                c = STORE_COLORS[i % len(STORE_COLORS)]
-                is_min = row.attention and ov.slug == row.min_slug
+            self.screen.blit(self.font_small.render(fam, True, C_TEXT), (label_x, y + 8))
+            for i, col in enumerate(columns):
+                bx = chart_x + i * (seg_w + 6)
+                seg_rect = pygame.Rect(bx, y + 2, seg_w, row_h - 4)
+                if row_idx % 2 == 1 and not row.attention:
+                    pygame.draw.rect(self.screen, (252, 253, 255), seg_rect, border_radius=2)
+                ci = sidebar_color_index(col.slug)
+                c = STORE_COLORS[ci % len(STORE_COLORS)]
+                amt = row.by_slug.get(col.slug, row.by_store.get(col.shop_id, 0.0))
+                bw = max(2, int((amt / max_val) * (seg_w - 8))) if amt > 0 else 0
+                is_min = row.attention and col.slug == row.min_slug
+                bar_x = bx + 4
+                bar_y = y + 9
                 if bw > 0:
-                    bar = pygame.Rect(bx, y + 6, bw, 16)
+                    bar = pygame.Rect(bar_x, bar_y, bw, 14)
                     pygame.draw.rect(self.screen, c, bar, border_radius=3)
                     if is_min:
                         pygame.draw.rect(self.screen, C_WARN, bar, 2, border_radius=3)
                 elif is_min:
-                    pygame.draw.rect(self.screen, C_WARN, (bx, y + 10, 8, 8), border_radius=2)
-                bx += seg_w + 4
-            meta_x = area.right
+                    pygame.draw.rect(self.screen, C_WARN, (bar_x, bar_y + 3, 8, 8), border_radius=2)
+            meta_x = area.right - meta_w + 4
             if row.attention and row.spread_cv > 0:
-                cv_s = self.font_tiny.render(f"CV {int(row.spread_cv * 100)}%", True, C_WARN)
-                meta_x -= cv_s.get_width() + 6
-                self.screen.blit(cv_s, (meta_x, y + 6))
-                short_min = (row.min_store_name or "").replace("店", "").replace("基督城 ", "")[:8]
-                if short_min:
-                    tip = self.font_tiny.render(f"↓{short_min}", True, C_WARN)
-                    meta_x -= tip.get_width() + 4
-                    self.screen.blit(tip, (meta_x, y + 6))
-            total_s = self.font_tiny.render(_money(row.total), True, C_MUTED)
-            self.screen.blit(total_s, (area.right - total_s.get_width(), y + 6))
+                short_min = (row.min_store_name or "").replace("店", "").replace("基督城 ", "")
+                meta = f"↓{_truncate(self.font_tiny, short_min, 36)} CV{int(row.spread_cv * 100)}%"
+                meta += f"  {_money(row.total)}"
+                meta_s = self.font_tiny.render(_truncate(self.font_tiny, meta, meta_w - 8), True, C_WARN)
+            else:
+                meta_s = self.font_tiny.render(_money(row.total), True, C_MUTED)
+            self.screen.blit(meta_s, (meta_x + meta_w - 8 - meta_s.get_width(), y + 9))
             y += row_h
+            row_idx += 1
+        self.screen.set_clip(prev_clip)
+
+        for i in range(n_stores + 1):
+            gx = chart_x + i * (seg_w + 6) - 3
+            pygame.draw.line(
+                self.screen,
+                (236, 240, 245),
+                (gx, bar_area_top - self.scroll_y),
+                (gx, min(area.bottom, bar_area_top - self.scroll_y + chart_h)),
+                1,
+            )
 
         hint = "● = 布局已摆 · ⚠ = 跨店方差大且垫店 · 滚轮浏览"
         if self.remediation_only:
