@@ -134,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.1.9"
+APP_VERSION = "2.2.0"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -4536,7 +4536,9 @@ def _startup_preload_worker() -> None:
 
 def _defer_heatmap_metrics() -> None:
     global _heatmap_lazy_until_ms
-    _heatmap_lazy_until_ms = pygame.time.get_ticks() + 3000
+    n = len(placed_furnitures) if placed_furnitures else 0
+    delay_ms = 2000 + min(5000, n * 35)
+    _heatmap_lazy_until_ms = pygame.time.get_ticks() + delay_ms
 
 
 def _heatmap_metrics_allowed() -> bool:
@@ -6851,7 +6853,8 @@ def draw_scale_bar(surface):
 def draw_heatmap_legend(surface):
     if not placed_furnitures or not sales_data_ready() or not _heatmap_metrics_allowed():
         return
-    ensure_heatmap_metrics()
+    if _heatmap_metrics_dirty:
+        return
     bar_w, bar_h = 18, 128
     pad = 10
     box_w = 140
@@ -8113,7 +8116,12 @@ def main():
             draw_obstacles(screen)
             draw_layout_markers(screen)
             draw_alignment_guides(screen)
-            if sales_data_ready() and placed_furnitures and _heatmap_metrics_allowed():
+            if (
+                sales_data_ready()
+                and placed_furnitures
+                and _heatmap_metrics_allowed()
+                and _heatmap_metrics_dirty
+            ):
                 ensure_heatmap_metrics()
             draw_order = furniture_draw_order()
             selected_set = set(selected_furnitures)
