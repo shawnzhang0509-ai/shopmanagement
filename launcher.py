@@ -468,13 +468,32 @@ class LauncherApp:
             need = ["pymssql", "sqlalchemy", "pandas", "openpyxl"]
         if need and not self._require_deps(need):
             return
-        if filename == "layout.py" and not os.path.isfile("furniture_templates.json"):
-            messagebox.showwarning(
-                "缺少模板",
-                "未找到 furniture_templates.json。\n请先运行「家具测绘」或从仓库拉取模板文件。",
-                parent=self.root,
-            )
-            return
+        if filename == "layout.py":
+            try:
+                from display_lookup import load_grabber_config
+                from region_config import get_active_region, resolve_furniture_templates_path
+
+                cfg = load_grabber_config()
+                tpl = resolve_furniture_templates_path(cfg, get_active_region(cfg))
+                region = get_active_region(cfg)
+                if not os.path.isfile(tpl) and region != "nz":
+                    messagebox.showinfo(
+                        "澳洲/加拿大首次使用",
+                        f"当前区域 {region.upper()} 尚无本地测绘模板。\n"
+                        f"路径：{tpl}\n\n"
+                        "请配置 regions.*.database_url 后运行 grab_display，再打开家具测绘。",
+                        parent=self.root,
+                    )
+                elif not os.path.isfile(tpl) and region == "nz":
+                    messagebox.showwarning(
+                        "缺少模板",
+                        "未找到 furniture_templates.json / data/nz/furniture_templates.json。\n"
+                        "请先运行「家具测绘」或从仓库拉取模板文件。",
+                        parent=self.root,
+                    )
+                    return
+            except Exception:
+                pass
         self._spawn([sys.executable, path], label, new_console=not gui)
 
     def launch_script(self, rel_path: str, label: str, *, wait: bool = False) -> None:

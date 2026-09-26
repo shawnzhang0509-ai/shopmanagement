@@ -28,6 +28,7 @@ EXAMPLE_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.exam
 from region_config import (  # noqa: E402
     display_excel_path,
     get_active_region,
+    has_multi_region_config,
     legacy_display_excel_candidates,
     load_region_profile,
     merge_region_config,
@@ -945,9 +946,15 @@ def resolve_display_excel_paths() -> list[str]:
 
 
 def resolve_cache_path() -> str:
-    cfg = load_grabber_config()
-    if cfg.get("output_json"):
-        return os.path.join(SCRIPT_DIR, cfg["output_json"])
+    """当前区域 display_cache.json；多区域时不回退根目录 NZ 缓存。"""
+    cfg = build_runtime_config()
+    path = cfg.get("output_json")
+    if path:
+        return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
+    if has_multi_region_config(load_grabber_config()):
+        folder = cfg.get("output_folder") or "data"
+        folder_abs = folder if os.path.isabs(folder) else os.path.join(SCRIPT_DIR, folder)
+        return os.path.join(folder_abs, "display_cache.json")
     data_json = os.path.join(SCRIPT_DIR, "data", "display_cache.json")
     if os.path.isfile(data_json):
         return data_json
@@ -1508,6 +1515,15 @@ def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
 
     cache_path = resolve_cache_path()
     excel_path = next((p for p in resolve_display_excel_paths() if os.path.isfile(p)), None)
+    if not excel_path:
+        _display_cache = []
+        folder = get_active_region(load_grabber_config())
+        _last_load_error = (
+            f"未找到本区域 Display（{display_excel_path()}），请先在 data/{folder}/ 运行 grab_display 抓取"
+        )
+        _last_load_source = None
+        return []
+
     if _display_cache_is_fresh(cache_path, excel_path):
         items = _load_cache_file(cache_path)
         if items:
@@ -1521,15 +1537,17 @@ def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
         _display_cache = items
         return items
 
-    items = _load_cache_file(cache_path)
-    _display_cache = items
-    if items:
-        _last_load_source = os.path.basename(resolve_cache_path())
-        return items
+    if os.path.isfile(cache_path):
+        items = _load_cache_file(cache_path)
+        if items:
+            _display_cache = items
+            _last_load_source = os.path.basename(cache_path)
+            return items
 
+    _display_cache = []
     if _last_load_error is None:
-        _last_load_error = "请先运行 grab_display.bat 抓取数据"
-    return items
+        _last_load_error = "Display Excel 为空或无法读取，请重新 grab_display"
+    return []
 
 
 def reload_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:

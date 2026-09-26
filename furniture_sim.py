@@ -34,20 +34,23 @@ from display_lookup import (
     last_load_source,
     last_family_column,
     load_display_items,
+    load_grabber_config,
     lookup_display_item,
     match_template_index,
     find_template_index_by_id,
     prune_orphan_templates,
-    resolve_is_discontinued,
     reload_display_items,
+    reload_shops,
+    resolve_is_discontinued,
     shop_stats,
     shops_for_display_tabs,
 )
+from region_config import get_active_region, resolve_furniture_templates_path
 from product_images import is_image_failed, prefetch_urls, request_thumbnail, request_image
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
-TEMPLATES_FILE = "furniture_templates.json"
+TEMPLATES_FILE = resolve_furniture_templates_path(load_grabber_config(), get_active_region(load_grabber_config()))
 
 pygame.init()
 
@@ -2343,6 +2346,10 @@ def main():
     global editing_template, selected_index, editing_mode, app_screen, display_items
 
     reload_roi_map()
+    cfg = load_grabber_config()
+    reload_shops(cfg)
+    global TEMPLATES_FILE
+    TEMPLATES_FILE = resolve_furniture_templates_path(cfg, get_active_region(cfg))
     display_items = load_display_items()
 
     if os.path.isfile(TEMPLATES_FILE):
