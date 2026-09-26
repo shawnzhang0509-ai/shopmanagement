@@ -291,9 +291,7 @@ class DisplayGrabberApp:
         for rid in SUPPORTED_REGIONS:
             section = dict(regions.get(rid) or {})
             runtime = merge_region_config({**cfg, "active_region": rid}, rid)
-            db_url = section.get("database_url") or ""
-            if not db_url and rid == active:
-                db_url = cfg.get("database_url", "")
+            db_url = str(section.get("database_url") or runtime.get("database_url") or "").strip()
             self._region_fields[rid] = {
                 "database_url": db_url,
                 "sql_folder": section.get("sql_folder") or runtime.get("sql_folder", f"sql/{rid}"),

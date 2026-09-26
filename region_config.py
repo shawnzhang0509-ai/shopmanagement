@@ -116,16 +116,24 @@ def merge_region_config(cfg: dict | None = None, region_id: str | None = None) -
     region_id = normalize_region_id(region_id or get_active_region(base))
     merged = {k: v for k, v in base.items() if k != "regions"}
     section = region_section(base, region_id)
+    has_regions_block = isinstance(base.get("regions"), dict) and bool(base["regions"])
     for key, value in section.items():
         if value not in (None, ""):
             merged[key] = value
+    if has_regions_block:
+        sec_db = str(section.get("database_url") or "").strip()
+        root_db = str(base.get("database_url") or "").strip()
+        if sec_db:
+            merged["database_url"] = sec_db
+        elif region_id == "nz" and root_db:
+            merged["database_url"] = root_db
+        else:
+            merged.pop("database_url", None)
     profile = load_region_profile(region_id)
     merged["active_region"] = region_id
     merged["region_id"] = region_id
     merged["_region_profile"] = profile
     merged["_region_label"] = str(profile.get("label") or REGION_LABELS.get(region_id, region_id))
-
-    has_regions_block = isinstance(base.get("regions"), dict) and bool(base["regions"])
 
     if not section.get("sql_folder"):
         root_sql = str(merged.get("sql_folder") or "").strip()
@@ -257,18 +265,22 @@ def layouts_dir(cfg: dict | None = None, region_id: str | None = None) -> str:
 
 
 def region_database_url(cfg: dict, region_id: str | None = None) -> str:
-    """区域数据库 URL：环境变量 > 区域配置 > 全局 database_url。"""
+    """区域数据库 URL：DISPLAY_DB_URL_{AU} > regions.*.database_url；多区域时不回退 NZ 根连接串。"""
     region_id = normalize_region_id(region_id or get_active_region(cfg))
     env_key = f"DISPLAY_DB_URL_{region_id.upper()}"
     env = os.environ.get(env_key, "").strip()
     if env:
         return env
-    if region_id == get_active_region(cfg):
+    merged = merge_region_config(cfg, region_id)
+    url = str(merged.get("database_url") or "").strip()
+    if url:
+        return url
+    has_regions = isinstance((cfg or {}).get("regions"), dict) and bool((cfg or {}).get("regions"))
+    if not has_regions:
         global_env = os.environ.get("DISPLAY_DB_URL", "").strip()
         if global_env:
             return global_env
-    merged = merge_region_config(cfg, region_id)
-    return str(merged.get("database_url") or "").strip()
+    return ""
 
 
 def display_excel_path(cfg: dict | None = None, region_id: str | None = None) -> str:

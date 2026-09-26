@@ -134,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -2033,8 +2033,10 @@ def rect_points_centered(cx, cy, length_mm, width_mm):
     ]
 
 
-def obstacle_rect_metrics(points, tol=OBSTACLE_SNAP_MM):
+def obstacle_rect_metrics(points, tol=None):
     """Axis-aligned rectangle obstacles return (cx, cy, length_mm, width_mm)."""
+    if tol is None:
+        tol = OBSTACLE_SNAP_MM / 2 + 5
     if len(points) != 4:
         return None
     xs = [p[0] for p in points]
@@ -2043,6 +2045,18 @@ def obstacle_rect_metrics(points, tol=OBSTACLE_SNAP_MM):
     min_y, max_y = min(ys), max(ys)
     span_x = max_x - min_x
     span_y = max_y - min_y
+    if span_x < 1.0 and span_y < 1.0:
+        return None
+    area_poly = abs(polygon_area(points))
+    bbox_area = span_x * span_y
+    if bbox_area > 1.0 and area_poly >= bbox_area * 0.96:
+        cx = (min_x + max_x) / 2
+        cy = (min_y + max_y) / 2
+        length_mm = max(span_x, span_y)
+        width_mm = min(span_x, span_y)
+        if width_mm < 1.0:
+            width_mm = max(width_mm, 1.0)
+        return cx, cy, length_mm, width_mm
     for x, y in points:
         on_corner = (
             (abs(x - min_x) <= tol or abs(x - max_x) <= tol)
@@ -2056,7 +2070,7 @@ def obstacle_rect_metrics(points, tol=OBSTACLE_SNAP_MM):
     width_mm = min(span_x, span_y)
     if length_mm < 1.0:
         return None
-    if width_mm < tol:
+    if width_mm < 1.0:
         width_mm = max(width_mm, 1.0)
     return cx, cy, length_mm, width_mm
 
@@ -4043,12 +4057,14 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
 
     from display_lookup import load_grabber_config, save_grabber_config
     from region_config import (
+        REGION_LABELS,
         catalog_layout_specs,
         default_output_folder,
         layout_catalog,
         layout_slug_to_sales_shop,
         layouts_dir,
         normalize_region_id,
+        region_database_url,
     )
 
     region_id = normalize_region_id(region_id)
@@ -4086,6 +4102,18 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     except Exception:
         pass
     ensure_layouts_dir()
+    if persist:
+        label = REGION_LABELS.get(region_id, region_id.upper())
+        folder = default_output_folder(region_id)
+        db = region_database_url(cfg, region_id)
+        if db:
+            show_toast(f"已切换 {label} · 测绘/抓取用 {folder}/ 与对应 database_url")
+        else:
+            show_toast(
+                f"已切换 {label} · 请在 grabber_config.json → regions.{region_id}.database_url 配置澳洲库"
+                if region_id == "au"
+                else f"已切换 {label} · 未配置 regions.{region_id}.database_url"
+            )
 
 
 def _schedule_region_preload(region_id: str) -> None:
