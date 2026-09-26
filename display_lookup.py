@@ -853,7 +853,7 @@ def load_from_excel(path: str | None = None) -> list[DisplayItem]:
             last_exc = exc
             _last_load_error = f"读取 {os.path.basename(candidate)} 失败: {exc}"
     if best_items and best_source:
-        _last_load_source = os.path.basename(best_source)
+        _last_load_source = display_source_label(best_source)
         if best_score <= 0:
             col = _last_family_column or "ProductFamily"
             _last_load_error = (
@@ -912,6 +912,16 @@ def _resolve_path(path: str) -> str:
     if not path:
         return SCRIPT_DIR
     return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
+
+
+def display_source_label(path: str | None) -> str:
+    """状态栏用：相对项目根的路径，便于区分 data/nz vs data/au。"""
+    if not path:
+        return "display.xlsx"
+    try:
+        return os.path.relpath(path, SCRIPT_DIR).replace("\\", "/")
+    except ValueError:
+        return os.path.basename(path)
 
 
 def build_runtime_config(cfg: dict | None = None) -> dict:
@@ -1429,7 +1439,7 @@ def grab_and_save(cfg: dict | None = None) -> tuple[list["DisplayItem"], str]:
     save_cache(items, runtime["output_json"])
     _display_cache = items
     _last_load_error = None
-    _last_load_source = os.path.basename(excel_path)
+    _last_load_source = display_source_label(excel_path)
     return items, excel_path
 
 
@@ -1529,7 +1539,7 @@ def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
         if items:
             _display_cache = items
             _last_load_error = None
-            _last_load_source = os.path.basename(cache_path)
+            _last_load_source = display_source_label(cache_path)
             return items
 
     items = load_from_excel()
@@ -1541,7 +1551,7 @@ def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
         items = _load_cache_file(cache_path)
         if items:
             _display_cache = items
-            _last_load_source = os.path.basename(cache_path)
+            _last_load_source = display_source_label(cache_path)
             return items
 
     _display_cache = []
