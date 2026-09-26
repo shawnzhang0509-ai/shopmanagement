@@ -303,3 +303,30 @@ def weekly_sales_excel_path(cfg: dict | None = None, region_id: str | None = Non
     if os.path.isabs(folder):
         return os.path.join(folder, "weekly_sales.xlsx")
     return os.path.join(SCRIPT_DIR, folder, "weekly_sales.xlsx")
+
+
+def has_multi_region_config(cfg: dict | None = None) -> bool:
+    base = cfg or _load_grabber_config_raw()
+    regions = base.get("regions")
+    return isinstance(regions, dict) and bool(regions)
+
+
+def furniture_templates_path(cfg: dict | None = None, region_id: str | None = None) -> str:
+    """区域测绘 JSON：data/{region}/furniture_templates.json。"""
+    merged = merge_region_config(cfg, region_id)
+    folder = str(merged.get("output_folder") or default_output_folder(normalize_region_id(region_id or get_active_region(cfg))))
+    if os.path.isabs(folder):
+        return os.path.join(folder, "furniture_templates.json")
+    return os.path.join(SCRIPT_DIR, folder, "furniture_templates.json")
+
+
+def resolve_furniture_templates_path(cfg: dict | None = None, region_id: str | None = None) -> str:
+    """加载用路径：NZ 可回退仓库根目录 legacy；AU/CA 仅认本区域文件。"""
+    region_id = normalize_region_id(region_id or get_active_region(cfg))
+    regional = furniture_templates_path(cfg, region_id)
+    if os.path.isfile(regional):
+        return regional
+    legacy = os.path.join(SCRIPT_DIR, "furniture_templates.json")
+    if region_id == "nz" and os.path.isfile(legacy):
+        return legacy
+    return regional

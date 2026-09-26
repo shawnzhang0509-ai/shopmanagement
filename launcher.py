@@ -23,7 +23,7 @@ from deps_check import (
 )
 
 APP_TITLE = "坪效管理工具"
-APP_VERSION = "2.4.2"
+APP_VERSION = "2.4.3"
 
 BG = "#f4f6f8"
 CARD = "#ffffff"
@@ -41,19 +41,25 @@ class DataGrabDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, *, on_status=None) -> None:
         super().__init__(parent)
         self.title("数据抓取 — 选择要更新的内容")
-        self.geometry("620x580")
-        self.minsize(560, 520)
+        self.geometry("640x780")
+        self.minsize(580, 680)
         self.configure(bg=BG)
         self.transient(parent)
         self.grab_set()
         self._on_status = on_status
         self._running = False
 
-        from display_lookup import build_runtime_config, load_grabber_config
-        from region_config import SUPPORTED_REGIONS, merge_region_config, region_labels
+        from display_lookup import build_runtime_config, load_grabber_config, save_grabber_config, test_database_connection
+        from region_config import SUPPORTED_REGIONS, config_for_region, merge_region_config, region_database_url, region_labels
+
+        self._save_grabber_config = save_grabber_config
+        self._test_database_connection = test_database_connection
+        self._config_for_region = config_for_region
 
         cfg = load_grabber_config()
         self._base_cfg = cfg
+        self._region_fields: dict[str, dict[str, str]] = {}
+        self._edit_region_var = tk.StringVar(value="nz")
         run_list = cfg.get("run_regions") or [cfg.get("active_region", "nz")]
         self._run_vars: dict[str, tk.BooleanVar] = {
             rid: tk.BooleanVar(value=(rid in run_list)) for rid in SUPPORTED_REGIONS
@@ -77,6 +83,7 @@ class DataGrabDialog(tk.Toplevel):
             command=self._start_grab,
         )
         self.run_btn.pack(side="left")
+        ttk.Button(btn_row, text="保存连接配置", command=self._save_region_config).pack(side="left", padx=(10, 0))
         ttk.Button(btn_row, text="关闭", command=self.destroy).pack(side="right")
 
         body = tk.Frame(self, bg=BG)
@@ -104,6 +111,46 @@ class DataGrabDialog(tk.Toplevel):
                 variable=self._run_vars[rid],
                 command=self._refresh_path_hints,
             ).pack(side="left", padx=(0, 16))
+
+        cfg_frame = ttk.LabelFrame(
+            body,
+            text="地区连接（NZ / AU / CA 各自 database_url · 保存到 grabber_config.json）",
+            padding=8,
+        )
+        cfg_frame.pack(fill="x", padx=16, pady=(0, 6))
+        ttk.Label(cfg_frame, text="正在编辑").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        edit_values = [f"{rid.upper()} {label}" for rid, label in region_labels()]
+        self._edit_combo = ttk.Combobox(cfg_frame, values=edit_values, state="readonly", width=16)
+        self._edit_combo.grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        self._edit_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_edit_region_changed())
+
+        ttk.Label(cfg_frame, text="数据库连接").grid(row=1, column=0, sticky="nw", padx=6, pady=4)
+        db_wrap = ttk.Frame(cfg_frame)
+        db_wrap.grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=4)
+        self.db_entry = tk.Text(db_wrap, height=2, width=72, wrap="word")
+        self.db_entry.pack(fill="x", expand=True)
+        ttk.Button(db_wrap, text="测试连接", command=self._test_region_connection).pack(anchor="e", pady=(4, 0))
+
+        ttk.Label(cfg_frame, text="SQL 目录").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        self.sql_folder_var = tk.StringVar(value="sql/nz")
+        ttk.Entry(cfg_frame, textvariable=self.sql_folder_var, width=52).grid(
+            row=2, column=1, sticky="ew", padx=6, pady=4
+        )
+        ttk.Label(cfg_frame, text="输出目录").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        self.output_folder_var = tk.StringVar(value="data/nz")
+        ttk.Entry(cfg_frame, textvariable=self.output_folder_var, width=52).grid(
+            row=3, column=1, sticky="ew", padx=6, pady=4
+        )
+        tk.Label(
+            cfg_frame,
+            text="完整定时调度请用下方「Display 高级/定时」。切换上方地区后分别填写并保存。",
+            font=("Microsoft YaHei UI", 9),
+            fg=MUTED,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        cfg_frame.columnconfigure(1, weight=1)
+        self._load_region_fields_from_cfg(cfg)
+        active = cfg.get("active_region") or "nz"
+        self._set_edit_region(str(active).lower())
 
         opts = ttk.LabelFrame(body, text="抓取内容", padding=12)
         opts.pack(fill="x", padx=16, pady=6)
@@ -150,11 +197,123 @@ class DataGrabDialog(tk.Toplevel):
         log_frame = ttk.LabelFrame(body, text="执行日志", padding=8)
         log_frame.pack(fill="both", expand=True, padx=16, pady=(6, 8))
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=8, bg="#111827", fg="#e5e7eb", font=("Consolas", 9)
+            log_frame, height=6, bg="#111827", fg="#e5e7eb", font=("Consolas", 9)
         )
         self.log_text.pack(fill="both", expand=True)
 
         self._refresh_path_hints()
+
+    def _edit_region_id(self) -> str:
+        text = self._edit_combo.get().strip()
+        return text.split()[0].lower() if text else "nz"
+
+    def _set_edit_region(self, region_id: str) -> None:
+        from region_config import REGION_LABELS
+
+        label = REGION_LABELS.get(region_id, region_id.upper())
+        self._edit_combo.set(f"{region_id.upper()} {label}")
+        self._edit_region_var.set(region_id)
+        self._load_editor(region_id)
+
+    def _flush_editor(self) -> None:
+        rid = self._edit_region_id()
+        self._region_fields[rid] = {
+            "database_url": self.db_entry.get("1.0", "end").strip(),
+            "sql_folder": self.sql_folder_var.get().strip(),
+            "output_folder": self.output_folder_var.get().strip(),
+        }
+
+    def _load_editor(self, region_id: str) -> None:
+        from region_config import merge_region_config, region_database_url
+
+        fields = self._region_fields.get(region_id, {})
+        runtime = merge_region_config({**self._base_cfg, "active_region": region_id}, region_id)
+        self.db_entry.delete("1.0", "end")
+        db = fields.get("database_url") or region_database_url(self._base_cfg, region_id)
+        if db:
+            self.db_entry.insert("1.0", db)
+        self.sql_folder_var.set(fields.get("sql_folder") or runtime.get("sql_folder") or f"sql/{region_id}")
+        self.output_folder_var.set(
+            fields.get("output_folder") or runtime.get("output_folder") or f"data/{region_id}"
+        )
+
+    def _load_region_fields_from_cfg(self, cfg: dict) -> None:
+        from region_config import SUPPORTED_REGIONS, merge_region_config, region_database_url
+
+        regions = cfg.get("regions") or {}
+        for rid in SUPPORTED_REGIONS:
+            section = dict(regions.get(rid) or {})
+            runtime = merge_region_config({**cfg, "active_region": rid}, rid)
+            db_url = str(section.get("database_url") or runtime.get("database_url") or "").strip()
+            if not db_url and rid == "nz":
+                db_url = str(cfg.get("database_url") or "").strip()
+            self._region_fields[rid] = {
+                "database_url": db_url,
+                "sql_folder": section.get("sql_folder") or runtime.get("sql_folder", f"sql/{rid}"),
+                "output_folder": section.get("output_folder") or runtime.get("output_folder", f"data/{rid}"),
+            }
+
+    def _on_edit_region_changed(self) -> None:
+        self._flush_editor()
+        self._set_edit_region(self._edit_region_id())
+
+    def _merge_region_config_into_base(self) -> dict:
+        from display_lookup import reload_shops
+        from region_config import SUPPORTED_REGIONS
+
+        self._flush_editor()
+        cfg = dict(self._base_cfg)
+        regions: dict[str, dict] = dict(cfg.get("regions") or {})
+        for rid in SUPPORTED_REGIONS:
+            fields = self._region_fields.get(rid, {})
+            section = dict(regions.get(rid) or {})
+            for key in ("database_url", "sql_folder", "output_folder"):
+                val = str(fields.get(key) or "").strip()
+                if val:
+                    section[key] = val
+            regions[rid] = section
+        selected = self._selected_regions()
+        active = selected[0] if selected else self._edit_region_id()
+        cfg.update(
+            {
+                "active_region": active,
+                "run_regions": selected or [active],
+                "regions": regions,
+                "grab_sales_with_display": bool(self.var_sales.get()),
+                "sync_roi_after_grab": bool(self.var_roi.get()),
+            }
+        )
+        reload_shops(cfg)
+        self._base_cfg = cfg
+        return cfg
+
+    def _save_region_config(self) -> None:
+        cfg = self._merge_region_config_into_base()
+        self._save_grabber_config(cfg)
+        self._log("已保存各地区 database_url / SQL / 输出目录 → grabber_config.json")
+        messagebox.showinfo("已保存", "连接配置已写入 grabber_config.json", parent=self)
+
+    def _test_region_connection(self) -> None:
+        self._flush_editor()
+        rid = self._edit_region_id()
+        cfg = self._merge_region_config_into_base()
+        region_cfg = self._config_for_region(cfg, rid)
+        self._log(f"测试 {rid.upper()} 数据库连接…")
+
+        def worker() -> None:
+            ok, msg = self._test_database_connection(region_cfg)
+            title = f"{rid.upper()} 连接测试"
+
+            def done() -> None:
+                self._log(msg if ok else f"失败: {msg}")
+                if ok:
+                    messagebox.showinfo(title, msg, parent=self)
+                else:
+                    messagebox.showerror(title, msg, parent=self)
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _selected_regions(self) -> list[str]:
         from region_config import SUPPORTED_REGIONS
@@ -178,13 +337,7 @@ class DataGrabDialog(tk.Toplevel):
         self.sql_hint_var.set(f"SQL: {sql_file}  （支持 .sql / .txt，缺失时自动回退）")
 
     def _grab_cfg(self) -> dict:
-        selected = self._selected_regions()
-        active = selected[0] if selected else "nz"
-        return {
-            **self._base_cfg,
-            "active_region": active,
-            "run_regions": selected or [active],
-        }
+        return self._merge_region_config_into_base()
 
     def _log(self, msg: str) -> None:
         """后台线程安全：通过 after 回到主线程写日志。"""
@@ -216,6 +369,7 @@ class DataGrabDialog(tk.Toplevel):
         ):
             messagebox.showwarning("未选择", "请至少勾选一项抓取内容。", parent=self)
             return
+        self._save_grabber_config(self._merge_region_config_into_base())
         self._running = True
         self.run_btn.config(state="disabled")
         self.log_text.delete("1.0", "end")
@@ -377,7 +531,7 @@ class LauncherApp:
         ttk.Button(row, text="仅库存/价格", command=lambda: self._quick_grab(stock_only=True)).pack(side="left", padx=(0, 8))
         tk.Label(
             data_frame,
-            text="推荐点「选择抓取内容」：可多选 NZ/AU/CA 地区，勾选 Display / 周销量 / 库存 / ROI 后点「开始抓取」。",
+            text="「选择抓取内容」内可填 NZ/AU/CA 连接串；定时调度用「Display 高级/定时」。",
             font=("Microsoft YaHei UI", 9),
             fg=MUTED,
         ).pack(anchor="w", pady=(8, 0))
@@ -468,13 +622,32 @@ class LauncherApp:
             need = ["pymssql", "sqlalchemy", "pandas", "openpyxl"]
         if need and not self._require_deps(need):
             return
-        if filename == "layout.py" and not os.path.isfile("furniture_templates.json"):
-            messagebox.showwarning(
-                "缺少模板",
-                "未找到 furniture_templates.json。\n请先运行「家具测绘」或从仓库拉取模板文件。",
-                parent=self.root,
-            )
-            return
+        if filename == "layout.py":
+            try:
+                from display_lookup import load_grabber_config
+                from region_config import get_active_region, resolve_furniture_templates_path
+
+                cfg = load_grabber_config()
+                tpl = resolve_furniture_templates_path(cfg, get_active_region(cfg))
+                region = get_active_region(cfg)
+                if not os.path.isfile(tpl) and region != "nz":
+                    messagebox.showinfo(
+                        "澳洲/加拿大首次使用",
+                        f"当前区域 {region.upper()} 尚无本地测绘模板。\n"
+                        f"路径：{tpl}\n\n"
+                        "请配置 regions.*.database_url 后运行 grab_display，再打开家具测绘。",
+                        parent=self.root,
+                    )
+                elif not os.path.isfile(tpl) and region == "nz":
+                    messagebox.showwarning(
+                        "缺少模板",
+                        "未找到 furniture_templates.json / data/nz/furniture_templates.json。\n"
+                        "请先运行「家具测绘」或从仓库拉取模板文件。",
+                        parent=self.root,
+                    )
+                    return
+            except Exception:
+                pass
         self._spawn([sys.executable, path], label, new_console=not gui)
 
     def launch_script(self, rel_path: str, label: str, *, wait: bool = False) -> None:

@@ -134,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -188,6 +188,13 @@ _catalog_refresh_start_ms = 0
 _catalog_refresh_started = False
 _heatmap_lazy_until_ms = 0
 _active_layout_region: str = "nz"
+
+
+def furniture_templates_json_path() -> str:
+    from display_lookup import load_grabber_config
+    from region_config import resolve_furniture_templates_path
+
+    return resolve_furniture_templates_path(load_grabber_config(), _active_layout_region)
 _region_tab_rects: dict[str, pygame.Rect] = {}
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -2037,17 +2044,23 @@ def obstacle_rect_metrics(points, tol=None):
     """Axis-aligned rectangle obstacles return (cx, cy, length_mm, width_mm)."""
     if tol is None:
         tol = OBSTACLE_SNAP_MM / 2 + 5
-    if len(points) != 4:
+    if not points or len(points) < 4:
         return None
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
+    pts = []
+    for p in points:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            pts.append((float(p[0]), float(p[1])))
+    if len(pts) < 4:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
     span_x = max_x - min_x
     span_y = max_y - min_y
     if span_x < 1.0 and span_y < 1.0:
         return None
-    area_poly = abs(polygon_area(points))
+    area_poly = abs(polygon_area(pts))
     bbox_area = span_x * span_y
     if bbox_area > 1.0 and area_poly >= bbox_area * 0.96:
         cx = (min_x + max_x) / 2
@@ -2057,7 +2070,9 @@ def obstacle_rect_metrics(points, tol=None):
         if width_mm < 1.0:
             width_mm = max(width_mm, 1.0)
         return cx, cy, length_mm, width_mm
-    for x, y in points:
+    if len(pts) != 4:
+        return None
+    for x, y in pts:
         on_corner = (
             (abs(x - min_x) <= tol or abs(x - max_x) <= tol)
             and (abs(y - min_y) <= tol or abs(y - max_y) <= tol)
@@ -3604,7 +3619,9 @@ def _family_from_display_item(item, sku: str) -> str:
     return effective_family_from_display_item(item)
 
 
-def _furniture_templates_json_by_id(json_path="furniture_templates.json") -> dict[str, dict]:
+def _furniture_templates_json_by_id(json_path=None) -> dict[str, dict]:
+    if json_path is None:
+        json_path = furniture_templates_json_path()
     global _templates_json_cache, _templates_json_mtime
     try:
         mtime = os.path.getmtime(json_path)
@@ -3903,8 +3920,10 @@ def check_collision(furniture, obstacles):
     return False
 
 
-def load_furniture_templates(json_path, *, fast=False):
+def load_furniture_templates(json_path, *, fast=False, allow_empty=False):
     if not os.path.isfile(json_path):
+        if allow_empty:
+            return []
         raise FileNotFoundError(f"找不到 {json_path}，请确认在项目目录下运行")
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -3941,11 +3960,15 @@ def load_furniture_templates(json_path, *, fast=False):
                 )
             )
     if not templates:
+        if allow_empty:
+            return []
         raise ValueError(f"{json_path} 中没有有效的家具模板")
     return templates
 
 
-def repair_furniture_templates_json(json_path="furniture_templates.json") -> int:
+def repair_furniture_templates_json(json_path=None) -> int:
+    if json_path is None:
+        json_path = furniture_templates_json_path()
     """把 JSON 里 SKU 占位的 product_family 修正为 Display/推断系列名并写回文件。"""
     if not os.path.isfile(json_path):
         return 0
@@ -4009,9 +4032,11 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
     _cached_family_dropdown_key = ()
     _cached_family_dropdown_options = None
 
+    tpl_path = furniture_templates_json_path()
+    allow_empty = _active_layout_region != "nz"
     try:
-        templates_repaired = repair_furniture_templates_json("furniture_templates.json")
-        furniture_templates = load_furniture_templates("furniture_templates.json")
+        templates_repaired = repair_furniture_templates_json(tpl_path)
+        furniture_templates = load_furniture_templates(tpl_path, allow_empty=allow_empty)
     except Exception as exc:
         show_toast(f"模板刷新失败: {exc}")
         return False
@@ -4049,6 +4074,29 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
 
 
 # ── 数据持久化 ──────────────────────────────────────────────
+def _reload_region_furniture_templates(*, fast: bool = True) -> None:
+    global furniture_templates, selected_template_index, template_scroll_offset
+    global _cached_family_dropdown_options, _cached_family_dropdown_key
+
+    path = furniture_templates_json_path()
+    allow_empty = _active_layout_region != "nz"
+    try:
+        furniture_templates = load_furniture_templates(path, fast=fast, allow_empty=allow_empty)
+    except Exception:
+        if allow_empty:
+            furniture_templates = []
+        else:
+            raise
+    template_scroll_offset = 0
+    if furniture_templates:
+        if selected_template_index >= len(furniture_templates):
+            selected_template_index = max(0, len(furniture_templates) - 1)
+    else:
+        selected_template_index = 0
+    _cached_family_dropdown_key = ()
+    _cached_family_dropdown_options = None
+
+
 def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     """切换国家/区域：布局目录、门店列表、Display/销量路径与 grabber_config 对齐。"""
     global LAYOUTS_DIR, LAYOUT_TEMPLATES_DIR, LAST_STORE_FILE
@@ -4085,6 +4133,16 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     _display_items_cache = None
     _boot_store_pending = None
     try:
+        from display_lookup import reload_display_items
+
+        reload_display_items()
+    except Exception:
+        pass
+    try:
+        _reload_region_furniture_templates(fast=True)
+    except Exception:
+        pass
+    try:
         from sales_lookup import invalidate_weekly_sales_cache
 
         invalidate_weekly_sales_cache()
@@ -4106,13 +4164,18 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
         label = REGION_LABELS.get(region_id, region_id.upper())
         folder = default_output_folder(region_id)
         db = region_database_url(cfg, region_id)
+        tpl_count = len(furniture_templates)
+        if tpl_count:
+            extra = f" · 模板 {tpl_count} 个"
+        elif region_id in ("au", "ca"):
+            extra = f" · 本区域无 Display/模板，请 grab_display + 家具测绘（{folder}/）"
+        else:
+            extra = ""
         if db:
-            show_toast(f"已切换 {label} · 测绘/抓取用 {folder}/ 与对应 database_url")
+            show_toast(f"已切换 {label} · 数据目录 {folder}/{extra}")
         else:
             show_toast(
-                f"已切换 {label} · 请在 grabber_config.json → regions.{region_id}.database_url 配置澳洲库"
-                if region_id == "au"
-                else f"已切换 {label} · 未配置 regions.{region_id}.database_url"
+                f"已切换 {label} · 请配置 regions.{region_id}.database_url · {folder}/{extra}"
             )
 
 
@@ -5241,7 +5304,10 @@ def apply_obstacle_edit_dialog():
     else:
         col.pop("user_named", None)
     if size_changed and not resize_obstacle_rect(idx, length_m, width_m):
-        show_toast("尺寸无效或未与门店画布重叠")
+        global _undo_stack
+        if _undo_stack:
+            _undo_stack.pop()
+        show_toast("尺寸无效或未与门店画布重叠（贴边障碍可略缩小宽/长后重试）")
         cancel_obstacle_edit_dialog()
         return
     cancel_obstacle_edit_dialog()
@@ -5776,6 +5842,8 @@ def apply_wall_obstacle():
             editing_wall_size = False
             wall_size_edit_index = None
             show_toast(f"已更新 {name} 尺寸为 {length_m:g}×{width_m:g} m")
+        else:
+            show_toast("墙体尺寸无效或未与门店画布重叠")
         return
     length_mm = length_m * 1000
     width_mm = width_m * 1000
@@ -7724,11 +7792,15 @@ def main():
     screen.blit(boot_hint, boot_hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 18)))
     pygame.display.flip()
 
+    tpl_path = furniture_templates_json_path()
+    allow_empty = _active_layout_region != "nz"
     try:
-        furniture_templates = load_furniture_templates("furniture_templates.json", fast=True)
+        furniture_templates = load_furniture_templates(tpl_path, fast=True, allow_empty=allow_empty)
     except Exception as e:
         messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
         raise SystemExit(1) from e
+    if allow_empty and not furniture_templates:
+        print(f"区域 {_active_layout_region}: 无本地模板（{tpl_path}），侧边栏家具库为空。")
 
     print("坪效布局编辑器已启动。")
     _catalog_refresh_start_ms = pygame.time.get_ticks() + 1200

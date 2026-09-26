@@ -8,7 +8,8 @@ from ui_common import sanitize_display_text
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-from region_config import layouts_dir
+from region_config import layouts_dir, resolve_furniture_templates_path
+from display_lookup import load_grabber_config, get_active_region as _display_active_region
 
 LAYOUTS_DIR = layouts_dir()
 
@@ -48,7 +49,10 @@ def resolve_placed_family(name: str, stored: str = "") -> str:
     except Exception:
         pass
     try:
-        with open(os.path.join(SCRIPT_DIR, "furniture_templates.json"), encoding="utf-8") as f:
+        tpl_path = resolve_furniture_templates_path(
+            load_grabber_config(), _display_active_region(load_grabber_config())
+        )
+        with open(tpl_path, encoding="utf-8") as f:
             templates = json.load(f)
         for tpl in templates:
             if sanitize_display_text(tpl.get("id"), "") == sku:
