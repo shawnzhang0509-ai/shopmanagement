@@ -30,5 +30,6 @@
   "_legacy_note": "读取与抓取仅认 data/{region}/ 与 sql/{region}/；请把旧版 data/display.xlsx、data/weekly_sales.xlsx 移到 data/nz/ 后再抓取",
   "_sql_bootstrap_note": "若缺少 sql/ca/ 等目录，运行 python tools/bootstrap_region_sql.py；支持 display.txt / weekly_sales.txt；图片域名由程序按 image_base_url 自动替换",
   "_region_env_note": "环境变量 ACTIVE_REGION=au 或 DISPLAY_DB_URL_AU=... 可覆盖",
-  "_database_note": "多区域时根级 database_url 仅作 NZ 兜底；AU/CA 必须在 regions.au / regions.ca 各配独立 database_url，不会共用 NZ 库"
+  "_database_note": "多区域时根级 database_url 仅作 NZ 兜底；AU/CA 必须在 regions.au / regions.ca 各配独立 database_url，不会共用 NZ 库",
+  "_templates_note": "测绘 JSON 与 Display 均在 data/{region}/（furniture_templates.json、display.xlsx）；AU/CA 不会读取根目录 NZ 模板或 display_cache"
 }

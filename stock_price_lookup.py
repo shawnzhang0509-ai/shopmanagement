@@ -1,4 +1,4 @@
-"""仓库库存 + UnitPrice / SalePrice 查询（读 data/product_stock_price.xlsx）。"""
+"""仓库库存 + UnitPrice / SalePrice 查询（读 data/{region}/product_stock_price.xlsx）。"""
 from __future__ import annotations
 
 import os
@@ -12,6 +12,7 @@ STOCK_PRICE_SQL = os.path.join(SCRIPT_DIR, "sql", "product_stock_price.sql")
 _cache: dict[str, "StockPriceRow"] = {}
 _loaded_path: str | None = None
 _last_error: str | None = None
+_active_region_id: str = "nz"
 
 
 @dataclass
@@ -26,9 +27,12 @@ class StockPriceRow:
     walls_stock: int
     north_island_total: int
     gerald_connolly_stock: int
+    fulfillment_total: int | None = None
 
     @property
     def total_warehouse_stock(self) -> int:
+        if self.fulfillment_total is not None:
+            return int(self.fulfillment_total)
         return self.north_island_total + self.gerald_connolly_stock
 
     def price_label(self) -> str:
@@ -36,7 +40,7 @@ class StockPriceRow:
             return f"${self.sale_price:,.0f} (促) ← ${self.unit_price:,.0f}"
         return f"${self.unit_price:,.0f}"
 
-    def stock_label(self, *, compact: bool = False) -> str:
+    def nz_stock_label(self, *, compact: bool = False) -> str:
         if compact:
             return f"北{self.north_island_total} 南{self.gerald_connolly_stock}"
         return (
@@ -44,10 +48,30 @@ class StockPriceRow:
             f"北岛 {self.north_island_total} · GC {self.gerald_connolly_stock}"
         )
 
+    def stock_label(self, *, compact: bool = False) -> str:
+        """兼容旧调用：仅新西兰使用北/南岛语义。"""
+        if get_stock_price_region() == "nz":
+            return self.nz_stock_label(compact=compact)
+        wh = self.total_warehouse_stock
+        if wh > 0:
+            return f"仓{wh}" if compact else f"仓库 {wh}"
+        return ""
+
     def price_badge_compact(self) -> str:
         if self.on_promotion and self.sale_price < self.unit_price:
             return f"${self.sale_price:,.0f}促"
         return f"${self.sale_price:,.0f}"
+
+
+def get_stock_price_region() -> str:
+    return _active_region_id
+
+
+def set_stock_price_region(region_id: str | None) -> None:
+    global _active_region_id
+    from region_config import normalize_region_id
+
+    _active_region_id = normalize_region_id(region_id)
 
 
 def _norm_key(value: str) -> str:
@@ -90,6 +114,14 @@ def _parse_row(row: dict) -> StockPriceRow | None:
     on_promo = bool(_to_int(_row_value(row, "OnPromotion", "on_promotion")))
     if not on_promo and sale > 0 and unit > 0 and sale < unit:
         on_promo = True
+    north = _to_int(_row_value(row, "NorthIslandTotal", "north_island_total"))
+    south = _to_int(_row_value(row, "GeraldConnellyStock", "gerald_connolly_stock"))
+    fulfillment_raw = _row_value(row, "TotalWarehouseStock", "total_warehouse_stock", default="")
+    fulfillment: int | None = None
+    if fulfillment_raw not in (None, ""):
+        fulfillment = _to_int(fulfillment_raw, 0)
+    elif get_stock_price_region() != "nz" and (north + south) == 0:
+        fulfillment = None
     return StockPriceRow(
         sku=sku,
         product_name=str(_row_value(row, "ProductName", "product_name", "Name") or "").strip(),
@@ -99,9 +131,45 @@ def _parse_row(row: dict) -> StockPriceRow | None:
         on_promotion=on_promo,
         carbine_stock=_to_int(_row_value(row, "CarbineStock", "carbine_stock")),
         walls_stock=_to_int(_row_value(row, "WallsStock", "walls_stock")),
-        north_island_total=_to_int(_row_value(row, "NorthIslandTotal", "north_island_total")),
-        gerald_connolly_stock=_to_int(_row_value(row, "GeraldConnellyStock", "gerald_connolly_stock")),
+        north_island_total=north,
+        gerald_connolly_stock=south,
+        fulfillment_total=fulfillment,
     )
+
+
+def _display_stock_compact(sku_or_name: str, shop_id: str) -> str:
+    try:
+        from display_lookup import lookup_display_item
+    except Exception:
+        return ""
+    item = lookup_display_item(sku_or_name)
+    if not item:
+        return ""
+    sid = shop_id or "all"
+    parts: list[str] = []
+    disp = item.display_qty_for_shop(sid)
+    stor = item.storage_qty_for_shop(sid)
+    if disp > 0:
+        parts.append(f"场{int(disp)}")
+    if stor > 0:
+        parts.append(f"储{int(stor)}")
+    return " ".join(parts)
+
+
+def regional_stock_compact(sku_or_name: str, row: StockPriceRow | None, *, shop_id: str = "all") -> str:
+    """侧栏/画布库存短标签（按区域）。"""
+    rid = get_stock_price_region()
+    if rid == "nz":
+        return row.nz_stock_label(compact=True) if row else ""
+    parts: list[str] = []
+    placement = _display_stock_compact(sku_or_name, shop_id)
+    if placement:
+        parts.append(placement)
+    if row and row.total_warehouse_stock > 0:
+        wh = f"仓{row.total_warehouse_stock}"
+        if wh not in placement:
+            parts.append(wh)
+    return " ".join(parts)
 
 
 def invalidate_stock_prices_cache() -> None:
@@ -112,8 +180,10 @@ def invalidate_stock_prices_cache() -> None:
     _last_error = None
 
 
-def reload_stock_prices(path: str | None = None) -> dict[str, StockPriceRow]:
+def reload_stock_prices(path: str | None = None, *, region_id: str | None = None) -> dict[str, StockPriceRow]:
     global _cache, _loaded_path, _last_error
+    if region_id is not None:
+        set_stock_price_region(region_id)
     excel_path = path or DEFAULT_EXCEL
     _cache = {}
     _loaded_path = excel_path
@@ -150,21 +220,38 @@ def lookup_stock_price(sku_or_name: str) -> StockPriceRow | None:
     return None
 
 
-def format_stock_badge(sku_or_name: str) -> str:
-    """画布标签用：北6 南1 · $608"""
+def format_stock_badge(sku_or_name: str, *, shop_id: str = "all") -> str:
+    """画布标签：新西兰 北6 南1 · $608；澳洲/加拿大 场1 储2 · $782"""
     row = lookup_stock_price(sku_or_name)
-    if not row:
+    stock = regional_stock_compact(sku_or_name, row, shop_id=shop_id)
+    if not row and not stock:
         return ""
-    return f"{row.stock_label(compact=True)} · {row.price_badge_compact()}"
+    price = row.price_badge_compact() if row else ""
+    if stock and price:
+        return f"{stock} · {price}"
+    return stock or price
 
 
-def format_stock_price_hint(sku_or_name: str, *, compact: bool = True) -> str:
+def format_stock_price_hint(sku_or_name: str, *, compact: bool = True, shop_id: str = "all") -> str:
     row = lookup_stock_price(sku_or_name)
-    if not row:
+    if not row and not _display_stock_compact(sku_or_name, shop_id):
         return ""
+    if get_stock_price_region() == "nz":
+        if not row:
+            return ""
+        if compact:
+            return f"{row.price_label()} · 库存 {row.nz_stock_label(compact=True)}"
+        return f"{row.price_label()} · {row.nz_stock_label(compact=False)}"
+    stock = regional_stock_compact(sku_or_name, row, shop_id=shop_id)
+    if not row:
+        return f"库存 {stock}" if stock else ""
     if compact:
-        return f"{row.price_label()} · 库存 {row.stock_label(compact=True)}"
-    return f"{row.price_label()} · {row.stock_label(compact=False)}"
+        if stock:
+            return f"{row.price_label()} · 库存 {stock}"
+        return row.price_label()
+    if stock:
+        return f"{row.price_label()} · 库存 {stock}"
+    return row.price_label()
 
 
 def last_load_error() -> str | None:
