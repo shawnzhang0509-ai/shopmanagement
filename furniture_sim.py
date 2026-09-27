@@ -486,13 +486,16 @@ class GalleryView:
         for rid in SUPPORTED_REGIONS:
             rect = pygame.Rect(x, y, tab_w, tab_h)
             active = rid == _active_sim_region
-            pygame.draw.rect(surface, (255, 255, 255) if active else (55, 65, 81), rect, border_radius=6)
-            pygame.draw.rect(surface, C_ACCENT if active else C_BORDER, rect, 1, border_radius=6)
             label = REGION_LABELS.get(rid, rid.upper())
-            fg = C_ACCENT if active else C_SIDEBAR_MUTED
             if active:
-                fg = (255, 255, 255)
-            txt = FONT_MARK.render(label, True, fg if active else C_SIDEBAR_TEXT)
+                pygame.draw.rect(surface, (255, 255, 255), rect, border_radius=6)
+                pygame.draw.rect(surface, C_ACCENT, rect, 2, border_radius=6)
+                fg = C_ACCENT
+            else:
+                pygame.draw.rect(surface, (55, 65, 81), rect, border_radius=6)
+                pygame.draw.rect(surface, C_BORDER, rect, 1, border_radius=6)
+                fg = C_SIDEBAR_TEXT
+            txt = FONT_MARK.render(label, True, fg)
             surface.blit(txt, txt.get_rect(center=rect.center))
             _region_tab_rects[rid] = rect
             x += tab_w + gap
@@ -558,10 +561,6 @@ class GalleryView:
         self._draw_region_tabs(surface)
         self._draw_header_tabs(surface, sw, templates)
 
-        for dd in self._gallery_dropdowns.values():
-            if dd.open:
-                dd.draw_menu(surface, mouse_pos)
-
         content_h = self._ensure_layout(templates, sw)
         self.clamp_scroll(content_h, sh)
         self._prefetch_visible_images(sh)
@@ -594,6 +593,10 @@ class GalleryView:
         surface.set_clip(clip)
 
         self.draw_scrollbar(surface, sw, sh, content_h)
+
+        for dd in self._gallery_dropdowns.values():
+            if dd.open:
+                dd.draw_menu(surface, mouse_pos)
 
         err = last_load_error()
         if err and not display_items:
