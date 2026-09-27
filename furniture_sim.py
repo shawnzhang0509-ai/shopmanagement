@@ -395,7 +395,7 @@ class GalleryView:
                 self._cards.append((rect, "display", item.key))
                 x += self.CARD_W + self.CARD_GAP
             y = row_y + self.CARD_H + self.FAMILY_GAP
-        return y + self.PAD
+        return y + self.PAD + 28
 
     def scroll(self, delta: int):
         self.scroll_y = max(0, self.scroll_y + delta)
@@ -452,7 +452,9 @@ class GalleryView:
                 return "dd:opened"
         return None
 
-    def handle_click(self, mx: int, my: int):
+    def handle_click(self, mx: int, my: int, templates, screen_w: int):
+        self.sync_search_query()
+        self._ensure_layout(templates, screen_w)
         for rid, rect in _region_tab_rects.items():
             if rect.collidepoint(mx, my):
                 return f"region:{rid}"
@@ -2221,10 +2223,15 @@ _last_gallery_display_pick = {"key": None, "time": 0}
 
 
 def _find_display_item(key: str):
+    for it in display_items_including_blacklist():
+        if it.key == key:
+            return it
     for it in display_items:
         if it.key == key:
             return it
-    return None
+    from display_lookup import lookup_display_item
+
+    return lookup_display_item(key)
 
 
 def begin_survey_display(item) -> None:
@@ -2452,7 +2459,9 @@ def handle_gallery_click(mx, my):
     global selected_index, selected_display_key, display_shop
     global display_survey_filter, display_blacklist_mode, _active_sim_region
     global _last_gallery_display_pick
-    hit = gallery_view.handle_click(mx, my)
+    sw = screen.get_width() if screen else SCREEN_WIDTH
+    gallery_view.tick_search_debounce()
+    hit = gallery_view.handle_click(mx, my, furniture_templates, sw)
     if isinstance(hit, str) and hit.startswith("region:"):
         rid = hit.split(":", 1)[1]
         if rid != _active_sim_region:
@@ -2493,7 +2502,9 @@ def handle_gallery_click(mx, my):
         key = hit[1]
         item = _find_display_item(key)
         if not item:
+            toast.show("未找到该产品（Display 缓存不同步，请点「刷新」）")
             return True
+        input_search.deactivate()
         blur_inputs()
         now = pygame.time.get_ticks()
         is_double = key == _last_gallery_display_pick["key"] and now - _last_gallery_display_pick["time"] < 400
@@ -2546,6 +2557,8 @@ def main():
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
+        if app_screen == "gallery":
+            gallery_view.tick_search_debounce()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
