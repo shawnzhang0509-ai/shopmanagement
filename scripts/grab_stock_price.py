@@ -10,6 +10,7 @@ os.chdir(SCRIPT_DIR)
 sys.path.insert(0, SCRIPT_DIR)
 
 from display_lookup import grab_sql_to_excel, last_load_error, load_grabber_config
+from region_config import get_active_region, merge_region_config
 from stock_price_lookup import DEFAULT_EXCEL, STOCK_PRICE_SQL, reload_stock_prices
 
 

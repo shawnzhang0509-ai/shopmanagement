@@ -1,7 +1,7 @@
 -- 产品库存 + 原价/促销价（按 SKU 一行）
 -- 用法:
 --   SSMS: 改 @SkuFilter = '855' 只查某系列；留空 '' 查全部
---   抓取: python scripts/grab_stock_price.py → data/product_stock_price.xlsx
+--   抓取: python scripts/grab_stock_price.py → data/nz/product_stock_price.xlsx
 --
 -- 北岛库存 = Carbine Rd Warehouse + Walls / Walls Road / Walls in Transit
 -- 南岛库存 = CHCH Gerald Connelly / GC
@@ -70,6 +70,27 @@ LEFT JOIN (
 
 -- ↓ ImageUrl 子查询与 sql/display.sql 保持同步 ↓
 LEFT JOIN (
+    SELECT ProductId, RelativeFilePath
+    FROM (
+        SELECT
+            PD.ProductId,
+            D.RelativeFilePath,
+            ROW_NUMBER() OVER (
+                PARTITION BY PD.ProductId
+                ORDER BY
+                    CASE WHEN PD.IsDefaultProductPicture = 1 THEN 0 ELSE 1 END,
+                    D.DateUploadedOnUtc DESC
+            ) AS rn
+        FROM dbo.ProductDocuments PD
+        INNER JOIN dbo.Documents D
+            ON PD.DocumentId = D.Id
+        WHERE NULLIF(LTRIM(RTRIM(D.RelativeFilePath)), '') IS NOT NULL
+    ) t
+    WHERE rn = 1
+) img
+    ON img.ProductId = p.Id
+
+LEFT JOIN [dbo].[Stocks] s
     ON s.ProductId = p.Id
     AND s.StockStatus = 'Normal'
     AND s.StockOnHoldStatus IS NULL

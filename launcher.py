@@ -427,7 +427,7 @@ class DataGrabDialog(tk.Toplevel):
                         "output_excel": stock_out,
                     }
                     rows, excel_path = grab_sql_to_excel(stock_cfg)
-                    cache = reload_stock_prices(excel_path)
+                    cache = reload_stock_prices(excel_path, region_id=region_id)
                     self._log(f"库存/价格: {len(rows)} 行 · {len(cache)} SKU → {excel_path}")
 
             self._log("── 全部完成 ──")

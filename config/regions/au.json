@@ -9,7 +9,7 @@
   "shops": [
     {"id": "all", "label": "全部", "patterns": []},
     {"id": "sydney", "label": "Sydney", "patterns": ["sydney", "parramatta"]},
-    {"id": "melbourne", "label": "Melbourne", "patterns": ["melbourne", "dandenong"]},
+    {"id": "melbourne", "label": "Melbourne", "patterns": ["melbourne", "dandenong", "oakleigh"]},
     {"id": "brisbane", "label": "Brisbane", "patterns": ["brisbane", "gold coast", "goldcoast"]},
     {"id": "perth", "label": "Perth", "patterns": ["perth"]},
     {"id": "adelaide", "label": "Adelaide", "patterns": ["adelaide"]},

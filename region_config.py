@@ -305,6 +305,17 @@ def weekly_sales_excel_path(cfg: dict | None = None, region_id: str | None = Non
     return os.path.join(SCRIPT_DIR, folder, "weekly_sales.xlsx")
 
 
+def stock_price_excel_path(cfg: dict | None = None, region_id: str | None = None) -> str:
+    merged = merge_region_config(cfg, region_id)
+    if merged.get("stock_price_output_excel"):
+        path = merged["stock_price_output_excel"]
+        return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
+    folder = merged.get("output_folder") or "data"
+    if os.path.isabs(folder):
+        return os.path.join(folder, "product_stock_price.xlsx")
+    return os.path.join(SCRIPT_DIR, folder, "product_stock_price.xlsx")
+
+
 def has_multi_region_config(cfg: dict | None = None) -> bool:
     base = cfg or _load_grabber_config_raw()
     regions = base.get("regions")

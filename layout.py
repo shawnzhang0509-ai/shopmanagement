@@ -2147,6 +2147,15 @@ def current_sales_shop_id() -> str | None:
     return None
 
 
+def _reload_layout_stock_prices() -> None:
+    from display_lookup import load_grabber_config
+    from region_config import get_active_region, stock_price_excel_path
+
+    cfg = load_grabber_config()
+    rid = _active_layout_region or get_active_region(cfg)
+    reload_stock_prices(stock_price_excel_path(cfg, rid), region_id=rid)
+
+
 def sales_shop_display_label() -> str:
     sid = current_sales_shop_id()
     if not sid:
@@ -4056,7 +4065,7 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
         pass
 
     try:
-        reload_stock_prices()
+        _reload_layout_stock_prices()
     except Exception:
         pass
 
@@ -4149,9 +4158,7 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     except Exception:
         pass
     try:
-        from stock_price_lookup import invalidate_stock_prices_cache
-
-        invalidate_stock_prices_cache()
+        _reload_layout_stock_prices()
     except Exception:
         pass
     try:
@@ -4616,7 +4623,7 @@ def refresh_catalog_cache_async():
 def _startup_preload_worker() -> None:
     """后台预读库存/Display，不阻塞窗口弹出。"""
     try:
-        reload_stock_prices()
+        _reload_layout_stock_prices()
     except Exception:
         pass
     try:
@@ -7346,7 +7353,9 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         name_text = _truncate_label(tpl.name, FONT_BODY, row.width - TEMPLATE_THUMB - 16)
         surface.blit(FONT_BODY.render(name_text, True, C_TEXT), (tx, row.y + 6))
         meta = f"{family}  ·  {format_revenue_per_sqm(rps)}"
-        stock_hint = format_stock_price_hint(tpl.name, compact=True)
+        stock_hint = format_stock_price_hint(
+            tpl.name, compact=True, shop_id=current_sales_shop_id() or "all"
+        )
         if stock_hint:
             meta = f"{stock_hint}"
         if discontinued:
@@ -7370,7 +7379,9 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         if len(selected_furnitures) > 1:
             status_extra = f"家具×{len(selected_furnitures)} · "
         else:
-            hint = format_stock_price_hint(selected_feature.name, compact=True)
+            hint = format_stock_price_hint(
+                selected_feature.name, compact=True, shop_id=current_sales_shop_id() or "all"
+            )
             status_extra = f"{selected_feature.name}"
             if hint:
                 status_extra += f" · {hint}"
