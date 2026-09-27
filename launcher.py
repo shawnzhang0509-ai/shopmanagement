@@ -624,20 +624,34 @@ class LauncherApp:
             return
         if filename == "layout.py":
             try:
-                from display_lookup import load_grabber_config
-                from region_config import get_active_region, resolve_furniture_templates_path
+                from display_lookup import display_source_label, load_grabber_config
+                from region_config import display_excel_path, get_active_region, resolve_furniture_templates_path
 
                 cfg = load_grabber_config()
-                tpl = resolve_furniture_templates_path(cfg, get_active_region(cfg))
                 region = get_active_region(cfg)
+                tpl = resolve_furniture_templates_path(cfg, region)
+                display_path = display_excel_path(cfg, region)
+                has_display = os.path.isfile(display_path)
                 if not os.path.isfile(tpl) and region != "nz":
-                    messagebox.showinfo(
-                        "澳洲/加拿大首次使用",
-                        f"当前区域 {region.upper()} 尚无本地测绘模板。\n"
-                        f"路径：{tpl}\n\n"
-                        "请配置 regions.*.database_url 后运行 grab_display，再打开家具测绘。",
-                        parent=self.root,
-                    )
+                    if has_display:
+                        messagebox.showinfo(
+                            "说明：三类数据文件",
+                            f"当前区域 {region.upper()} 已有 Display：\n{display_source_label(display_path)}\n\n"
+                            f"尚未有「家具轮廓测绘库」（侧边栏拖家具用）：\n{tpl}\n\n"
+                            "layouts/*.json 是门店平面图，不能代替上面这个文件。\n"
+                            "可以正常打开布局；要拖新品类请用「家具测绘」保存到 data/{region}/。\n"
+                            "（不是路径读错，是少这一个 JSON）",
+                            parent=self.root,
+                        )
+                    else:
+                        messagebox.showinfo(
+                            "澳洲/加拿大首次使用",
+                            f"当前区域 {region.upper()} 尚无 Display 与测绘模板。\n"
+                            f"Display → {display_source_label(display_path)}\n"
+                            f"测绘 → {tpl}\n\n"
+                            "请先在「选择抓取内容」配置 database_url 并抓取 Display，再家具测绘。",
+                            parent=self.root,
+                        )
                 elif not os.path.isfile(tpl) and region == "nz":
                     messagebox.showwarning(
                         "缺少模板",
