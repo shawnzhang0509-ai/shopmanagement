@@ -424,6 +424,61 @@ def _cell_str(row: tuple, idx: int | None) -> str:
     return _cell_value(row[idx])
 
 
+def _slot_from_json(d) -> DisplaySlot | None:
+    """缓存 JSON 或内存里的 DisplaySlot / dict → DisplaySlot。"""
+    if isinstance(d, DisplaySlot):
+        qty = int(d.qty or 0)
+        if qty <= 0:
+            return None
+        return d
+    if not isinstance(d, dict):
+        return None
+    qty = int(d.get("qty", 0) or 0)
+    if qty <= 0:
+        return None
+    sid = str(d.get("shop_id", "other"))
+    return DisplaySlot(
+        sid,
+        str(d.get("shop_label") or shop_label(sid)),
+        str(d.get("location", "")),
+        qty,
+    )
+
+
+def _item_from_cache_row(row: dict) -> DisplayItem | None:
+    """display_cache.json 条目 → DisplayItem（勿走 _canonicalize_row，会丢掉 displays）。"""
+    if not isinstance(row, dict):
+        return None
+    code = _cell_value(row.get("product_code"))
+    name = _cell_value(row.get("product_name"))
+    family = _cell_value(row.get("product_family") or row.get("family"))
+    sub_family = _cell_value(row.get("sub_product_family") or row.get("subfamily"))
+    image_url = _cell_value(row.get("image_url") or row.get("imageurl"))
+    stock = _cell_value(row.get("stock_details") or row.get("stock"))
+    is_discontinued = _cell_bool(row.get("is_discontinued"))
+    if not name and not code:
+        return None
+    family = _resolve_family_name(family, name, code)
+    sub_family = _resolve_sub_family_name(sub_family, name, code)
+    display_slots = [s for d in row.get("displays") or [] if (s := _slot_from_json(d))]
+    storage_slots = [s for d in row.get("storages") or [] if (s := _slot_from_json(d))]
+    if not display_slots and not storage_slots and stock:
+        display_slots, storage_slots = parse_placement_stock_details(stock)
+    if not display_slots and not storage_slots:
+        return None
+    return DisplayItem(
+        code or name,
+        name or code,
+        family,
+        sub_family,
+        image_url,
+        stock,
+        is_discontinued,
+        display_slots,
+        storage_slots,
+    )
+
+
 def _row_to_item(row: dict) -> DisplayItem | None:
     code = _cell_value(row.get("product_code") or row.get("sku") or row.get("code"))
     name = _cell_value(row.get("product_name") or row.get("name") or row.get("title"))
@@ -439,31 +494,13 @@ def _row_to_item(row: dict) -> DisplayItem | None:
     raw_displays = row.get("displays")
     raw_storages = row.get("storages")
     if isinstance(raw_displays, list) and raw_displays:
-        display_slots = [
-            DisplaySlot(
-                str(d.get("shop_id", "other")),
-                str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
-                str(d.get("location", "")),
-                int(d.get("qty", 0) or 0),
-            )
-            for d in raw_displays
-            if int(d.get("qty", 0) or 0) > 0
-        ]
+        display_slots = [s for d in raw_displays if (s := _slot_from_json(d))]
     else:
         display_slots, _parsed_storage = parse_placement_stock_details(stock)
         if not raw_storages:
             raw_storages = _parsed_storage
     if isinstance(raw_storages, list) and raw_storages:
-        storage_slots = [
-            DisplaySlot(
-                str(d.get("shop_id", "other")),
-                str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
-                str(d.get("location", "")),
-                int(d.get("qty", 0) or 0),
-            )
-            for d in raw_storages
-            if int(d.get("qty", 0) or 0) > 0
-        ]
+        storage_slots = [s for d in raw_storages if (s := _slot_from_json(d))]
     else:
         storage_slots = []
     if not display_slots and not storage_slots:
@@ -1456,7 +1493,15 @@ def _load_cache_file(path: str | None = None) -> list[DisplayItem]:
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
     raw = payload.get("items", payload if isinstance(payload, list) else [])
-    return _rows_to_items(raw)
+    items: list[DisplayItem] = []
+    for row in raw:
+        if isinstance(row, DisplayItem):
+            items.append(row)
+            continue
+        it = _item_from_cache_row(row) if isinstance(row, dict) else None
+        if it:
+            items.append(it)
+    return filter_blacklisted(items) if items else []
 
 
 def save_cache(items: list[DisplayItem], path: str | None = None) -> None:
@@ -1480,6 +1525,15 @@ def save_cache(items: list[DisplayItem], path: str | None = None) -> None:
                         "qty": s.qty,
                     }
                     for s in it.displays
+                ],
+                "storages": [
+                    {
+                        "shop_id": s.shop_id,
+                        "shop_label": s.shop_label,
+                        "location": s.location,
+                        "qty": s.qty,
+                    }
+                    for s in it.storages
                 ],
             }
             for it in items
