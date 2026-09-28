@@ -1633,18 +1633,13 @@ def resize_wall_by_endpoint(index: int, end_idx: int, wx: float, wy: float) -> b
             return False
         cx = fixed[0] + (t / 2.0) * ux
         cy = fixed[1] + (t / 2.0) * uy
-        hl = abs(t) / 2.0
-        hw = width_mm / 2.0
-        new_points = [
-            (cx + sx * ux + sy * vx, cy + sx * uy + sy * vy)
-            for sx, sy in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, -hw))
-        ]
-        new_points = clip_obstacle_points(new_points)
-        if len(new_points) < 3 or polygon_area(new_points) <= 1.0:
+        new_points = build_wall_rectangle_at(cx, cy, ux, uy, abs(t), width_mm)
+        normalized = normalize_wall_rectangle_points(new_points)
+        if not normalized:
             return False
-        if not polygon_fully_inside_store(new_points):
+        if not polygon_fully_inside_store(normalized):
             return False
-        col["points"] = [[int(round(x)), int(round(y))] for x, y in new_points]
+        col["points"] = normalized
         return True
     if horizontal:
         new_length = abs(wx - fixed[0])
