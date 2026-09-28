@@ -73,6 +73,7 @@ function HeroBackground({ isMobile }: { isMobile: boolean }) {
 
   return (
     <>
+      {!isMobile && <HeroVideo />}
       <Image
         src={src}
         alt=""
