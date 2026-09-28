@@ -147,7 +147,6 @@ ROTATE_FINE_DEG = 15
 ROTATE_COARSE_DEG = 90
 LABEL_HIT_PAD = 18  # 屏幕像素：点文字即可选中
 FURNITURE_IMAGE_MIN_PX = 10  # zoom out 时仍显示的最小缩略图边长（像素）
-FURNITURE_IMAGE_MIN_SPAN_PX = 36  # 画布上家具占位小于此宽度时不画产品图（防糊成块）
 FURNITURE_LABEL_MIN_SPAN_PX = 32  # 标签随缩放变小；低于此像素仅保留点击热区
 FURNITURE_LABEL_REF_SPAN_PX = 96  # 家具在屏幕上约此宽度时使用标准字号
 FURNITURE_IMG_SOURCE_PX = 96  # 统一从该尺寸解码，缩放走缓存
@@ -2646,7 +2645,7 @@ def apply_canvas_mode_dropdown(value: str, buttons=None, dropdowns=None) -> None
         ensure_heatmap_metrics()
         show_toast("完整坪效：缩略图、详细标签、ROI 交叠闪烁")
     else:
-        show_toast("编辑模式：流畅摆场（放大后仍显示产品缩略图）")
+        show_toast("编辑模式：流畅摆场（热力色块保留）")
 
 
 def handle_dropdown_click(mx, my, dropdowns: dict) -> str | None:
@@ -2925,9 +2924,22 @@ class Furniture:
             border_c = _shade_color(border_rgb, 0.45)
         pygame.draw.polygon(surface, border_c, pts, border_w)
         fast_view = view_interaction_fast_mode()
+
+        if canvas_edit_mode():
+            if not fast_view and span >= 24 and not blink_idle:
+                name = _truncate_label(self.name, FONT_TINY, max(20, int(span * 0.88)))
+                surf = FONT_TINY.render(name, True, C_TEXT)
+                surface.blit(surf, surf.get_rect(center=(int(cx), int(cy - 6))))
+                badge = _furniture_stock_badge(self.name)
+                if badge and span >= 36:
+                    bsurf = FONT_TINY.render(badge, True, C_MUTED)
+                    surface.blit(bsurf, bsurf.get_rect(center=(int(cx), int(cy + 8))))
+            self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, max(16, int(span * 0.5)), 16)
+            return
+
         img_cy = cy - span * 0.16
 
-        if self.is_discontinued and not blink_idle and not fast_view and canvas_full_mode():
+        if self.is_discontinued and not blink_idle and not fast_view:
             inset = [
                 (int(px + (cx - px) * 0.04), int(py + (cy - py) * 0.04))
                 for px, py in pts
@@ -2935,7 +2947,7 @@ class Furniture:
             if len(inset) >= 3:
                 pygame.draw.polygon(surface, C_DISCONTINUED, inset, 2)
 
-        if not fast_view and span >= FURNITURE_IMAGE_MIN_SPAN_PX and not blink_idle:
+        if not fast_view and span >= 50 and not blink_idle:
             display_w = max(FURNITURE_IMAGE_MIN_PX, min(160, int(span * 0.78)))
             aspect = _furniture_aspect(self.name, self.product_family)
             display_h = max(FURNITURE_IMAGE_MIN_PX, int(display_w * aspect))
@@ -2949,26 +2961,13 @@ class Furniture:
                     pygame.draw.rect(surface, (255, 255, 255), shadow_rect, border_radius=4)
                     pygame.draw.rect(surface, (200, 210, 220), shadow_rect, 1, border_radius=4)
                 surface.blit(img, img_rect)
-            elif canvas_full_mode():
+            else:
                 inner = [
                     (int(cx + (p[0] - cx) * 0.72), int(img_cy + (p[1] - cy) * 0.72))
                     for p in pts
                 ]
                 if len(inner) >= 3:
                     pygame.draw.polygon(surface, _shade_color(border_rgb, 0.75), inner)
-
-        if canvas_edit_mode():
-            if not fast_view and span >= 24 and not blink_idle:
-                name = _truncate_label(self.name, FONT_TINY, max(20, int(span * 0.88)))
-                surf = FONT_TINY.render(name, True, C_TEXT)
-                label_y = int(cy + span * 0.22) if span >= FURNITURE_IMAGE_MIN_SPAN_PX else int(cy - 6)
-                surface.blit(surf, surf.get_rect(center=(int(cx), label_y)))
-                badge = _furniture_stock_badge(self.name)
-                if badge and span >= 36:
-                    bsurf = FONT_TINY.render(badge, True, C_MUTED)
-                    surface.blit(bsurf, bsurf.get_rect(center=(int(cx), label_y + 14)))
-            self._label_rect = pygame.Rect(int(cx) - 8, int(cy) - 8, max(16, int(span * 0.5)), 16)
-            return
 
         if not fast_view and (span >= FURNITURE_LABEL_MIN_SPAN_PX or selected) and not blink_idle:
             metric = format_revenue_per_sqm(self.revenue_per_sqm)
@@ -4000,22 +3999,9 @@ def image_url_for_product(name: str) -> str:
     from display_lookup import _normalize_key
 
     key = _normalize_key(name)
-    if not key:
-        return ""
-    items = _load_display_items_cache()
-    for item in items:
-        code = _normalize_key(item.product_code)
-        pname = _normalize_key(item.product_name)
-        if code == key or pname == key:
+    for item in _load_display_items_cache():
+        if _normalize_key(item.product_code) == key or _normalize_key(item.product_name) == key:
             return getattr(item, "image_url", "") or ""
-    for item in items:
-        code = _normalize_key(item.product_code)
-        if not code:
-            continue
-        if code.startswith(key) or key.startswith(code):
-            url = getattr(item, "image_url", "") or ""
-            if url:
-                return url
     return ""
 
 
