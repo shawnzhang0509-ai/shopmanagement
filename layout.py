@@ -134,7 +134,7 @@ STORE_PRESETS = [
     ("大型店 30×20 m", 30.0, 20.0),
     ("自定义", None, None),
 ]
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 MIN_SCREEN_W, MIN_SCREEN_H = 960, 600
 LABEL_MIN_W, LABEL_MIN_H = 56, 28
 WALL_LABEL_MIN_PX = 36  # 墙上至少显示长度（屏幕像素）
@@ -188,6 +188,13 @@ _catalog_refresh_start_ms = 0
 _catalog_refresh_started = False
 _heatmap_lazy_until_ms = 0
 _active_layout_region: str = "nz"
+
+
+def furniture_templates_json_path() -> str:
+    from display_lookup import load_grabber_config
+    from region_config import resolve_furniture_templates_path
+
+    return resolve_furniture_templates_path(load_grabber_config(), _active_layout_region)
 _region_tab_rects: dict[str, pygame.Rect] = {}
 
 # ── 字体 ────────────────────────────────────────────────────
@@ -2033,21 +2040,117 @@ def rect_points_centered(cx, cy, length_mm, width_mm):
     ]
 
 
+def rect_points_from_bounds(min_x, min_y, max_x, max_y):
+    return [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y),
+    ]
+
+
+def resize_obstacle_rect_points(old_points, length_mm, width_mm):
+    """按用户输入的长宽生成矩形；贴门店边/贴边的障碍以边为锚点扩展，避免中心缩放被裁切。"""
+    metrics = obstacle_rect_metrics(old_points)
+    if not metrics:
+        return None
+    cx, cy, _, _ = metrics
+    xs = [float(p[0]) for p in old_points]
+    ys = [float(p[1]) for p in old_points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    length_along_x = span_x >= span_y
+    if length_along_x:
+        new_span_x, new_span_y = float(length_mm), float(width_mm)
+    else:
+        new_span_x, new_span_y = float(width_mm), float(length_mm)
+
+    tol = OBSTACLE_SNAP_MM / 2 + 1
+    touch_l = min_x <= tol
+    touch_r = max_x >= store_width_mm - tol
+    touch_t = min_y <= tol
+    touch_b = max_y >= store_height_mm - tol
+
+    if not length_along_x and length_mm >= store_height_mm - tol * 2:
+        touch_t = True
+        touch_b = True
+    if length_along_x and length_mm >= store_width_mm - tol * 2:
+        touch_l = True
+        touch_r = True
+
+    new_span_x = min(new_span_x, float(store_width_mm))
+    new_span_y = min(new_span_y, float(store_height_mm))
+
+    sw = float(store_width_mm)
+    sh = float(store_height_mm)
+
+    if touch_l and touch_r:
+        nmin_x, nmax_x = 0.0, sw
+    elif touch_l:
+        nmin_x, nmax_x = 0.0, new_span_x
+    elif touch_r:
+        nmax_x = sw
+        nmin_x = nmax_x - new_span_x
+    else:
+        nmin_x = cx - new_span_x / 2.0
+        nmax_x = cx + new_span_x / 2.0
+        if nmin_x < 0:
+            nmax_x -= nmin_x
+            nmin_x = 0.0
+        if nmax_x > sw:
+            nmin_x -= nmax_x - sw
+            nmax_x = sw
+
+    if touch_t and touch_b:
+        nmin_y, nmax_y = 0.0, sh
+    elif touch_t:
+        nmin_y = 0.0
+        nmax_y = new_span_y
+    elif touch_b:
+        nmax_y = sh
+        nmin_y = nmax_y - new_span_y
+    else:
+        nmin_y = cy - new_span_y / 2.0
+        nmax_y = cy + new_span_y / 2.0
+        if nmin_y < 0:
+            nmax_y -= nmin_y
+            nmin_y = 0.0
+        if nmax_y > sh:
+            nmin_y -= nmax_y - sh
+            nmax_y = sh
+
+    nmin_x = max(0.0, nmin_x)
+    nmin_y = max(0.0, nmin_y)
+    nmax_x = min(sw, nmax_x)
+    nmax_y = min(sh, nmax_y)
+    if nmax_x - nmin_x < 1.0 or nmax_y - nmin_y < 1.0:
+        return None
+    return rect_points_from_bounds(nmin_x, nmin_y, nmax_x, nmax_y)
+
+
 def obstacle_rect_metrics(points, tol=None):
     """Axis-aligned rectangle obstacles return (cx, cy, length_mm, width_mm)."""
     if tol is None:
         tol = OBSTACLE_SNAP_MM / 2 + 5
-    if len(points) != 4:
+    if not points or len(points) < 4:
         return None
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
+    pts = []
+    for p in points:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            pts.append((float(p[0]), float(p[1])))
+    if len(pts) < 4:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
     span_x = max_x - min_x
     span_y = max_y - min_y
     if span_x < 1.0 and span_y < 1.0:
         return None
-    area_poly = abs(polygon_area(points))
+    area_poly = abs(polygon_area(pts))
     bbox_area = span_x * span_y
     if bbox_area > 1.0 and area_poly >= bbox_area * 0.96:
         cx = (min_x + max_x) / 2
@@ -2057,7 +2160,9 @@ def obstacle_rect_metrics(points, tol=None):
         if width_mm < 1.0:
             width_mm = max(width_mm, 1.0)
         return cx, cy, length_mm, width_mm
-    for x, y in points:
+    if len(pts) != 4:
+        return None
+    for x, y in pts:
         on_corner = (
             (abs(x - min_x) <= tol or abs(x - max_x) <= tol)
             and (abs(y - min_y) <= tol or abs(y - max_y) <= tol)
@@ -2077,22 +2182,17 @@ def obstacle_rect_metrics(points, tol=None):
 
 def resize_obstacle_rect(index, length_m, width_m) -> bool:
     col = collision_polygons[index]
-    metrics = obstacle_rect_metrics(col["points"])
-    if not metrics:
-        return False
-    cx, cy, _, _ = metrics
     length_mm = length_m * 1000
     width_mm = width_m * 1000
-    xs = [p[0] for p in col["points"]]
-    ys = [p[1] for p in col["points"]]
-    span_x = max(xs) - min(xs)
-    span_y = max(ys) - min(ys)
-    if span_x >= span_y:
-        new_points = rect_points_centered(cx, cy, length_mm, width_mm)
-    else:
-        new_points = rect_points_centered(cx, cy, width_mm, length_mm)
+    new_points = resize_obstacle_rect_points(col["points"], length_mm, width_mm)
+    if not new_points:
+        return False
     new_points = clip_obstacle_points(new_points)
-    if len(new_points) < 3 or polygon_area(new_points) <= 1.0:
+    target_area = length_mm * width_mm
+    actual_area = polygon_area(new_points)
+    if len(new_points) < 3 or actual_area <= 1.0:
+        return False
+    if target_area > 1.0 and actual_area < target_area * 0.85:
         return False
     if obstacle_is_zone(col):
         overlaps, other_name = zone_overlaps_any(new_points, index)
@@ -2130,6 +2230,15 @@ def current_sales_shop_id() -> str | None:
     if sid and sid != "other":
         return sid
     return None
+
+
+def _reload_layout_stock_prices() -> None:
+    from display_lookup import load_grabber_config
+    from region_config import get_active_region, stock_price_excel_path
+
+    cfg = load_grabber_config()
+    rid = _active_layout_region or get_active_region(cfg)
+    reload_stock_prices(stock_price_excel_path(cfg, rid), region_id=rid)
 
 
 def sales_shop_display_label() -> str:
@@ -3604,7 +3713,9 @@ def _family_from_display_item(item, sku: str) -> str:
     return effective_family_from_display_item(item)
 
 
-def _furniture_templates_json_by_id(json_path="furniture_templates.json") -> dict[str, dict]:
+def _furniture_templates_json_by_id(json_path=None) -> dict[str, dict]:
+    if json_path is None:
+        json_path = furniture_templates_json_path()
     global _templates_json_cache, _templates_json_mtime
     try:
         mtime = os.path.getmtime(json_path)
@@ -3903,8 +4014,10 @@ def check_collision(furniture, obstacles):
     return False
 
 
-def load_furniture_templates(json_path, *, fast=False):
+def load_furniture_templates(json_path, *, fast=False, allow_empty=False):
     if not os.path.isfile(json_path):
+        if allow_empty:
+            return []
         raise FileNotFoundError(f"找不到 {json_path}，请确认在项目目录下运行")
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -3941,11 +4054,15 @@ def load_furniture_templates(json_path, *, fast=False):
                 )
             )
     if not templates:
+        if allow_empty:
+            return []
         raise ValueError(f"{json_path} 中没有有效的家具模板")
     return templates
 
 
-def repair_furniture_templates_json(json_path="furniture_templates.json") -> int:
+def repair_furniture_templates_json(json_path=None) -> int:
+    if json_path is None:
+        json_path = furniture_templates_json_path()
     """把 JSON 里 SKU 占位的 product_family 修正为 Display/推断系列名并写回文件。"""
     if not os.path.isfile(json_path):
         return 0
@@ -4009,9 +4126,11 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
     _cached_family_dropdown_key = ()
     _cached_family_dropdown_options = None
 
+    tpl_path = furniture_templates_json_path()
+    allow_empty = _active_layout_region != "nz"
     try:
-        templates_repaired = repair_furniture_templates_json("furniture_templates.json")
-        furniture_templates = load_furniture_templates("furniture_templates.json")
+        templates_repaired = repair_furniture_templates_json(tpl_path)
+        furniture_templates = load_furniture_templates(tpl_path, allow_empty=allow_empty)
     except Exception as exc:
         show_toast(f"模板刷新失败: {exc}")
         return False
@@ -4031,7 +4150,7 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
         pass
 
     try:
-        reload_stock_prices()
+        _reload_layout_stock_prices()
     except Exception:
         pass
 
@@ -4049,6 +4168,29 @@ def refresh_editor_catalog(*, reload_display: bool = True) -> bool:
 
 
 # ── 数据持久化 ──────────────────────────────────────────────
+def _reload_region_furniture_templates(*, fast: bool = True) -> None:
+    global furniture_templates, selected_template_index, template_scroll_offset
+    global _cached_family_dropdown_options, _cached_family_dropdown_key
+
+    path = furniture_templates_json_path()
+    allow_empty = _active_layout_region != "nz"
+    try:
+        furniture_templates = load_furniture_templates(path, fast=fast, allow_empty=allow_empty)
+    except Exception:
+        if allow_empty:
+            furniture_templates = []
+        else:
+            raise
+    template_scroll_offset = 0
+    if furniture_templates:
+        if selected_template_index >= len(furniture_templates):
+            selected_template_index = max(0, len(furniture_templates) - 1)
+    else:
+        selected_template_index = 0
+    _cached_family_dropdown_key = ()
+    _cached_family_dropdown_options = None
+
+
 def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     """切换国家/区域：布局目录、门店列表、Display/销量路径与 grabber_config 对齐。"""
     global LAYOUTS_DIR, LAYOUT_TEMPLATES_DIR, LAST_STORE_FILE
@@ -4085,15 +4227,23 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
     _display_items_cache = None
     _boot_store_pending = None
     try:
+        from display_lookup import reload_display_items
+
+        reload_display_items()
+    except Exception:
+        pass
+    try:
+        _reload_region_furniture_templates(fast=True)
+    except Exception:
+        pass
+    try:
         from sales_lookup import invalidate_weekly_sales_cache
 
         invalidate_weekly_sales_cache()
     except Exception:
         pass
     try:
-        from stock_price_lookup import invalidate_stock_prices_cache
-
-        invalidate_stock_prices_cache()
+        _reload_layout_stock_prices()
     except Exception:
         pass
     try:
@@ -4106,13 +4256,18 @@ def apply_layout_region(region_id: str, *, persist: bool = True) -> None:
         label = REGION_LABELS.get(region_id, region_id.upper())
         folder = default_output_folder(region_id)
         db = region_database_url(cfg, region_id)
+        tpl_count = len(furniture_templates)
+        if tpl_count:
+            extra = f" · 模板 {tpl_count} 个"
+        elif region_id in ("au", "ca"):
+            extra = f" · 本区域无 Display/模板，请 grab_display + 家具测绘（{folder}/）"
+        else:
+            extra = ""
         if db:
-            show_toast(f"已切换 {label} · 测绘/抓取用 {folder}/ 与对应 database_url")
+            show_toast(f"已切换 {label} · 数据目录 {folder}/{extra}")
         else:
             show_toast(
-                f"已切换 {label} · 请在 grabber_config.json → regions.{region_id}.database_url 配置澳洲库"
-                if region_id == "au"
-                else f"已切换 {label} · 未配置 regions.{region_id}.database_url"
+                f"已切换 {label} · 请配置 regions.{region_id}.database_url · {folder}/{extra}"
             )
 
 
@@ -4553,7 +4708,7 @@ def refresh_catalog_cache_async():
 def _startup_preload_worker() -> None:
     """后台预读库存/Display，不阻塞窗口弹出。"""
     try:
-        reload_stock_prices()
+        _reload_layout_stock_prices()
     except Exception:
         pass
     try:
@@ -5168,7 +5323,9 @@ def start_edit_obstacle_dialog(index=None):
         index = selected_collision
     if index < 0 or index >= len(collision_polygons):
         return
-    metrics = obstacle_rect_metrics(collision_polygons[index]["points"])
+    points = collision_polygons[index]["points"]
+    metrics = obstacle_rect_metrics(points)
+    intrinsic = obstacle_intrinsic_length_width_mm(points)
     cancel_rename_dialog()
     cancel_wall_size_edit()
     cancel_marker_edit_dialog()
@@ -5176,6 +5333,10 @@ def start_edit_obstacle_dialog(index=None):
     obstacle_edit_size_enabled = metrics is not None
     if metrics:
         _, _, length_mm, width_mm = metrics
+        obstacle_edit_length = f"{length_mm / 1000:g}"
+        obstacle_edit_width = f"{width_mm / 1000:g}"
+    elif intrinsic:
+        length_mm, width_mm = intrinsic
         obstacle_edit_length = f"{length_mm / 1000:g}"
         obstacle_edit_width = f"{width_mm / 1000:g}"
     else:
@@ -5241,7 +5402,10 @@ def apply_obstacle_edit_dialog():
     else:
         col.pop("user_named", None)
     if size_changed and not resize_obstacle_rect(idx, length_m, width_m):
-        show_toast("尺寸无效或未与门店画布重叠")
+        global _undo_stack
+        if _undo_stack:
+            _undo_stack.pop()
+        show_toast("尺寸无效或未与门店画布重叠（贴边障碍可略缩小宽/长后重试）")
         cancel_obstacle_edit_dialog()
         return
     cancel_obstacle_edit_dialog()
@@ -5776,6 +5940,8 @@ def apply_wall_obstacle():
             editing_wall_size = False
             wall_size_edit_index = None
             show_toast(f"已更新 {name} 尺寸为 {length_m:g}×{width_m:g} m")
+        else:
+            show_toast("墙体尺寸无效或未与门店画布重叠")
         return
     length_mm = length_m * 1000
     width_mm = width_m * 1000
@@ -6504,7 +6670,40 @@ def obstacle_screen_rect(col) -> pygame.Rect:
     return pygame.Rect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
 
 
+def obstacle_quad_edge_lengths_mm(points) -> list[float] | None:
+    """四边形障碍/墙体的四条边长（mm）；旋转后仍等于真实长宽。"""
+    pts: list[tuple[float, float]] = []
+    for p in points or []:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            pts.append((float(p[0]), float(p[1])))
+    if len(pts) != 4:
+        return None
+    lens: list[float] = []
+    for i in range(4):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % 4]
+        lens.append(math.hypot(x2 - x1, y2 - y1))
+    return lens
+
+
+def obstacle_intrinsic_length_width_mm(points) -> tuple[float, float] | None:
+    """矩形障碍的长边、短边（mm），支持自由旋转。"""
+    lens = obstacle_quad_edge_lengths_mm(points)
+    if not lens:
+        return None
+    tol = max(OBSTACLE_SNAP_MM, 50.0)
+    a, b, c, d = sorted(lens, reverse=True)
+    long_side = (a + b) / 2.0 if abs(a - b) <= tol else max(lens)
+    short_side = (c + d) / 2.0 if abs(c - d) <= tol else min(lens)
+    if long_side < 1.0:
+        return None
+    return long_side, max(short_side, 1.0)
+
+
 def obstacle_length_mm(col) -> float:
+    intrinsic = obstacle_intrinsic_length_width_mm(col.get("points"))
+    if intrinsic:
+        return intrinsic[0]
     metrics = obstacle_rect_metrics(col["points"])
     if metrics:
         return metrics[2]
@@ -7278,7 +7477,9 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         name_text = _truncate_label(tpl.name, FONT_BODY, row.width - TEMPLATE_THUMB - 16)
         surface.blit(FONT_BODY.render(name_text, True, C_TEXT), (tx, row.y + 6))
         meta = f"{family}  ·  {format_revenue_per_sqm(rps)}"
-        stock_hint = format_stock_price_hint(tpl.name, compact=True)
+        stock_hint = format_stock_price_hint(
+            tpl.name, compact=True, shop_id=current_sales_shop_id() or "all"
+        )
         if stock_hint:
             meta = f"{stock_hint}"
         if discontinued:
@@ -7302,7 +7503,9 @@ def draw_sidebar(buttons, input_box, dropdowns, template_rows_top, template_rows
         if len(selected_furnitures) > 1:
             status_extra = f"家具×{len(selected_furnitures)} · "
         else:
-            hint = format_stock_price_hint(selected_feature.name, compact=True)
+            hint = format_stock_price_hint(
+                selected_feature.name, compact=True, shop_id=current_sales_shop_id() or "all"
+            )
             status_extra = f"{selected_feature.name}"
             if hint:
                 status_extra += f" · {hint}"
@@ -7724,11 +7927,15 @@ def main():
     screen.blit(boot_hint, boot_hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 18)))
     pygame.display.flip()
 
+    tpl_path = furniture_templates_json_path()
+    allow_empty = _active_layout_region != "nz"
     try:
-        furniture_templates = load_furniture_templates("furniture_templates.json", fast=True)
+        furniture_templates = load_furniture_templates(tpl_path, fast=True, allow_empty=allow_empty)
     except Exception as e:
         messagebox.showerror("启动失败", f"无法加载家具模板:\n{e}\n\n当前目录:\n{os.getcwd()}")
         raise SystemExit(1) from e
+    if allow_empty and not furniture_templates:
+        print(f"区域 {_active_layout_region}: 无本地模板（{tpl_path}），侧边栏家具库为空。")
 
     print("坪效布局编辑器已启动。")
     _catalog_refresh_start_ms = pygame.time.get_ticks() + 1200

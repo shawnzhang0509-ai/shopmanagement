@@ -34,20 +34,32 @@ from display_lookup import (
     last_load_source,
     last_family_column,
     load_display_items,
+    load_grabber_config,
+    save_grabber_config,
     lookup_display_item,
     match_template_index,
     find_template_index_by_id,
     prune_orphan_templates,
-    resolve_is_discontinued,
     reload_display_items,
+    reload_shops,
+    resolve_is_discontinued,
     shop_stats,
     shops_for_display_tabs,
+)
+from region_config import (
+    REGION_LABELS,
+    SUPPORTED_REGIONS,
+    default_output_folder,
+    get_active_region,
+    normalize_region_id,
+    region_labels,
+    resolve_furniture_templates_path,
 )
 from product_images import is_image_failed, prefetch_urls, request_thumbnail, request_image
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(SCRIPT_DIR)
-TEMPLATES_FILE = "furniture_templates.json"
+TEMPLATES_FILE = resolve_furniture_templates_path(load_grabber_config(), get_active_region(load_grabber_config()))
 
 pygame.init()
 
@@ -186,12 +198,14 @@ _undo_stack: list[dict] = []
 _undo_drag_started = False
 return_to_gallery_after_edit = False
 _gallery_snapshot: dict | None = None
+_active_sim_region: str = "nz"
+_region_tab_rects: dict[str, pygame.Rect] = {}
 
 
 class GalleryView:
     """全屏总览：Display 大库（按门店 / 已测绘筛选）。"""
 
-    TOP_H = 102
+    TOP_H = 108
     SHOP_H = 36
     FILTER_H = 28
     FAMILY_H = 40
@@ -212,6 +226,7 @@ class GalleryView:
         self.refresh_btn = Button((0, 0, 0, 0), "刷新", "display_refresh")
         self.copy_btn = Button((0, 0, 0, 0), "复制", "gallery_copy")
         self.paste_btn = Button((0, 0, 0, 0), "粘贴", "gallery_paste")
+        self.import_btn = Button((0, 0, 0, 0), "区际导入", "gallery_import")
         self._layout = []
         self._cards = []  # (rect, kind, data) kind: template|display
         self._gallery_dropdowns: dict[str, Dropdown] = {}
@@ -267,6 +282,7 @@ class GalleryView:
     def _layout_cache_key(self, templates, screen_w: int) -> tuple:
         return (
             screen_w,
+            _active_sim_region,
             display_shop,
             display_survey_filter,
             display_blacklist_mode,
@@ -379,7 +395,7 @@ class GalleryView:
                 self._cards.append((rect, "display", item.key))
                 x += self.CARD_W + self.CARD_GAP
             y = row_y + self.CARD_H + self.FAMILY_GAP
-        return y + self.PAD
+        return y + self.PAD + 28
 
     def scroll(self, delta: int):
         self.scroll_y = max(0, self.scroll_y + delta)
@@ -436,7 +452,12 @@ class GalleryView:
                 return "dd:opened"
         return None
 
-    def handle_click(self, mx: int, my: int):
+    def handle_click(self, mx: int, my: int, templates, screen_w: int):
+        self.sync_search_query()
+        self._ensure_layout(templates, screen_w)
+        for rid, rect in _region_tab_rects.items():
+            if rect.collidepoint(mx, my):
+                return f"region:{rid}"
         if self.back_btn.contains((mx, my)):
             return "back"
         if self.refresh_btn.contains((mx, my)):
@@ -445,10 +466,12 @@ class GalleryView:
             return "gallery_copy"
         if self.paste_btn.contains((mx, my)):
             return "gallery_paste"
+        if self.import_btn.contains((mx, my)):
+            return "gallery_import"
         dd_hit = self._handle_gallery_dropdown_click(mx, my)
         if isinstance(dd_hit, str) and dd_hit.startswith(("shop:", "survey:", "bl:")):
             return dd_hit
-        if dd_hit in ("dd:opened", "dd:closed"):
+        if dd_hit == "dd:opened":
             return True
         if input_search.contains((mx, my)):
             return None
@@ -461,8 +484,30 @@ class GalleryView:
                     return ("display", data)
         return None
 
+    def _draw_region_tabs(self, surface) -> None:
+        global _region_tab_rects
+        _region_tab_rects = {}
+        tab_w, tab_h, gap = 72, 26, 6
+        x, y = 20, 8
+        for rid in SUPPORTED_REGIONS:
+            rect = pygame.Rect(x, y, tab_w, tab_h)
+            active = rid == _active_sim_region
+            label = REGION_LABELS.get(rid, rid.upper())
+            if active:
+                pygame.draw.rect(surface, (255, 255, 255), rect, border_radius=6)
+                pygame.draw.rect(surface, C_ACCENT, rect, 2, border_radius=6)
+                fg = C_ACCENT
+            else:
+                pygame.draw.rect(surface, (55, 65, 81), rect, border_radius=6)
+                pygame.draw.rect(surface, C_BORDER, rect, 1, border_radius=6)
+                fg = C_SIDEBAR_TEXT
+            txt = FONT_MARK.render(label, True, fg)
+            surface.blit(txt, txt.get_rect(center=rect.center))
+            _region_tab_rects[rid] = rect
+            x += tab_w + gap
+
     def _draw_header_tabs(self, surface, sw: int, templates):
-        input_search.rect = pygame.Rect(20, 10, min(360, sw - 560), 28)
+        input_search.rect = pygame.Rect(20, 38, min(360, max(160, sw - 600)), 28)
         input_search.draw(surface, None, on_dark=True)
 
         stats = cached_shop_stats(display_items, templates) if display_items else {}
@@ -470,19 +515,21 @@ class GalleryView:
             s = stats["all"]
             label = f"已测绘 {s['modeled']}/{s['total']}"
         else:
-            label = f"共 {len(templates)} 个"
-        surface.blit(FONT_SMALL.render(label, True, C_SIDEBAR_MUTED), (input_search.rect.right + 10, 16))
+            label = f"共 {len(templates)} 个测绘模板"
+        surface.blit(FONT_SMALL.render(label, True, C_SIDEBAR_MUTED), (input_search.rect.right + 10, 44))
 
-        self.refresh_btn.rect = pygame.Rect(sw - 248, 10, 72, 28)
+        self.refresh_btn.rect = pygame.Rect(sw - 248, 38, 72, 28)
         self.refresh_btn.draw(surface, mouse_pos, on_dark=True)
-        self.paste_btn.rect = pygame.Rect(sw - 328, 10, 56, 28)
-        self.copy_btn.rect = pygame.Rect(sw - 392, 10, 56, 28)
+        self.paste_btn.rect = pygame.Rect(sw - 328, 38, 56, 28)
+        self.copy_btn.rect = pygame.Rect(sw - 392, 38, 56, 28)
+        self.import_btn.rect = pygame.Rect(sw - 472, 38, 72, 28)
         self.paste_btn.draw(surface, mouse_pos, on_dark=True)
         self.copy_btn.draw(surface, mouse_pos, on_dark=True)
-        self.back_btn.rect = pygame.Rect(sw - 148, 10, 128, 28)
+        self.import_btn.draw(surface, mouse_pos, on_dark=True)
+        self.back_btn.rect = pygame.Rect(sw - 148, 38, 128, 28)
         self.back_btn.draw(surface, mouse_pos, on_dark=True)
 
-        fy = 42
+        fy = 70
         gap = 8
         shop_w = min(200, max(120, (sw - 40 - gap * 2) // 3))
         filt_w = min(160, max(100, (sw - 40 - gap * 2 - shop_w) // 2))
@@ -519,15 +566,8 @@ class GalleryView:
         surface.fill((245, 247, 250))
         pygame.draw.rect(surface, C_SIDEBAR_DARK, (0, 0, sw, self.TOP_H))
 
-        title = "Display 大库"
-        surface.blit(FONT_TITLE.render(title, True, C_SIDEBAR_TEXT), (20, 74))
-        surface.blit(FONT_MARK.render("单击选中 · 复制/粘贴按钮或 Ctrl+C/V", True, C_SIDEBAR_MUTED), (168, 78))
-
+        self._draw_region_tabs(surface)
         self._draw_header_tabs(surface, sw, templates)
-
-        for dd in self._gallery_dropdowns.values():
-            if dd.open:
-                dd.draw_menu(surface, mouse_pos)
 
         content_h = self._ensure_layout(templates, sw)
         self.clamp_scroll(content_h, sh)
@@ -562,6 +602,10 @@ class GalleryView:
 
         self.draw_scrollbar(surface, sw, sh, content_h)
 
+        for dd in self._gallery_dropdowns.values():
+            if dd.open:
+                dd.draw_menu(surface, mouse_pos)
+
         err = last_load_error()
         if err and not display_items:
             banner = FONT_SMALL.render(f"⚠ {err[:90]}", True, (200, 80, 60))
@@ -569,7 +613,7 @@ class GalleryView:
         elif display_items and last_load_source():
             src = last_load_source()
             fam_col = last_family_column()
-            hint = f"数据源: {src}"
+            hint = f"区域 {_active_sim_region.upper()} · 数据源: {src}"
             if fam_col:
                 hint += f" · Family列: {fam_col}"
             with_img = sum(1 for it in display_items if getattr(it, "image_url", ""))
@@ -1782,9 +1826,11 @@ def write_templates_file(*, quiet: bool = False):
         toast.show(f"已写入 {TEMPLATES_FILE}")
 
 
-def load_templates_file(path=TEMPLATES_FILE):
+def load_templates_file(path=TEMPLATES_FILE, *, quiet=False):
     global furniture_templates, selected_index
     if not os.path.isfile(path):
+        furniture_templates = []
+        selected_index = -1
         return
     with open(path, "r", encoding="utf-8") as f:
         furniture_templates = json.load(f)
@@ -1816,6 +1862,8 @@ def load_templates_file(path=TEMPLATES_FILE):
         )
     selected_index = -1
     removed = prune_templates_against_display(persist=path == TEMPLATES_FILE)
+    if quiet:
+        return
     if removed:
         toast.show(f"已加载 {len(furniture_templates)} 个模板，移除游离项: {', '.join(removed)}")
     else:
@@ -2175,10 +2223,15 @@ _last_gallery_display_pick = {"key": None, "time": 0}
 
 
 def _find_display_item(key: str):
+    for it in display_items_including_blacklist():
+        if it.key == key:
+            return it
     for it in display_items:
         if it.key == key:
             return it
-    return None
+    from display_lookup import lookup_display_item
+
+    return lookup_display_item(key)
 
 
 def begin_survey_display(item) -> None:
@@ -2234,7 +2287,7 @@ def gallery_paste_model() -> bool:
         toast.show("请先单击选中目标产品")
         return False
     if not _template_clipboard:
-        toast.show("剪贴板为空，请先 Ctrl+C 复制已测绘产品")
+        toast.show("剪贴板为空，请先 Ctrl+C 复制已测绘产品；或切到 NZ Tab 复制后切回粘贴")
         return False
     item = _find_display_item(selected_display_key)
     if not item:
@@ -2243,11 +2296,142 @@ def gallery_paste_model() -> bool:
     return True
 
 
+def merge_templates_from_region(src_region: str) -> int:
+    """按 SKU 将另一区域的测绘轮廓合并到当前区域（不同库也可，仅形状复用）。"""
+    global furniture_templates
+
+    src_region = normalize_region_id(src_region)
+    if src_region == _active_sim_region:
+        return 0
+    cfg = load_grabber_config()
+    src_path = resolve_furniture_templates_path(cfg, src_region)
+    if not os.path.isfile(src_path):
+        toast.show(f"源区域无测绘文件: {src_path}")
+        return 0
+    try:
+        with open(src_path, "r", encoding="utf-8") as f:
+            src_list = json.load(f)
+    except Exception as exc:
+        toast.show(f"读取失败: {exc}")
+        return 0
+    if not isinstance(src_list, list):
+        toast.show("源测绘 JSON 格式无效")
+        return 0
+    by_id: dict[str, dict] = {}
+    for tpl in src_list:
+        if not isinstance(tpl, dict):
+            continue
+        tid = str(tpl.get("id") or "").strip()
+        if tid:
+            by_id[tid] = tpl
+
+    merged = 0
+    for item in display_items:
+        code = (item.product_code or item.product_name or "").strip()
+        if not code or code not in by_id:
+            continue
+        if match_template_index(item, furniture_templates) >= 0:
+            continue
+        apply_template_to_display_item(item, by_id[code])
+        merged += 1
+    if merged:
+        toast.show(f"已从 {REGION_LABELS.get(src_region, src_region)} 匹配导入 {merged} 个测绘")
+    else:
+        toast.show("无新增：SKU 未匹配或当前区域已全部测绘")
+    return merged
+
+
+def gallery_import_from_region_ui() -> bool:
+    """弹窗选择 NZ/AU/CA 源区域，批量按 SKU 导入测绘。"""
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = get_tk_root()
+    win = tk.Toplevel(root)
+    win.title("区际导入测绘")
+    win.transient(root)
+    win.grab_set()
+    tk.Label(
+        win,
+        text="按产品 SKU 匹配，只导入当前 Display 里有的款。\n"
+        "轮廓来自源区域，系列名/ROI 会按本区 Display 刷新。",
+        justify="left",
+        padx=12,
+        pady=8,
+    ).pack(anchor="w")
+    var = tk.StringVar(value="nz")
+    frame = ttk.Frame(win, padding=8)
+    frame.pack(fill="x")
+    for rid, label in region_labels():
+        if rid == _active_sim_region:
+            continue
+        ttk.Radiobutton(frame, text=f"{label} ({rid.upper()})", variable=var, value=rid).pack(anchor="w")
+
+    result = {"ok": False}
+
+    def on_ok() -> None:
+        result["ok"] = True
+        win.destroy()
+
+    def on_cancel() -> None:
+        win.destroy()
+
+    btns = ttk.Frame(win, padding=(8, 4, 8, 10))
+    btns.pack(fill="x")
+    ttk.Button(btns, text="导入", command=on_ok).pack(side="left")
+    ttk.Button(btns, text="取消", command=on_cancel).pack(side="left", padx=8)
+    win.wait_window()
+    if not result["ok"]:
+        return False
+    return merge_templates_from_region(var.get()) > 0
+
+
+def apply_sim_region(region_id: str, *, persist: bool = True) -> None:
+    """切换 NZ/AU/CA：Display、门店规则、测绘 JSON 均按 data/{region}/ 重载。"""
+    global TEMPLATES_FILE, furniture_templates, display_items, selected_index, _active_sim_region
+    global display_shop, selected_display_key
+
+    region_id = normalize_region_id(region_id)
+    cfg = load_grabber_config()
+    if persist:
+        cfg = {**cfg, "active_region": region_id}
+        save_grabber_config(cfg)
+    else:
+        cfg = {**cfg, "active_region": region_id}
+
+    _active_sim_region = region_id
+    reload_shops(cfg)
+    TEMPLATES_FILE = resolve_furniture_templates_path(cfg, region_id)
+    display_items = reload_display_items(prefer_db=False)
+    if os.path.isfile(TEMPLATES_FILE):
+        load_templates_file(TEMPLATES_FILE, quiet=True)
+    else:
+        furniture_templates = []
+        selected_index = -1
+
+    display_shop = "all"
+    selected_display_key = None
+    gallery_view.scroll_y = 0
+    gallery_view.invalidate_layout()
+    gallery_view.sync_search_query()
+    invalidate_shop_stats_cache()
+
+    label = REGION_LABELS.get(region_id, region_id.upper())
+    folder = default_output_folder(region_id)
+    src = last_load_source() or f"data/{region_id}/display.xlsx"
+    if display_items:
+        toast.show(f"{label} · {len(display_items)} 款 Display · 测绘 {len(furniture_templates)} · {src}")
+    else:
+        toast.show(
+            f"{label} · 无 Display（请配置 regions.{region_id}.database_url 并抓取 {folder}/）"
+        )
+
+
 def refresh_display_data(prefer_db: bool = True) -> None:
     global display_items
     try:
         if prefer_db:
-            from display_lookup import grab_and_save
+            from display_lookup import grab_and_save, display_source_label
             from product_images import clear_image_cache
 
             display_items, excel_path = grab_and_save()
@@ -2255,7 +2439,7 @@ def refresh_display_data(prefer_db: bool = True) -> None:
             invalidate_shop_stats_cache()
             gallery_view.sync_search_query()
             gallery_view.invalidate_layout()
-            toast.show(f"已抓取 {len(display_items)} 款 → {os.path.basename(excel_path)}")
+            toast.show(f"已抓取 {len(display_items)} 款 → {display_source_label(excel_path)}")
             return
     except Exception:
         pass
@@ -2273,9 +2457,16 @@ def refresh_display_data(prefer_db: bool = True) -> None:
 
 def handle_gallery_click(mx, my):
     global selected_index, selected_display_key, display_shop
-    global display_survey_filter, display_blacklist_mode
+    global display_survey_filter, display_blacklist_mode, _active_sim_region
     global _last_gallery_display_pick
-    hit = gallery_view.handle_click(mx, my)
+    sw = screen.get_width() if screen else SCREEN_WIDTH
+    gallery_view.tick_search_debounce()
+    hit = gallery_view.handle_click(mx, my, furniture_templates, sw)
+    if isinstance(hit, str) and hit.startswith("region:"):
+        rid = hit.split(":", 1)[1]
+        if rid != _active_sim_region:
+            apply_sim_region(rid, persist=True)
+        return True
     if hit == "back":
         close_gallery()
         return True
@@ -2288,6 +2479,9 @@ def handle_gallery_click(mx, my):
         return True
     if hit == "gallery_paste":
         gallery_paste_model()
+        return True
+    if hit == "gallery_import":
+        gallery_import_from_region_ui()
         return True
     if isinstance(hit, str) and hit.startswith("shop:"):
         display_shop = hit.split(":", 1)[1]
@@ -2308,7 +2502,9 @@ def handle_gallery_click(mx, my):
         key = hit[1]
         item = _find_display_item(key)
         if not item:
+            toast.show("未找到该产品（Display 缓存不同步，请点「刷新」）")
             return True
+        input_search.deactivate()
         blur_inputs()
         now = pygame.time.get_ticks()
         is_double = key == _last_gallery_display_pick["key"] and now - _last_gallery_display_pick["time"] < 400
@@ -2341,17 +2537,12 @@ def main():
     global draw_phase, drag_current, preview_point, polygon_points, l_cut_preview, resizing_handle, editing_template
     global dragging_shape, drag_shape_last_world
     global editing_template, selected_index, editing_mode, app_screen, display_items
+    global _active_sim_region, TEMPLATES_FILE
 
     reload_roi_map()
-    display_items = load_display_items()
-
-    if os.path.isfile(TEMPLATES_FILE):
-        try:
-            load_templates_file()
-        except Exception as exc:
-            show_error("加载模板失败", str(exc))
-    else:
-        prune_templates_against_display(persist=False)
+    cfg = load_grabber_config()
+    _active_sim_region = normalize_region_id(get_active_region(cfg))
+    apply_sim_region(_active_sim_region, persist=False)
 
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
     pygame.display.set_caption(f"家具模板编辑器 v{ui.__version__}")
@@ -2366,6 +2557,8 @@ def main():
 
     while running:
         mouse_pos = pygame.mouse.get_pos()
+        if app_screen == "gallery":
+            gallery_view.tick_search_debounce()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False

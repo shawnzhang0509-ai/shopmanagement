@@ -48,7 +48,7 @@ def dual_placement_badge(name_or_code: str, *, shop_id: str = "all") -> str:
 def format_enhanced_stock_badge(name_or_code: str, *, shop_id: str = "all") -> str:
     from stock_price_lookup import format_stock_badge
 
-    base = format_stock_badge(name_or_code)
+    base = format_stock_badge(name_or_code, shop_id=shop_id)
     extra = dual_placement_badge(name_or_code, shop_id=shop_id)
     if base and extra:
         return f"{base} · {extra}"

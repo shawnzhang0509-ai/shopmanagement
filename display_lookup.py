@@ -28,6 +28,7 @@ EXAMPLE_BLACKLIST_CSV = os.path.join(SCRIPT_DIR, "data", "display_blacklist.exam
 from region_config import (  # noqa: E402
     display_excel_path,
     get_active_region,
+    has_multi_region_config,
     legacy_display_excel_candidates,
     load_region_profile,
     merge_region_config,
@@ -423,6 +424,61 @@ def _cell_str(row: tuple, idx: int | None) -> str:
     return _cell_value(row[idx])
 
 
+def _slot_from_json(d) -> DisplaySlot | None:
+    """缓存 JSON 或内存里的 DisplaySlot / dict → DisplaySlot。"""
+    if isinstance(d, DisplaySlot):
+        qty = int(d.qty or 0)
+        if qty <= 0:
+            return None
+        return d
+    if not isinstance(d, dict):
+        return None
+    qty = int(d.get("qty", 0) or 0)
+    if qty <= 0:
+        return None
+    sid = str(d.get("shop_id", "other"))
+    return DisplaySlot(
+        sid,
+        str(d.get("shop_label") or shop_label(sid)),
+        str(d.get("location", "")),
+        qty,
+    )
+
+
+def _item_from_cache_row(row: dict) -> DisplayItem | None:
+    """display_cache.json 条目 → DisplayItem（勿走 _canonicalize_row，会丢掉 displays）。"""
+    if not isinstance(row, dict):
+        return None
+    code = _cell_value(row.get("product_code"))
+    name = _cell_value(row.get("product_name"))
+    family = _cell_value(row.get("product_family") or row.get("family"))
+    sub_family = _cell_value(row.get("sub_product_family") or row.get("subfamily"))
+    image_url = _cell_value(row.get("image_url") or row.get("imageurl"))
+    stock = _cell_value(row.get("stock_details") or row.get("stock"))
+    is_discontinued = _cell_bool(row.get("is_discontinued"))
+    if not name and not code:
+        return None
+    family = _resolve_family_name(family, name, code)
+    sub_family = _resolve_sub_family_name(sub_family, name, code)
+    display_slots = [s for d in row.get("displays") or [] if (s := _slot_from_json(d))]
+    storage_slots = [s for d in row.get("storages") or [] if (s := _slot_from_json(d))]
+    if not display_slots and not storage_slots and stock:
+        display_slots, storage_slots = parse_placement_stock_details(stock)
+    if not display_slots and not storage_slots:
+        return None
+    return DisplayItem(
+        code or name,
+        name or code,
+        family,
+        sub_family,
+        image_url,
+        stock,
+        is_discontinued,
+        display_slots,
+        storage_slots,
+    )
+
+
 def _row_to_item(row: dict) -> DisplayItem | None:
     code = _cell_value(row.get("product_code") or row.get("sku") or row.get("code"))
     name = _cell_value(row.get("product_name") or row.get("name") or row.get("title"))
@@ -438,31 +494,13 @@ def _row_to_item(row: dict) -> DisplayItem | None:
     raw_displays = row.get("displays")
     raw_storages = row.get("storages")
     if isinstance(raw_displays, list) and raw_displays:
-        display_slots = [
-            DisplaySlot(
-                str(d.get("shop_id", "other")),
-                str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
-                str(d.get("location", "")),
-                int(d.get("qty", 0) or 0),
-            )
-            for d in raw_displays
-            if int(d.get("qty", 0) or 0) > 0
-        ]
+        display_slots = [s for d in raw_displays if (s := _slot_from_json(d))]
     else:
         display_slots, _parsed_storage = parse_placement_stock_details(stock)
         if not raw_storages:
             raw_storages = _parsed_storage
     if isinstance(raw_storages, list) and raw_storages:
-        storage_slots = [
-            DisplaySlot(
-                str(d.get("shop_id", "other")),
-                str(d.get("shop_label", shop_label(str(d.get("shop_id", "other"))))),
-                str(d.get("location", "")),
-                int(d.get("qty", 0) or 0),
-            )
-            for d in raw_storages
-            if int(d.get("qty", 0) or 0) > 0
-        ]
+        storage_slots = [s for d in raw_storages if (s := _slot_from_json(d))]
     else:
         storage_slots = []
     if not display_slots and not storage_slots:
@@ -852,7 +890,7 @@ def load_from_excel(path: str | None = None) -> list[DisplayItem]:
             last_exc = exc
             _last_load_error = f"读取 {os.path.basename(candidate)} 失败: {exc}"
     if best_items and best_source:
-        _last_load_source = os.path.basename(best_source)
+        _last_load_source = display_source_label(best_source)
         if best_score <= 0:
             col = _last_family_column or "ProductFamily"
             _last_load_error = (
@@ -913,6 +951,16 @@ def _resolve_path(path: str) -> str:
     return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
 
 
+def display_source_label(path: str | None) -> str:
+    """状态栏用：相对项目根的路径，便于区分 data/nz vs data/au。"""
+    if not path:
+        return "display.xlsx"
+    try:
+        return os.path.relpath(path, SCRIPT_DIR).replace("\\", "/")
+    except ValueError:
+        return os.path.basename(path)
+
+
 def build_runtime_config(cfg: dict | None = None) -> dict:
     """合并配置并解析 sql / 输出路径（含 active_region）。"""
     base = merge_region_config(cfg)
@@ -945,9 +993,15 @@ def resolve_display_excel_paths() -> list[str]:
 
 
 def resolve_cache_path() -> str:
-    cfg = load_grabber_config()
-    if cfg.get("output_json"):
-        return os.path.join(SCRIPT_DIR, cfg["output_json"])
+    """当前区域 display_cache.json；多区域时不回退根目录 NZ 缓存。"""
+    cfg = build_runtime_config()
+    path = cfg.get("output_json")
+    if path:
+        return path if os.path.isabs(path) else os.path.join(SCRIPT_DIR, path)
+    if has_multi_region_config(load_grabber_config()):
+        folder = cfg.get("output_folder") or "data"
+        folder_abs = folder if os.path.isabs(folder) else os.path.join(SCRIPT_DIR, folder)
+        return os.path.join(folder_abs, "display_cache.json")
     data_json = os.path.join(SCRIPT_DIR, "data", "display_cache.json")
     if os.path.isfile(data_json):
         return data_json
@@ -1422,7 +1476,7 @@ def grab_and_save(cfg: dict | None = None) -> tuple[list["DisplayItem"], str]:
     save_cache(items, runtime["output_json"])
     _display_cache = items
     _last_load_error = None
-    _last_load_source = os.path.basename(excel_path)
+    _last_load_source = display_source_label(excel_path)
     return items, excel_path
 
 
@@ -1439,7 +1493,15 @@ def _load_cache_file(path: str | None = None) -> list[DisplayItem]:
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
     raw = payload.get("items", payload if isinstance(payload, list) else [])
-    return _rows_to_items(raw)
+    items: list[DisplayItem] = []
+    for row in raw:
+        if isinstance(row, DisplayItem):
+            items.append(row)
+            continue
+        it = _item_from_cache_row(row) if isinstance(row, dict) else None
+        if it:
+            items.append(it)
+    return filter_blacklisted(items) if items else []
 
 
 def save_cache(items: list[DisplayItem], path: str | None = None) -> None:
@@ -1463,6 +1525,15 @@ def save_cache(items: list[DisplayItem], path: str | None = None) -> None:
                         "qty": s.qty,
                     }
                     for s in it.displays
+                ],
+                "storages": [
+                    {
+                        "shop_id": s.shop_id,
+                        "shop_label": s.shop_label,
+                        "location": s.location,
+                        "qty": s.qty,
+                    }
+                    for s in it.storages
                 ],
             }
             for it in items
@@ -1508,12 +1579,21 @@ def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
 
     cache_path = resolve_cache_path()
     excel_path = next((p for p in resolve_display_excel_paths() if os.path.isfile(p)), None)
+    if not excel_path:
+        _display_cache = []
+        folder = get_active_region(load_grabber_config())
+        _last_load_error = (
+            f"未找到本区域 Display（{display_excel_path()}），请先在 data/{folder}/ 运行 grab_display 抓取"
+        )
+        _last_load_source = None
+        return []
+
     if _display_cache_is_fresh(cache_path, excel_path):
         items = _load_cache_file(cache_path)
         if items:
             _display_cache = items
             _last_load_error = None
-            _last_load_source = os.path.basename(cache_path)
+            _last_load_source = display_source_label(cache_path)
             return items
 
     items = load_from_excel()
@@ -1521,15 +1601,17 @@ def load_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
         _display_cache = items
         return items
 
-    items = _load_cache_file(cache_path)
-    _display_cache = items
-    if items:
-        _last_load_source = os.path.basename(resolve_cache_path())
-        return items
+    if os.path.isfile(cache_path):
+        items = _load_cache_file(cache_path)
+        if items:
+            _display_cache = items
+            _last_load_source = display_source_label(cache_path)
+            return items
 
+    _display_cache = []
     if _last_load_error is None:
-        _last_load_error = "请先运行 grab_display.bat 抓取数据"
-    return items
+        _last_load_error = "Display Excel 为空或无法读取，请重新 grab_display"
+    return []
 
 
 def reload_display_items(*, prefer_db: bool = False) -> list[DisplayItem]:
