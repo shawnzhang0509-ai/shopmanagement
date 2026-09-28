@@ -5323,7 +5323,9 @@ def start_edit_obstacle_dialog(index=None):
         index = selected_collision
     if index < 0 or index >= len(collision_polygons):
         return
-    metrics = obstacle_rect_metrics(collision_polygons[index]["points"])
+    points = collision_polygons[index]["points"]
+    metrics = obstacle_rect_metrics(points)
+    intrinsic = obstacle_intrinsic_length_width_mm(points)
     cancel_rename_dialog()
     cancel_wall_size_edit()
     cancel_marker_edit_dialog()
@@ -5331,6 +5333,10 @@ def start_edit_obstacle_dialog(index=None):
     obstacle_edit_size_enabled = metrics is not None
     if metrics:
         _, _, length_mm, width_mm = metrics
+        obstacle_edit_length = f"{length_mm / 1000:g}"
+        obstacle_edit_width = f"{width_mm / 1000:g}"
+    elif intrinsic:
+        length_mm, width_mm = intrinsic
         obstacle_edit_length = f"{length_mm / 1000:g}"
         obstacle_edit_width = f"{width_mm / 1000:g}"
     else:
@@ -6664,7 +6670,40 @@ def obstacle_screen_rect(col) -> pygame.Rect:
     return pygame.Rect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
 
 
+def obstacle_quad_edge_lengths_mm(points) -> list[float] | None:
+    """四边形障碍/墙体的四条边长（mm）；旋转后仍等于真实长宽。"""
+    pts: list[tuple[float, float]] = []
+    for p in points or []:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            pts.append((float(p[0]), float(p[1])))
+    if len(pts) != 4:
+        return None
+    lens: list[float] = []
+    for i in range(4):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % 4]
+        lens.append(math.hypot(x2 - x1, y2 - y1))
+    return lens
+
+
+def obstacle_intrinsic_length_width_mm(points) -> tuple[float, float] | None:
+    """矩形障碍的长边、短边（mm），支持自由旋转。"""
+    lens = obstacle_quad_edge_lengths_mm(points)
+    if not lens:
+        return None
+    tol = max(OBSTACLE_SNAP_MM, 50.0)
+    a, b, c, d = sorted(lens, reverse=True)
+    long_side = (a + b) / 2.0 if abs(a - b) <= tol else max(lens)
+    short_side = (c + d) / 2.0 if abs(c - d) <= tol else min(lens)
+    if long_side < 1.0:
+        return None
+    return long_side, max(short_side, 1.0)
+
+
 def obstacle_length_mm(col) -> float:
+    intrinsic = obstacle_intrinsic_length_width_mm(col.get("points"))
+    if intrinsic:
+        return intrinsic[0]
     metrics = obstacle_rect_metrics(col["points"])
     if metrics:
         return metrics[2]
