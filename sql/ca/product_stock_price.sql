@@ -1,12 +1,5 @@
--- 产品库存 + 原价/促销价（按 SKU 一行）
--- 加拿大：下方 CarbineStock / WallsStock 等列名为兼容 Excel 保留，请按 SSMS
---   sql/discover_schema.sql 查 Warehouses 表后，把仓库名改成多伦多/温哥华等实际名称。
--- 用法:
---   SSMS: 改 @SkuFilter = '855' 只查某系列；留空 '' 查全部
---   抓取: python scripts/grab_stock_price.py → data/product_stock_price.xlsx
---
--- 北岛库存 = Carbine Rd Warehouse + Walls / Walls Road / Walls in Transit
--- 南岛库存 = CHCH Gerald Connelly / GC
+-- 加拿大 · 产品库存 + 原价/促销价（按 SKU 一行）
+-- 抓取: python scripts/grab_stock_price.py（active_region=ca）→ data/ca/product_stock_price.xlsx
 
 DECLARE @SkuFilter VARCHAR(20) = '';
 
@@ -38,14 +31,20 @@ SELECT
             ELSE ''
         END
     ) AS ImageUrl,
-    SUM(CASE WHEN TRIM(w.Name) = 'Carbine Rd Warehouse' THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS CarbineStock,
-    SUM(CASE WHEN TRIM(w.Name) IN ('Walls', 'Walls Road', 'Walls in Transit') THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS WallsStock,
-    SUM(CASE WHEN TRIM(w.Name) = 'Carbine Rd Warehouse' THEN ISNULL(s.Quantity, 0) ELSE 0 END)
-    + SUM(CASE WHEN TRIM(w.Name) IN ('Walls', 'Walls Road', 'Walls in Transit') THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS NorthIslandTotal,
-    SUM(CASE WHEN TRIM(w.Name) IN ('CHCH Gerald Connelly', 'GC') THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS GeraldConnellyStock
+    SUM(
+        CASE
+            WHEN w.Name NOT LIKE '%Display%'
+             AND w.Name NOT LIKE '%Storage%'
+            THEN ISNULL(s.Quantity, 0)
+            ELSE 0
+        END
+    ) AS TotalWarehouseStock,
+    0 AS CarbineStock,
+    0 AS WallsStock,
+    0 AS NorthIslandTotal,
+    0 AS GeraldConnellyStock
 FROM [dbo].[Products] p
 
--- 当前生效促销：同一产品多条时取最低 SalePrice
 LEFT JOIN (
     SELECT ProductId, SalePrice, PromotionId
     FROM (
@@ -70,11 +69,34 @@ LEFT JOIN (
 ) promo
     ON promo.ProductId = p.Id
 
--- ↓ ImageUrl 子查询与 sql/display.sql 保持同步 ↓
 LEFT JOIN (
+    SELECT ProductId, RelativeFilePath
+    FROM (
+        SELECT
+            PD.ProductId,
+            D.RelativeFilePath,
+            ROW_NUMBER() OVER (
+                PARTITION BY PD.ProductId
+                ORDER BY
+                    CASE WHEN PD.IsDefaultProductPicture = 1 THEN 0 ELSE 1 END,
+                    D.DateUploadedOnUtc DESC
+            ) AS rn
+        FROM dbo.ProductDocuments PD
+        INNER JOIN dbo.Documents D
+            ON PD.DocumentId = D.Id
+        WHERE NULLIF(LTRIM(RTRIM(D.RelativeFilePath)), '') IS NOT NULL
+    ) t
+    WHERE rn = 1
+) img
+    ON img.ProductId = p.Id
+
+LEFT JOIN [dbo].[Stocks] s
     ON s.ProductId = p.Id
     AND s.StockStatus = 'Normal'
-    AND s.StockOnHoldStatus IS NULL
+    AND (
+        s.StockOnHoldStatus IS NULL
+        OR LTRIM(RTRIM(s.StockOnHoldStatus)) = ''
+    )
 
 LEFT JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id
