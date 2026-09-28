@@ -1725,10 +1725,22 @@ def pointer_angle_deg(pivot, wx, wy):
     return math.degrees(math.atan2(wy - pivot[1], wx - pivot[0]))
 
 
+def _points_after_rotation(snap, angle_delta_deg, *, as_wall: bool) -> list[list[int]]:
+    rotated = rotate_polygon_points(snap, angle_delta_deg, rotation_pivot)
+    if as_wall:
+        normalized = normalize_wall_rectangle_points(rotated)
+        if normalized is not None:
+            return normalized
+    return [[int(round(x)), int(round(y))] for x, y in rotated]
+
+
 def apply_rotation_drag(angle_delta_deg):
     for i, snap in rotation_snapshots.items():
-        rotated = rotate_polygon_points(snap, angle_delta_deg, rotation_pivot)
-        collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in rotated]
+        col = collision_polygons[i]
+        pts = _points_after_rotation(snap, angle_delta_deg, as_wall=obstacle_is_wall(col))
+        if polygon_fully_inside_store(snap) and not polygon_fully_inside_store(pts):
+            continue
+        collision_polygons[i]["points"] = pts
 
 
 def validate_rotated_obstacles(indices, snapshots) -> str | None:
@@ -1751,6 +1763,11 @@ def finish_rotation_drag():
         rotation_snapshots = {}
         return
     indices = list(rotation_snapshots.keys())
+    for i in indices:
+        if obstacle_is_wall(collision_polygons[i]):
+            normalized = normalize_wall_rectangle_points(collision_polygons[i]["points"])
+            if normalized is not None:
+                collision_polygons[i]["points"] = normalized
     err = validate_rotated_obstacles(indices, rotation_snapshots)
     if err:
         for i, snap in rotation_snapshots.items():
@@ -2138,6 +2155,39 @@ def obstacle_can_edit_rect_size(points) -> bool:
     return bool(pts and _is_rectangle_quad(pts))
 
 
+def build_wall_rectangle_at(
+    cx: float,
+    cy: float,
+    ux: float,
+    uy: float,
+    length_mm: float,
+    width_mm: float,
+) -> list[tuple[float, float]]:
+    vx, vy = -uy, ux
+    hl, hw = length_mm / 2.0, width_mm / 2.0
+    return [
+        (cx + sx * ux + sy * vx, cy + sx * uy + sy * vy)
+        for sx, sy in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw))
+    ]
+
+
+def normalize_wall_rectangle_points(points) -> list[list[int]] | None:
+    """旋转/缩放后重建精确矩形，避免逐顶点取整把墙拧歪。"""
+    pts = _parse_quad_points(points)
+    if not pts or not _is_rectangle_quad(pts):
+        return None
+    cx, cy = _quad_centroid(pts)
+    axis = _quad_long_axis_unit(pts)
+    if not axis:
+        return None
+    ux, uy = axis
+    lens = _quad_edge_lengths(pts)
+    length_mm = max(lens)
+    width_mm = min(lens)
+    rebuilt = build_wall_rectangle_at(cx, cy, ux, uy, length_mm, width_mm)
+    return [[int(round(x)), int(round(y))] for x, y in rebuilt]
+
+
 def resize_rotated_rect_points(old_points, length_mm, width_mm):
     """保持旋转角，按长边/短边缩放四边形。"""
     pts = _parse_quad_points(old_points)
@@ -2148,14 +2198,7 @@ def resize_rotated_rect_points(old_points, length_mm, width_mm):
     if not axis:
         return None
     ux, uy = axis
-    vx, vy = -uy, ux
-    hl, hw = length_mm / 2.0, width_mm / 2.0
-    corners: list[tuple[float, float]] = []
-    for sx, sy in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw)):
-        x = cx + sx * ux + sy * vx
-        y = cy + sx * uy + sy * vy
-        corners.append((x, y))
-    return corners
+    return build_wall_rectangle_at(cx, cy, ux, uy, length_mm, width_mm)
 
 
 def resize_obstacle_rect_points(old_points, length_mm, width_mm):
@@ -6488,12 +6531,19 @@ def rotate_selected(direction):
         trials = {}
         for i in selected_collisions:
             rotated = rotate_polygon_points(originals[i], step, (ox, oy))
-            if polygon_fully_inside_store(originals[i]) and not polygon_fully_inside_store(rotated):
+            if obstacle_is_wall(collision_polygons[i]):
+                normalized = normalize_wall_rectangle_points(rotated)
+                pts = normalized if normalized is not None else [
+                    [int(round(x)), int(round(y))] for x, y in rotated
+                ]
+            else:
+                pts = [[int(round(x)), int(round(y))] for x, y in rotated]
+            if polygon_fully_inside_store(originals[i]) and not polygon_fully_inside_store(pts):
                 show_toast("旋转后会移出门店画布")
                 return
-            trials[i] = rotated
+            trials[i] = pts
         for i, pts in trials.items():
-            collision_polygons[i]["points"] = [[int(round(x)), int(round(y))] for x, y in pts]
+            collision_polygons[i]["points"] = pts
         if len(selected_collisions) == 1:
             show_toast(f"已旋转 {collision_polygons[selected_collisions[0]].get('name', '障碍物')}（{rotation_mode_label()}）")
         else:
@@ -7028,41 +7078,50 @@ def draw_store_floor(surface):
     surface.blit(label, (tl[0] + 8, tl[1] + 8))
 
 
-def draw_obstacles(surface):
-    for idx, col in enumerate(collision_polygons):
-        pts = [world_to_screen(x, y) for x, y in col["points"]]
-        selected = idx in selected_collisions
-        is_wall = obstacle_is_wall(col)
+def _draw_one_obstacle(surface, idx: int, col: dict, *, selected: bool) -> None:
+    pts = [world_to_screen(x, y) for x, y in col["points"]]
+    is_wall = obstacle_is_wall(col)
+    if is_wall:
+        fill = (225, 230, 236) if walls_locked else ((210, 218, 228) if not selected else (180, 195, 215))
+        border = (148, 163, 184) if walls_locked else C_WALL
+        label_color = C_WALL
+    else:
+        fill = C_OBSTACLE_SEL if selected else (254, 202, 202)
+        border = C_DANGER if selected else (185, 28, 28)
+        label_color = (127, 29, 29)
+    pygame.draw.polygon(surface, fill, pts)
+    pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
+    if should_show_obstacle_label(col, idx, selected) and not view_interaction_fast_mode():
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
         if is_wall:
-            fill = (225, 230, 236) if walls_locked else ((210, 218, 228) if not selected else (180, 195, 215))
-            border = (148, 163, 184) if walls_locked else C_WALL
-            label_color = C_WALL
+            show_name = selected or col.get("user_named")
+            label_text = wall_label_text(col, show_name=show_name)
+            span_px = wall_screen_length_px(col)
+            font = FONT_TINY if span_px < WALL_LABEL_NAME_MIN_PX else FONT_SMALL
+            pill_bg = (255, 255, 255, 210) if not selected else (232, 240, 255, 235)
+            draw_label_pill(
+                surface,
+                label_text,
+                (cx, cy),
+                font=font,
+                fg=label_color,
+                bg=pill_bg,
+                max_width=max(36, int(span_px * 0.88)),
+            )
         else:
-            fill = C_OBSTACLE_SEL if selected else (254, 202, 202)
-            border = C_DANGER if selected else (185, 28, 28)
-            label_color = (127, 29, 29)
-        pygame.draw.polygon(surface, fill, pts)
-        pygame.draw.polygon(surface, border, pts, 3 if selected else 2)
-        if should_show_obstacle_label(col, idx, selected) and not view_interaction_fast_mode():
-            cx = sum(p[0] for p in pts) / len(pts)
-            cy = sum(p[1] for p in pts) / len(pts)
-            if is_wall:
-                show_name = selected or col.get("user_named")
-                label_text = wall_label_text(col, show_name=show_name)
-                span_px = wall_screen_length_px(col)
-                font = FONT_TINY if span_px < WALL_LABEL_NAME_MIN_PX else FONT_SMALL
-                pill_bg = (255, 255, 255, 210) if not selected else (232, 240, 255, 235)
-                draw_label_pill(
-                    surface,
-                    label_text,
-                    (cx, cy),
-                    font=font,
-                    fg=label_color,
-                    bg=pill_bg,
-                    max_width=max(36, int(span_px * 0.88)),
-                )
-            else:
-                draw_label_pill(surface, obstacle_label_display_name(col), (cx, cy), font=FONT_BODY, fg=label_color)
+            draw_label_pill(surface, obstacle_label_display_name(col), (cx, cy), font=FONT_BODY, fg=label_color)
+
+
+def draw_obstacles(surface):
+    selected_set = set(selected_collisions)
+    for idx, col in enumerate(collision_polygons):
+        if idx in selected_set:
+            continue
+        _draw_one_obstacle(surface, idx, col, selected=False)
+    for idx in selected_collisions:
+        if 0 <= idx < len(collision_polygons):
+            _draw_one_obstacle(surface, idx, collision_polygons[idx], selected=True)
 
 
 def draw_furniture_multi_selection_overlay(surface):
@@ -7915,7 +7974,10 @@ def handle_canvas_click(mx, my, button, shift=False, double=False):
         idx = selected_collision
         push_undo()
         rotation_snapshots = {
-            idx: [tuple(p) for p in collision_polygons[idx]["points"]],
+            idx: [
+                (float(p[0]), float(p[1]))
+                for p in collision_polygons[idx]["points"]
+            ],
         }
         rotation_pivot = obstacle_rotation_pivot(collision_polygons[idx]["points"])
         rotation_start_pointer_angle = pointer_angle_deg(rotation_pivot, wx, wy)
