@@ -1563,6 +1563,22 @@ def normalize_layout_markers(markers: list[dict]) -> list[dict]:
 def wall_segment_endpoints(points):
     metrics = obstacle_rect_metrics(points)
     if not metrics:
+        pts = _parse_quad_points(points)
+        if pts and _is_rectangle_quad(pts):
+            cx, cy = _quad_centroid(pts)
+            axis = _quad_long_axis_unit(pts)
+            if not axis:
+                return None
+            ux, uy = axis
+            lens = _quad_edge_lengths(pts)
+            length_mm = max(lens)
+            width_mm = min(lens)
+            hl = length_mm / 2.0
+            endpoints = (
+                (cx - hl * ux, cy - hl * uy),
+                (cx + hl * ux, cy + hl * uy),
+            )
+            return endpoints, length_mm, width_mm, False
         return None
     cx, cy, length_mm, width_mm = metrics
     xs = [p[0] for p in points]
@@ -1601,6 +1617,35 @@ def resize_wall_by_endpoint(index: int, end_idx: int, wx: float, wy: float) -> b
     endpoints, _, width_mm, horizontal = data
     fixed = endpoints[1 - end_idx]
     wx, wy = snap_world_point(wx, wy)
+    pts = _parse_quad_points(col["points"])
+    if (
+        pts
+        and _is_rectangle_quad(pts)
+        and not obstacle_rect_metrics(col["points"])
+    ):
+        axis = _quad_long_axis_unit(pts)
+        if not axis:
+            return False
+        ux, uy = axis
+        vx, vy = -uy, ux
+        t = (wx - fixed[0]) * ux + (wy - fixed[1]) * uy
+        if abs(t) < WALL_MIN_LENGTH_MM:
+            return False
+        cx = fixed[0] + (t / 2.0) * ux
+        cy = fixed[1] + (t / 2.0) * uy
+        hl = abs(t) / 2.0
+        hw = width_mm / 2.0
+        new_points = [
+            (cx + sx * ux + sy * vx, cy + sx * uy + sy * vy)
+            for sx, sy in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, -hw))
+        ]
+        new_points = clip_obstacle_points(new_points)
+        if len(new_points) < 3 or polygon_area(new_points) <= 1.0:
+            return False
+        if not polygon_fully_inside_store(new_points):
+            return False
+        col["points"] = [[int(round(x)), int(round(y))] for x, y in new_points]
+        return True
     if horizontal:
         new_length = abs(wx - fixed[0])
         if new_length < WALL_MIN_LENGTH_MM:
@@ -2049,11 +2094,75 @@ def rect_points_from_bounds(min_x, min_y, max_x, max_y):
     ]
 
 
+def _parse_quad_points(points) -> list[tuple[float, float]] | None:
+    pts: list[tuple[float, float]] = []
+    for p in points or []:
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            pts.append((float(p[0]), float(p[1])))
+    return pts if len(pts) == 4 else None
+
+
+def _quad_edge_lengths(pts: list[tuple[float, float]]) -> list[float]:
+    return [
+        math.hypot(pts[(i + 1) % 4][0] - pts[i][0], pts[(i + 1) % 4][1] - pts[i][1])
+        for i in range(4)
+    ]
+
+
+def _is_rectangle_quad(pts: list[tuple[float, float]], tol: float | None = None) -> bool:
+    tol = tol if tol is not None else max(OBSTACLE_SNAP_MM, 50.0)
+    lens = _quad_edge_lengths(pts)
+    a, b, c, d = sorted(lens, reverse=True)
+    return abs(a - b) <= tol and abs(c - d) <= tol and c >= 1.0
+
+
+def _quad_centroid(pts: list[tuple[float, float]]) -> tuple[float, float]:
+    return sum(p[0] for p in pts) / 4.0, sum(p[1] for p in pts) / 4.0
+
+
+def _quad_long_axis_unit(pts: list[tuple[float, float]]) -> tuple[float, float] | None:
+    lens = _quad_edge_lengths(pts)
+    best_i = max(range(4), key=lambda i: lens[i])
+    ln = lens[best_i]
+    if ln < 1.0:
+        return None
+    p0, p1 = pts[best_i], pts[(best_i + 1) % 4]
+    return (p1[0] - p0[0]) / ln, (p1[1] - p0[1]) / ln
+
+
+def obstacle_can_edit_rect_size(points) -> bool:
+    """轴对齐或自由旋转的矩形墙/障碍可对话框改尺寸；L 形等多边形不行。"""
+    if obstacle_rect_metrics(points):
+        return True
+    pts = _parse_quad_points(points)
+    return bool(pts and _is_rectangle_quad(pts))
+
+
+def resize_rotated_rect_points(old_points, length_mm, width_mm):
+    """保持旋转角，按长边/短边缩放四边形。"""
+    pts = _parse_quad_points(old_points)
+    if not pts or not _is_rectangle_quad(pts):
+        return None
+    cx, cy = _quad_centroid(pts)
+    axis = _quad_long_axis_unit(pts)
+    if not axis:
+        return None
+    ux, uy = axis
+    vx, vy = -uy, ux
+    hl, hw = length_mm / 2.0, width_mm / 2.0
+    corners: list[tuple[float, float]] = []
+    for sx, sy in ((-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw)):
+        x = cx + sx * ux + sy * vx
+        y = cy + sx * uy + sy * vy
+        corners.append((x, y))
+    return corners
+
+
 def resize_obstacle_rect_points(old_points, length_mm, width_mm):
     """按用户输入的长宽生成矩形；贴门店边/贴边的障碍以边为锚点扩展，避免中心缩放被裁切。"""
     metrics = obstacle_rect_metrics(old_points)
     if not metrics:
-        return None
+        return resize_rotated_rect_points(old_points, length_mm, width_mm)
     cx, cy, _, _ = metrics
     xs = [float(p[0]) for p in old_points]
     ys = [float(p[1]) for p in old_points]
@@ -5330,7 +5439,7 @@ def start_edit_obstacle_dialog(index=None):
     cancel_wall_size_edit()
     cancel_marker_edit_dialog()
     toggle_draw_obstacle(False)
-    obstacle_edit_size_enabled = metrics is not None
+    obstacle_edit_size_enabled = obstacle_can_edit_rect_size(points)
     if metrics:
         _, _, length_mm, width_mm = metrics
         obstacle_edit_length = f"{length_mm / 1000:g}"
