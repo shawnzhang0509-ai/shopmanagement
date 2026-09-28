@@ -2040,6 +2040,96 @@ def rect_points_centered(cx, cy, length_mm, width_mm):
     ]
 
 
+def rect_points_from_bounds(min_x, min_y, max_x, max_y):
+    return [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y),
+    ]
+
+
+def resize_obstacle_rect_points(old_points, length_mm, width_mm):
+    """按用户输入的长宽生成矩形；贴门店边/贴边的障碍以边为锚点扩展，避免中心缩放被裁切。"""
+    metrics = obstacle_rect_metrics(old_points)
+    if not metrics:
+        return None
+    cx, cy, _, _ = metrics
+    xs = [float(p[0]) for p in old_points]
+    ys = [float(p[1]) for p in old_points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    length_along_x = span_x >= span_y
+    if length_along_x:
+        new_span_x, new_span_y = float(length_mm), float(width_mm)
+    else:
+        new_span_x, new_span_y = float(width_mm), float(length_mm)
+
+    tol = OBSTACLE_SNAP_MM / 2 + 1
+    touch_l = min_x <= tol
+    touch_r = max_x >= store_width_mm - tol
+    touch_t = min_y <= tol
+    touch_b = max_y >= store_height_mm - tol
+
+    if not length_along_x and length_mm >= store_height_mm - tol * 2:
+        touch_t = True
+        touch_b = True
+    if length_along_x and length_mm >= store_width_mm - tol * 2:
+        touch_l = True
+        touch_r = True
+
+    new_span_x = min(new_span_x, float(store_width_mm))
+    new_span_y = min(new_span_y, float(store_height_mm))
+
+    sw = float(store_width_mm)
+    sh = float(store_height_mm)
+
+    if touch_l and touch_r:
+        nmin_x, nmax_x = 0.0, sw
+    elif touch_l:
+        nmin_x, nmax_x = 0.0, new_span_x
+    elif touch_r:
+        nmax_x = sw
+        nmin_x = nmax_x - new_span_x
+    else:
+        nmin_x = cx - new_span_x / 2.0
+        nmax_x = cx + new_span_x / 2.0
+        if nmin_x < 0:
+            nmax_x -= nmin_x
+            nmin_x = 0.0
+        if nmax_x > sw:
+            nmin_x -= nmax_x - sw
+            nmax_x = sw
+
+    if touch_t and touch_b:
+        nmin_y, nmax_y = 0.0, sh
+    elif touch_t:
+        nmin_y = 0.0
+        nmax_y = new_span_y
+    elif touch_b:
+        nmax_y = sh
+        nmin_y = nmax_y - new_span_y
+    else:
+        nmin_y = cy - new_span_y / 2.0
+        nmax_y = cy + new_span_y / 2.0
+        if nmin_y < 0:
+            nmax_y -= nmin_y
+            nmin_y = 0.0
+        if nmax_y > sh:
+            nmin_y -= nmax_y - sh
+            nmax_y = sh
+
+    nmin_x = max(0.0, nmin_x)
+    nmin_y = max(0.0, nmin_y)
+    nmax_x = min(sw, nmax_x)
+    nmax_y = min(sh, nmax_y)
+    if nmax_x - nmin_x < 1.0 or nmax_y - nmin_y < 1.0:
+        return None
+    return rect_points_from_bounds(nmin_x, nmin_y, nmax_x, nmax_y)
+
+
 def obstacle_rect_metrics(points, tol=None):
     """Axis-aligned rectangle obstacles return (cx, cy, length_mm, width_mm)."""
     if tol is None:
@@ -2092,22 +2182,17 @@ def obstacle_rect_metrics(points, tol=None):
 
 def resize_obstacle_rect(index, length_m, width_m) -> bool:
     col = collision_polygons[index]
-    metrics = obstacle_rect_metrics(col["points"])
-    if not metrics:
-        return False
-    cx, cy, _, _ = metrics
     length_mm = length_m * 1000
     width_mm = width_m * 1000
-    xs = [p[0] for p in col["points"]]
-    ys = [p[1] for p in col["points"]]
-    span_x = max(xs) - min(xs)
-    span_y = max(ys) - min(ys)
-    if span_x >= span_y:
-        new_points = rect_points_centered(cx, cy, length_mm, width_mm)
-    else:
-        new_points = rect_points_centered(cx, cy, width_mm, length_mm)
+    new_points = resize_obstacle_rect_points(col["points"], length_mm, width_mm)
+    if not new_points:
+        return False
     new_points = clip_obstacle_points(new_points)
-    if len(new_points) < 3 or polygon_area(new_points) <= 1.0:
+    target_area = length_mm * width_mm
+    actual_area = polygon_area(new_points)
+    if len(new_points) < 3 or actual_area <= 1.0:
+        return False
+    if target_area > 1.0 and actual_area < target_area * 0.85:
         return False
     if obstacle_is_zone(col):
         overlaps, other_name = zone_overlaps_any(new_points, index)
